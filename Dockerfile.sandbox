@@ -1,0 +1,24 @@
+# PHP + Composer sandbox image used by DockerRunner to execute generated code.
+#
+# Build:
+#   docker build -t hello-world-sandbox -f Dockerfile.sandbox .
+#
+# The orchestrator mounts the cloned repository at /app and runs:
+#   ./vendor/bin/phpunit --testdox
+FROM php:8.2-cli
+
+# System libraries required by common PHP extensions
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    unzip \
+    git \
+    libzip-dev \
+    && docker-php-ext-install zip pdo pdo_mysql \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+WORKDIR /app
+
+# Default command: install dependencies then run tests
+CMD ["bash", "-c", "composer install --no-interaction --prefer-dist && ./vendor/bin/phpunit --testdox"]

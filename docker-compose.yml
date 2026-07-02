@@ -1,0 +1,49 @@
+#version: "3.9"
+
+services:
+  ai-developer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-developer:latest
+    container_name: ai-developer
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Mount Docker socket so the orchestrator can spin up the sandbox container
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Optional: persist logs on the host
+      - ./logs:/orchestrator/logs
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-60}
+    command: ["--loop"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    # extra_hosts:
+    #  - "gitlab.yourdomain.com:192.168.A.B"
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai-dev-redis
+    restart: unless-stopped
+    # AOF persistence: fsync every second → safe across stop/start, ~1s worst-case loss.
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    ports:
+      # Bind to localhost only – Redis is not exposed outside this host.
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  # Survives `docker-compose stop` and `docker-compose down`.
+  # Removed only by `docker-compose down -v`.
+  redis_data:
+    driver: local
