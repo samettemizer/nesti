@@ -37,7 +37,7 @@ pipeline retries, the model sees its previous attempt and the failure output.
 | MariaDB        | `192.168.100.3:3306`        | Schema reference (read-only)      |
 | Redis          | `ai-dev-redis:6379`         | Conversation history              |
 
-Local LLM providers (Hermes-3 and Qwen3) are disabled by default (`HERMES3_LLM_ENABLED=false`, `LOCAL_LLM_ENABLED=false`) as they require dedicated GPU hardware.<br>The system runs on paid APIs out of the box and degrades gracefully.
+Local LLM providers (Hermes-3 and Qwen3) are disabled by default (`HERMES3_LLM_ENABLED=false`, `LOCAL_LLM_ENABLED=false`) as they require dedicated GPU hardware.
 
 ---
 
