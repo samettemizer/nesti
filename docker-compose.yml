@@ -13,6 +13,8 @@ services:
     volumes:
       # Mount Docker socket so the orchestrator can spin up the sandbox container
       - /var/run/docker.sock:/var/run/docker.sock
+      # Orchestrator creates /tmp/ai-dev-<id>-<rand>/repo inside this volume;
+      - /tmp:/tmp
       # Optional: persist logs on the host
       - ./logs:/orchestrator/logs
     environment:
