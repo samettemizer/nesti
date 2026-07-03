@@ -28,18 +28,18 @@ pipeline retries, the model sees its previous attempt and the failure output.
 
 ## Example Topology
 
-| Service        | Example address             | Role                              |
-|----------------|-----------------------------|-----------------------------------|
-| Redmine        | `192.168.100.1:3000`        | Issue intake                      |
-| GitLab         | `https://gitlab.yourdomain.com` | Repository + merge requests   |
-| Hermes-3       | `192.168.100.4:11434`       | Primary planner (optional, local) |
-| Qwen3:30b      | `192.168.100.2:11434`       | Primary coder (optional, local)   |
-| DeepSeek API   | `api.deepseek.com`          | Mid-tier paid fallback            |
-| Claude Sonnet  | `api.anthropic.com`         | Last-resort fallback              |
-| MariaDB        | `192.168.100.3:3306`        | Schema reference (read-only)      |
-| Redis          | `ai-dev-redis:6379`         | Conversation history              |
+| Service         | Addr                            | Role                              |
+|-----------------|---------------------------------|-----------------------------------|
+| GitLab          | `https://gitlab.yourdomain.com` | Repository + merge requests       |
+| Redmine         | `192.168.100.1:3000`            | Issue intake                      |
+| Qwen3:30b       | `192.168.100.2:11434`           | Primary coder (optional, local)   |
+| MariaDB         | `192.168.100.3:3306`            | Schema reference (read-only)      |
+| Hermes-3        | `192.168.100.4:11434`           | Primary planner (optional, local) |
+| Redis           | `ai-dev-redis:6379`             | Conversation history              |
+| DeepSeek API    | `api.deepseek.com`              | Mid-tier paid fallback            |
+| Claude (Sonnet) | `api.anthropic.com`             | Last-resort fallback              |
 
-Local LLM providers (Hermes-3 and Qwen3) are disabled by default (`HERMES3_LLM_ENABLED=false`, `LOCAL_LLM_ENABLED=false`) as they require dedicated GPU hardware.
+Local LLM providers (Hermes-3, Qwen3) are disable by default (`HERMES3_LLM_ENABLED=false`, `LOCAL_LLM_ENABLED=false`) as they require dedicated strong GPU/hardware.
 
 ---
 
