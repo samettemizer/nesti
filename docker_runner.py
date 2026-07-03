@@ -13,10 +13,10 @@ The AI developer never runs code on the host machine directly.
 import logging
 import os
 import re
-from itertools import count
 from pathlib import Path
 
 import docker
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +43,9 @@ class DockerRunner:
             output  – Combined stdout + stderr from the container.
         """
         logger.info("Running tests in Docker sandbox (image: %s) …", self.image)
+        container = None
         try:
-            result = self.client.containers.run(
+            container = self.client.containers.run(
                 image=self.image,
                 command="bash -c 'composer install --no-interaction --prefer-dist && ./vendor/bin/phpunit --testdox'",
                 volumes={
@@ -54,18 +55,23 @@ class DockerRunner:
                     }
                 },
                 working_dir=self.workdir,
-                remove=True,
+                remove=False,
                 stdout=True,
                 stderr=True,
-                timeout=self.timeout
+                detach=True,
             )
-            output = result.decode("utf-8", errors="replace")
-            logger.info("Tests passed.")
-            return True, output
-        except docker.errors.ContainerError as exc:
-            output = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else str(exc)
-            logger.warning("Tests FAILED:\n%s", output)
+            exit_info = container.wait(timeout=self.timeout)
+            output = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+            exit_code = exit_info["StatusCode"]
+            if exit_code == 0:
+                logger.info("Tests passed.")
+                return True, output
+            logger.warning("Tests FAILED (exit code %d):\n%s", exit_code, output)
             return False, output
+        except requests.exceptions.ReadTimeout:
+            msg = f"Container timed out after {self.timeout}s."
+            logger.error(msg)
+            return False, msg
         except docker.errors.ImageNotFound:
             msg = f"Docker image '{self.image}' not found. Build it first."
             logger.error(msg)
@@ -73,6 +79,12 @@ class DockerRunner:
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Unexpected Docker error: %s", exc)
             return False, str(exc)
+        finally:
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except Exception:  # pylint: disable=broad-except
+                    pass
 
     # ------------------------------------------------------------------
     # File helpers

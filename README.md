@@ -1,4 +1,6 @@
-# Nesti – autonomous web developer orchestrator
+# Nesti — autonomous developer
+
+## Goal
 
 A self-contained orchestrator that reads Redmine issues, generates code through
 a cascading LLM pipeline, validates it in a Docker sandbox, and opens GitLab
@@ -6,7 +8,7 @@ Merge Requests
 
 ---
 
-## How It Works
+## How it works
 
 ```
 Redmine issue
