@@ -57,7 +57,7 @@ class GitLabClient:
         logger.info("Cloning %s into %s …", self.project_path, target_path)
         repo = git.Repo.clone_from(clone_url, target_path)
         repo.config_writer().set_value("user", "name", "AI Developer").release()
-        repo.config_writer().set_value("user", "email", "ai-developer@yourdomain.com").release()
+        repo.config_writer().set_value("user", "email", "nesti@yourdomain.com").release()
         return repo
 
     def create_branch(self, repo: git.Repo, issue_id: int, subject: str) -> str:

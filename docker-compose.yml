@@ -1,12 +1,10 @@
-#version: "3.9"
-
 services:
-  ai-developer:
+  nesti-orchestrator:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ai-developer:latest
-    container_name: ai-developer
+    image: nesti-orchestrator:latest
+    container_name: nesti-orchestrator
     restart: unless-stopped
     env_file:
       - .env
@@ -14,6 +12,8 @@ services:
       # Mount Docker socket so the orchestrator can spin up the sandbox container
       - /var/run/docker.sock:/var/run/docker.sock
       # Orchestrator creates /tmp/ai-dev-<id>-<rand>/repo inside this volume;
+      # the path must be identical on host and container because the sandbox
+      # is mounted by the HOST Docker daemon (via the socket above).
       - /tmp:/tmp
       # Optional: persist logs on the host
       - ./logs:/orchestrator/logs
@@ -22,19 +22,17 @@ services:
       - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-60}
     command: ["--loop"]
     depends_on:
-      redis:
+      nesti-redis:
         condition: service_healthy
-    # extra_hosts:
-    #  - "gitlab.yourdomain.com:192.168.A.B"
 
-  redis:
+  nesti-redis:
     image: redis:7-alpine
-    container_name: ai-dev-redis
+    container_name: nesti-redis
     restart: unless-stopped
     # AOF persistence: fsync every second → safe across stop/start, ~1s worst-case loss.
     command: redis-server --appendonly yes --appendfsync everysec
     volumes:
-      - redis_data:/data
+      - nesti_redis_data:/data
     ports:
       # Bind to localhost only – Redis is not exposed outside this host.
       - "127.0.0.1:6379:6379"
@@ -44,8 +42,29 @@ services:
       timeout: 3s
       retries: 5
 
+  nesti-mcp:
+    build:
+      context: .
+      dockerfile: mcp_server/Dockerfile
+    image: nesti-mcp:latest
+    container_name: nesti-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same host-path contract as the orchestrator: gitlab_clone and
+      # docker_run_tests operate on /tmp workspaces that the host Docker
+      # daemon must be able to see when mounting the sandbox container.
+      - /tmp:/tmp
+    stdin_open: true
+    tty: true
+    depends_on:
+      nesti-redis:
+        condition: service_healthy
+
 volumes:
   # Survives `docker-compose stop` and `docker-compose down`.
   # Removed only by `docker-compose down -v`.
-  redis_data:
+  nesti_redis_data:
     driver: local
