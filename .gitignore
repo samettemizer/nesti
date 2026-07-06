@@ -25,7 +25,8 @@ logs/
 *.log
 
 # IDE
-.vscode/
+.vscode/*
+!.vscode/*.example
 .idea/
 *.swp
 *.swo

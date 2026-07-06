@@ -35,7 +35,8 @@ pipeline retries, the model sees its previous attempt and the failure output.
 | Qwen3:30b       | `192.168.100.2:11434`           | Primary coder (optional, local)   |
 | MariaDB         | `192.168.100.3:3306`            | Schema reference (read-only)      |
 | Hermes-3        | `192.168.100.4:11434`           | Primary planner (optional, local) |
-| Redis           | `ai-dev-redis:6379`             | Conversation history              |
+| Redis           | `nesti-redis:6379`              | Conversation history              |
+| Nesti MCP       | stdio via `docker exec`         | Tools for Claude Code / IDEs      |
 | DeepSeek API    | `api.deepseek.com`              | Mid-tier paid fallback            |
 | Claude (Sonnet) | `api.anthropic.com`             | Last-resort fallback              |
 
@@ -59,11 +60,23 @@ docker build -t hello-world-sandbox -f Dockerfile.sandbox .
 **3. Start**
 ```bash
 docker-compose up --build -d
-docker-compose logs -f ai-developer
+docker-compose logs -f nesti-orchestrator
 ```
 
-Redis starts automatically as a dependency and persists conversation history
-across restarts via a named Docker volume.
+This starts three containers: `nesti-orchestrator`, `nesti-redis`, and
+`nesti-mcp`. Redis starts automatically as a dependency and persists
+conversation history across restarts via the named `nesti_redis_data` volume.
+
+**4. Connect the MCP server (optional)**
+```bash
+# Claude Code CLI:
+claude mcp add nesti docker exec -i nesti-mcp python -m mcp_server.server
+
+# Verify:
+claude mcp list
+```
+VS Code users: the bundled `.vscode/mcp.json` registers the same server for
+the Claude extension automatically.
 
 ---
 
@@ -88,6 +101,10 @@ graph/
   nodes.py                 ← LangGraph nodes
   edges.py                 ← conditional routing
   builder.py               ← compiled StateGraph
+mcp_server/
+  server.py                ← MCP stdio server (FastMCP), Phase 3
+  tools/                   ← Redmine, GitLab, Docker, skill MCP tools
+  Dockerfile               ← standalone nesti-mcp container
 conversation_store.py      ← Redis-backed per-issue message history
 llm_client.py              ← provider cascade with multi-turn support
 prompt_builder.py          ← system + user prompt construction
@@ -97,6 +114,23 @@ gitlab_client.py           ← clone, branch, commit, push, MR
 docker_runner.py           ← Unit test sandbox execution
 telegram_notifier.py       ← failure alerts (optional)
 ```
+
+---
+
+## MCP Server (Phase 3)
+
+`nesti-mcp` exposes all nine `graph/tools.py` functions plus two skill tools
+over the Model Context Protocol (stdio transport). Any MCP-compatible client —
+Claude Code CLI, VS Code Claude extension, Cursor — can drive the same
+Redmine/GitLab/Docker toolchain the orchestrator uses, e.g.:
+
+```
+@nesti redmine_list_pending
+@nesti docker_run_tests /tmp/ai-dev-241-xyz/repo
+```
+
+The MCP server runs alongside the orchestrator; it does not replace it.
+Every tool returns the uniform `{"success": bool, ...}` shape.
 
 ---
 
@@ -110,7 +144,7 @@ See `.env.example` for all variables. Key ones:
 | `DEEPSEEK_API_KEY` | Recommended | — |
 | `REDMINE_URL` + `REDMINE_API_KEY` | **Yes** | — |
 | `GITLAB_URL` + `GITLAB_TOKEN` | **Yes** | — |
-| `REDIS_URL` | No | `redis://ai-dev-redis:6379/0` |
+| `REDIS_URL` | No | `redis://nesti-redis:6379/0` |
 | `HERMES3_LLM_URL` | No | — |
 | `LOCAL_LLM_URL` | No | — |
 | `MAX_CODE_RETRIES` | No | `2` |

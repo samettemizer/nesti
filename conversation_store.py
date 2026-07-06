@@ -23,7 +23,7 @@ import redis
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_REDIS_URL = "redis://ai-dev-redis:6379/0"
+_DEFAULT_REDIS_URL = "redis://nesti-redis:6379/0"
 _DEFAULT_TTL_DAYS = 7
 _SOCKET_CONNECT_TIMEOUT = 3  # seconds
 _KEY_PREFIX = "ai-dev:issue:"
