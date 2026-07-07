@@ -85,7 +85,7 @@ the Claude extension automatically.
 Any HTTP/HTTPS URL in a Redmine issue subject or description is fetched
 automatically and injected into the planning prompt as context.
 
-See [`REDMINE_ISSUE_GUIDELINE.md`](REDMINE_ISSUE_GUIDELINE.md) for full issue
+See [`ISSUE_GUIDELINE.md`](ISSUE_GUIDELINE.md) for full issue
 format and examples.
 
 ---
