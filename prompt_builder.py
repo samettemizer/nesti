@@ -48,7 +48,10 @@ PLANNING STANDARDS:
 - List all application layers involved (routes, controllers, services,
   repositories, models, views, tests).
 - Flag any ambiguities or risks explicitly.
-- Define the PHPUnit test cases that the implementation must satisfy.
+- Define the test cases the implementation must satisfy, in the layers the
+  task actually touches: PHPUnit for PHP, Vitest (component) and Playwright
+  (E2E) for Vue.js. A frontend-only task defines no PHPUnit cases; a
+  backend-only task defines no Vitest or Playwright cases.
 - If skill documentation is supplied in the prompt, incorporate its guidance
   into the plan and reference the source URL where relevant.
 
@@ -65,11 +68,55 @@ on the "{_DEFAULT_BRANCH}" branch.
 {_RULES}
 
 CODING STANDARDS:
-- Follow PSR-12 coding standards.
 - Match the existing code style of the project.
 - Do not create unnecessary files.
-- Write PHPUnit tests for every code change.
+- Every change ships with tests in its own layer (see TESTING below).
 - If unsure about something, state your assumptions explicitly instead of guessing.
+
+BACKEND REQUIREMENTS (when generating PHP):
+- Follow PSR-12 coding standards.
+- Write a PHPUnit test for every PHP change.
+
+FRONTEND REQUIREMENTS (when generating Vue.js code):
+- Use the Composition API with <script setup>. Do NOT use @vue/compat or the
+  Options API unless the project explicitly uses it.
+- Always generate a valid package.json with these devDependencies:
+    "vitest": "^2.0.0"
+    "@vue/test-utils": "^2.0.0"
+    "@vitejs/plugin-vue": "^5.0.0"
+    "@playwright/test": "1.50.0"   <- exact, no caret: it must match the
+                                      browsers in the E2E sandbox image
+  and these scripts:
+    "test": "vitest run"
+    "build": "vite build"
+    "preview": "vite preview"
+- Generate component tests in __tests__/ directories alongside the .vue files.
+  Test file naming: ComponentName.test.js
+- Generate Playwright E2E tests in e2e/ at the repository root.
+  Test file naming: feature-name.spec.js
+- Generate vite.config.js (using @vitejs/plugin-vue) and playwright.config.js
+  with webServer.command = "npm run preview" and
+  webServer.url = "http://localhost:4173".
+- Generate vitest.config.js with environment "jsdom" AND an exclude list that
+  keeps Vitest out of the Playwright specs — otherwise Vitest collects
+  e2e/*.spec.js and the run dies:
+    import {{ configDefaults, defineConfig }} from "vitest/config";
+    export default defineConfig({{
+      plugins: [vue()],
+      test: {{ environment: "jsdom",
+               exclude: [...configDefaults.exclude, "e2e/**"] }},
+    }});
+  Add "jsdom" to devDependencies when you use that environment.
+
+TESTING:
+- The test layers that run are detected automatically from the files you
+  produce: PHP code is tested with PHPUnit, .vue code with Vitest and then
+  Playwright. A task that touches both is tested by all three.
+- A frontend-only task needs NO PHPUnit test and NO PHP file. Do not invent
+  backend code, a composer.json, or a PHP test just to have something for the
+  backend layer — that layer is skipped when the task produces no PHP.
+- The reverse also holds: a backend-only task needs no package.json and no
+  Vue, Vitest, or Playwright files.
 
 OUTPUT FORMAT – use this exact format for every file you produce:
 
@@ -146,7 +193,9 @@ Produce a numbered implementation plan covering:
 2. Files to create (path + purpose)
 3. Files to modify (path + what changes and why)
 4. Implementation steps per file (method names, logic, data flow)
-5. PHPUnit test cases that must pass (class name + method names)
+5. Test cases that must pass, grouped by the layers this task touches
+   (PHPUnit / Vitest / Playwright) — file name + test names. Omit any layer
+   the task does not touch.
 6. Risks or ambiguities (if any)
 
 Write the plan now. No code, no preamble.\
@@ -207,7 +256,8 @@ Redmine Issue #{issue_id}: {subject}
 Implement the approved plan above:
 - Produce every file listed in the plan using the FILE format.
 - Files must be complete and immediately deployable.
-- Include PHPUnit test files.
+- Include the test files for every layer the plan touches (PHPUnit for PHP,
+  Vitest + Playwright for Vue.js). Skip the layers the plan does not touch.
 - Do NOT touch the database schema.\
 """
     return CODING_SYSTEM_PROMPT, user_prompt

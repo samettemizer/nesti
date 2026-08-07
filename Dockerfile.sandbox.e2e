@@ -1,0 +1,34 @@
+# Playwright sandbox image used by FrontendRunner to run E2E tests.
+#
+# Build:
+#   docker build -t nesti-sandbox-e2e -f Dockerfile.sandbox.e2e .
+#
+# Selected via DOCKER_SANDBOX_E2E_IMAGE.  The base image already bundles
+# Node.js, the browsers, and every system dependency they need.
+#
+# Version contract: the browsers baked into this image are the ones shipped
+# with Playwright 1.50, so the generated package.json pins "@playwright/test"
+# to exactly "1.50.0" (enforced by CODING_SYSTEM_PROMPT).  The pin is exact,
+# not "^1.50.0": a caret lets npm resolve a newer minor whose browser builds
+# this image does not carry, and Playwright then refuses to launch with
+# "Executable doesn't exist at /ms-playwright/…". That is not hypothetical —
+# ^1.50.0 currently resolves well past 1.50.
+FROM mcr.microsoft.com/playwright:v1.50.0-jammy
+
+WORKDIR /app
+
+# Same two-step lockfile fallback as the Node sandbox — missing lockfile falls
+# back to `npm install`, stale lockfile falls through `npm ci` to `npm install`
+# (see Dockerfile.sandbox.node for the full reasoning).
+#
+# `npm run build` is not optional: playwright.config.js serves the app through
+# `vite preview`, which only serves an already-built dist/ directory.  Without
+# the build step webServer would time out on every run.
+#
+# `playwright install chromium` is the self-healing half of the version
+# contract above.  When the resolved client matches the image it finds the
+# browser already in /ms-playwright and returns in milliseconds; when a drifted
+# pin slips through it fetches the matching build instead of failing the whole
+# E2E layer on an infrastructure mismatch the model cannot fix by rewriting
+# its code.  Only chromium is fetched — the suite runs headless Chromium.
+CMD ["sh", "-c", "if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi && npx playwright install chromium && npm run build && npx playwright test --reporter=list"]

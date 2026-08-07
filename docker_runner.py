@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 class DockerRunner:
     def __init__(self):
-        self.image = os.environ.get("DOCKER_SANDBOX_IMAGE", "hello-world-sandbox")
+        self.image = os.environ.get("DOCKER_SANDBOX_PHP_IMAGE", "nesti-sandbox-php")
         self.workdir = os.environ.get("DOCKER_SANDBOX_WORKDIR", "/app")
         self.timeout = int(os.environ.get("DOCKER_SANDBOX_TIMEOUT", "120"))
         self.client = docker.from_env()

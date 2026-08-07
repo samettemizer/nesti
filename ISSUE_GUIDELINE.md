@@ -183,6 +183,20 @@ PHPUnit (backend)  →  Vitest (component tests)  →  Playwright (E2E tests)
 **Stack detection is automatic.** If the generated code contains `.vue` files,
 the frontend test layers run. No declaration is needed in the issue.
 
+**Frontend-only issues are fully supported.** Not every website change has a
+backend part. When an issue produces Vue code and no PHP, the PHPUnit layer is
+skipped entirely and only Vitest and Playwright decide the outcome:
+
+| Your issue produces | Layers that run |
+|---------------------|-----------------|
+| PHP only | PHPUnit |
+| Vue only (no PHP, no `composer.json`) | Vitest → Playwright |
+| Both | PHPUnit → Vitest → Playwright |
+
+Do **not** add backend requirements to a purely visual or client-side issue
+just to give PHPUnit something to run — that only widens the change and makes
+failures harder to read.
+
 ### What the system generates for Vue issues
 
 - Component tests in `__tests__/` directories (Vitest + Vue Test Utils)
@@ -301,7 +315,6 @@ Requirements:
 - On confirm, POST files to /api/media/upload (multipart/form-data).
 - Show upload progress per file using the FileUpload progress feature.
 - On success, emit an "uploaded" event with the list of new file URLs.
-- Do NOT create new database tables; the existing media table is sufficient.
 
 Acceptance Criteria:
 - Clicking "Upload" in the media library opens the dialog
@@ -358,7 +371,6 @@ Requirements:
 | Skill URL unreachable or behind auth | Fetch fails, Telegram warning fires | Verify the URL is publicly accessible before submitting |
 | Skill document too large (>12,000 chars) | Content is truncated at 12,000 chars | Split the document or link only the relevant component page |
 | Multiple unrelated features in one issue | Planning and code quality degrade | Open a separate issue per feature |
-| Requesting schema changes (`CREATE TABLE`, migrations) | The system categorically refuses | Define features using existing tables only |
 | More than 4 skill URLs | Context budget overflows, later URLs get cut | Split the issue or pick the most critical URLs |
 | Editing an issue after it moved to In Progress | The run captured the text at pickup; later edits are invisible to it | Wait for the result, then update the reopened issue and let it re-run |
 | Frontend criteria written as implementation details | Cannot be converted into Playwright assertions | Describe observable user behaviour instead |
@@ -369,8 +381,10 @@ Requirements:
 
 Understanding the retry loop helps you write better issues:
 
-1. Code is generated and all applicable test layers run
-   (PHPUnit → Vitest → Playwright).
+1. Code is generated, the stack is detected, and the applicable test layers run
+   in order (PHPUnit → Vitest → Playwright). Layers that do not apply to your
+   issue are skipped, and the layers are gates: a red one stops the next from
+   starting.
 2. If any layer fails, the failure output is **appended to the conversation
    history** — the model sees exactly what it produced and why it failed.
 3. The provider tier escalates (local → DeepSeek → Claude Sonnet; disabled

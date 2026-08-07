@@ -1,7 +1,10 @@
 # PHP + Composer sandbox image used by DockerRunner to execute generated code.
 #
 # Build:
-#   docker build -t hello-world-sandbox -f Dockerfile.sandbox .
+#   docker build -t nesti-sandbox-php -f Dockerfile.sandbox .
+#
+# Selected via DOCKER_SANDBOX_PHP_IMAGE.  The Node (Vitest) and Playwright
+# (E2E) sandboxes live in Dockerfile.sandbox.node and Dockerfile.sandbox.e2e.
 #
 # The orchestrator mounts the cloned repository at /app and runs:
 #   ./vendor/bin/phpunit --testdox

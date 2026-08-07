@@ -22,6 +22,13 @@ Design notes
   would open an empty "successful" Merge Request.  node_test short-circuits
   to a failure when this flag is False, preserving the Phase 1
   no-FILE-blocks retry-with-feedback behaviour.
+
+• ``run_phpunit`` (Phase 4) is stored next to the descriptive ``stack`` label
+  because the two answer different questions.  ``stack`` says what the code
+  *is*; ``run_phpunit`` says whether the backend layer can be executed at all.
+  A frontend-only repository has no composer.json, so forcing the PHP layer on
+  it would fail every attempt and end in permanent failure — keeping the flag
+  explicit is what makes Vue-only issues reachable.
 """
 
 from typing import TypedDict
@@ -44,12 +51,23 @@ class IssueState(TypedDict, total=False):
     # ── Conversation ───────────────────────────────────────────────────────
     messages: list[dict]               # growing per-issue history (from ConversationStore)
 
+    # ── Stack detection (Phase 4) ──────────────────────────────────────────
+    has_vue_files: bool                # True if the workspace contains .vue files
+    stack: str                         # "php" | "vue" | "fullstack" | "unknown"
+    run_phpunit: bool                  # False only for the "vue" stack
+
     # ── Test / retry state ─────────────────────────────────────────────────
     attempt: int                       # current attempt index (incremented by node_code)
     max_attempts: int                  # from MAX_CODE_RETRIES + 1
     files_written: bool                # True if the last code response yielded FILE blocks
     test_output: str                   # last PHPUnit output
     test_passed: bool
+
+    # ── Frontend test results (Phase 4) ────────────────────────────────────
+    vitest_passed: bool
+    vitest_output: str
+    playwright_passed: bool
+    playwright_output: str
 
     # ── Terminal flags ─────────────────────────────────────────────────────
     mr_url: str                        # set when MR is opened
