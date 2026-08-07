@@ -3,10 +3,16 @@ task_engine.py – thin wrapper around the LangGraph pipeline (Phase 2).
 
 All flow control now lives in graph/builder.py:
 
-    setup → load_skills → plan → code ⇄ test (retry loop via on_test_failure)
-                                  ↓ pass          ↓ exhausted
-                                commit          failure
-                                    └──→ cleanup ←──┘
+    setup → load_skills → plan → code → detect_stack ⇄ phpunit / vitest /
+                                  ↑                     playwright layers
+                                  └── retry loop via on_test_failure and
+                                      on_frontend_test_failure
+                                  ↓ all layers pass    ↓ retries exhausted
+                                commit               failure
+                                    └──→ cleanup ←──────┘
+
+detect_stack selects the applicable layers, so a PHP-only change never starts
+a Node container and a frontend-only change never runs PHPUnit.
 
 TaskEngine only:
   1. Polls Redmine for the next pending issue (via graph.tools – no direct
@@ -73,8 +79,15 @@ class TaskEngine:
             "attempt":        0,
             "max_attempts":   max_attempts,
             "files_written":  False,
+            "has_vue_files":  False,
+            "stack":          "php",
+            "run_phpunit":    True,
             "test_output":    "",
             "test_passed":    False,
+            "vitest_passed":     False,
+            "vitest_output":     "",
+            "playwright_passed": False,
+            "playwright_output": "",
             "mr_url":         "",
             "failure_reason": "",
             "error":          "",
@@ -82,12 +95,13 @@ class TaskEngine:
 
         # ── 3. Run the graph ──────────────────────────────────────────────
         try:
-            # Each retry cycle traverses 3 nodes (on_test_failure → code →
-            # test); size the recursion limit so large MAX_CODE_RETRIES
-            # values never trip LangGraph's default of 25.
+            # A fullstack retry cycle traverses 6 nodes (escalation → code →
+            # detect_stack → phpunit_test → vitest_test → playwright_test);
+            # size the recursion limit so large MAX_CODE_RETRIES values never
+            # trip LangGraph's default of 25.
             final_state = graph.invoke(
                 initial_state,
-                config={"recursion_limit": max(25, 12 + 4 * max_attempts)},
+                config={"recursion_limit": max(25, 14 + 8 * max_attempts)},
             )
             if final_state.get("mr_url"):
                 logger.info("Issue #%s done – MR: %s", issue_id, final_state["mr_url"])

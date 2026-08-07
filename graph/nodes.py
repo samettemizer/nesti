@@ -24,10 +24,23 @@ Error strategy per node
 • node_plan       – catches RuntimeError ("all planners failed"), leaves
                     ``plan`` empty; route_after_plan then routes to failure.
 • node_code       – catches RuntimeError ("all coders exhausted") and jumps
-                    ``attempt`` to ``max_attempts`` so route_after_test routes
-                    straight to failure (Phase 1 aborted immediately too).
+                    ``attempt`` to ``max_attempts`` so route_after_phpunit
+                    routes straight to failure (Phase 1 aborted immediately too).
 • node_commit     – tool failures reopen the issue + notify instead of raising,
                     so the commit → cleanup edge still runs.
+
+Test layering (Phase 4)
+───────────────────────
+node_detect_stack runs between node_code and the test layers and decides which
+of them apply:
+
+    php        → phpunit
+    vue        → vitest → playwright        (phpunit skipped entirely)
+    fullstack  → phpunit → vitest → playwright
+    unknown    → phpunit                    (legacy default; never no-tests)
+
+Every layer failure funnels into an escalate-and-retry node, so the retry
+budget (max_attempts) is shared across all three layers rather than per layer.
 """
 
 import logging
@@ -39,7 +52,8 @@ from graph.state import IssueState
 from graph.tools import (
     tool_skill_fetch, tool_gitlab_clone, tool_gitlab_create_branch,
     tool_docker_run_tests, tool_gitlab_commit_and_push, tool_gitlab_open_mr,
-    tool_redmine_set_status,
+    tool_redmine_set_status, tool_detect_stack, tool_vitest_run_tests,
+    tool_playwright_run_tests,
 )
 from llm_client import LLMClient
 from conversation_store import ConversationStore
@@ -55,6 +69,10 @@ _store = ConversationStore()
 _MAX_NOTE_CHARS = 1000
 _MAX_MR_TEST_OUTPUT_CHARS = 2000
 
+# Frontend failure output injected into the retry prompt (Phase 4).  Matches
+# ConversationStore.append_test_failure's budget for the PHPUnit layer.
+_MAX_FRONTEND_FEEDBACK_CHARS = 2000
+
 # Fallback when the initial state somehow lacks max_attempts (unit tests).
 _ENV_MAX_ATTEMPTS = int(os.environ.get("MAX_CODE_RETRIES", "2")) + 1
 
@@ -66,6 +84,50 @@ _NO_FILE_BLOCKS_OUTPUT = (
     "contain any '### FILE: <path>' blocks. Output every affected file in "
     "full using the FILE format."
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _last_failure_output(state: IssueState) -> tuple[str, str]:
+    """
+    Return ``(layer_label, output)`` for the test layer that ended the run.
+
+    Layers are checked newest-first (Playwright → Vitest → PHPUnit) so the
+    reopen note carries the failure the model actually has to fix.  Without
+    this, a Vue-only issue would reopen with an empty note: PHPUnit never ran,
+    so ``test_output`` is blank.
+    """
+    candidates = (
+        ("Playwright (E2E tests)", state.get("playwright_passed", False),
+         state.get("playwright_output", "")),
+        ("Vitest (component tests)", state.get("vitest_passed", False),
+         state.get("vitest_output", "")),
+        ("PHPUnit", state.get("test_passed", False), state.get("test_output", "")),
+    )
+    for label, passed, output in candidates:
+        if not passed and output:
+            return label, output
+    return "PHPUnit", state.get("test_output", "")
+
+
+def _test_report(state: IssueState) -> str:
+    """Render the output of every layer that ran, for the Merge Request body."""
+    sections: list[tuple[str, str]] = []
+    if state.get("test_output"):
+        sections.append(("PHPUnit", state["test_output"]))
+    if state.get("vitest_output"):
+        sections.append(("Vitest", state["vitest_output"]))
+    if state.get("playwright_output"):
+        sections.append(("Playwright", state["playwright_output"]))
+    if not sections:
+        sections.append(("PHPUnit", ""))
+
+    return "\n\n".join(
+        f"### {label}\n```\n{output[:_MAX_MR_TEST_OUTPUT_CHARS]}\n```"
+        for label, output in sections
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,8 +262,10 @@ def node_code(state: IssueState) -> dict:
         )
     except RuntimeError as exc:
         # Every reachable coder failed. Phase 1 aborted the retry loop
-        # immediately; jumping attempt to max_attempts makes route_after_test
-        # deterministically route to node_failure.
+        # immediately; jumping attempt to max_attempts makes route_after_phpunit
+        # deterministically route to node_failure (node_detect_stack keeps
+        # run_phpunit=True when no files were written, so that is the router
+        # this path reaches).
         logger.error("All coding providers exhausted on attempt %d: %s", attempt, exc)
         logger.debug("← node_code (providers exhausted)")
         return {
@@ -230,6 +294,47 @@ def node_code(state: IssueState) -> dict:
         "files_written": files_written,
         "attempt": attempt,
     }
+
+
+def node_detect_stack(state: IssueState) -> dict:
+    """
+    Decide which test layers apply to the current workspace.
+
+    Runs between node_code and the test layers.  Detection is automatic — the
+    developer never declares the stack in the Redmine issue.
+    """
+    logger.debug("→ node_detect_stack")
+
+    # No parseable FILE blocks this attempt: there is nothing new to classify.
+    # Route to node_test anyway — its files_written guard turns the attempt
+    # into a failure with corrective feedback (Phase 1 behaviour, preserved).
+    if not state.get("files_written", False):
+        logger.debug("← node_detect_stack (no files written – deferring to node_test guard)")
+        return {"has_vue_files": False, "stack": "unknown", "run_phpunit": True}
+
+    result = tool_detect_stack(state["repo_path"])
+    if not result["success"]:
+        # Detection is advisory: a scan error must never strand an issue.
+        # Fall back to the pre-Phase-4 behaviour and run the PHP layer.
+        logger.warning("Stack detection failed: %s – assuming 'php'.", result["error"])
+        logger.debug("← node_detect_stack (scan error)")
+        return {"has_vue_files": False, "stack": "php", "run_phpunit": True}
+
+    detected = result["result"]
+    stack = detected["stack"]
+    has_vue = detected["has_vue"]
+    run_phpunit = detected["run_phpunit"]
+
+    logger.info(
+        "Stack detected: %s (%s) – PHPUnit: %s, frontend layers: %s%s",
+        stack,
+        detected["source"],
+        "yes" if run_phpunit else "skipped",
+        "yes" if has_vue else "skipped",
+        f" [{len(detected['vue_files'])} .vue file(s)]" if has_vue else "",
+    )
+    logger.debug("← node_detect_stack (stack=%s)", stack)
+    return {"has_vue_files": has_vue, "stack": stack, "run_phpunit": run_phpunit}
 
 
 def node_test(state: IssueState) -> dict:
@@ -290,6 +395,90 @@ def node_on_test_failure(state: IssueState) -> dict:
     return {"messages": messages}
 
 
+def node_vitest_test(state: IssueState) -> dict:
+    """Run Vitest component tests in the Node sandbox."""
+    logger.debug("→ node_vitest_test")
+    logger.info("Running Vitest component tests (attempt %d) …", state.get("attempt", 0))
+
+    result = tool_vitest_run_tests(state["repo_path"])
+    passed = result.get("result", {}).get("passed", False) if result["success"] else False
+    output = (
+        result.get("result", {}).get("output", "")
+        if result["success"]
+        else result.get("error", "")
+    )
+
+    if passed:
+        logger.info("✓ Vitest passed on attempt %d.", state.get("attempt", 0))
+    else:
+        logger.warning("Vitest failed on attempt %d.", state.get("attempt", 0))
+
+    logger.debug("← node_vitest_test (passed=%s)", passed)
+    return {"vitest_passed": passed, "vitest_output": output}
+
+
+def node_playwright_test(state: IssueState) -> dict:
+    """Run Playwright E2E tests in the browser sandbox."""
+    logger.debug("→ node_playwright_test")
+    logger.info("Running Playwright E2E tests (attempt %d) …", state.get("attempt", 0))
+
+    result = tool_playwright_run_tests(state["repo_path"])
+    passed = result.get("result", {}).get("passed", False) if result["success"] else False
+    output = (
+        result.get("result", {}).get("output", "")
+        if result["success"]
+        else result.get("error", "")
+    )
+
+    if passed:
+        logger.info("✓ Playwright passed on attempt %d.", state.get("attempt", 0))
+    else:
+        logger.warning("Playwright failed on attempt %d.", state.get("attempt", 0))
+
+    logger.debug("← node_playwright_test (passed=%s)", passed)
+    return {"playwright_passed": passed, "playwright_output": output}
+
+
+def node_on_frontend_test_failure(state: IssueState) -> dict:
+    """
+    Append a Vitest or Playwright failure to the conversation and escalate the
+    coder tier.  The frontend counterpart of node_on_test_failure.
+
+    Both frontend flags are reset so the next attempt is judged on its own
+    results rather than inheriting a stale pass from the previous round.
+    """
+    logger.debug("→ node_on_frontend_test_failure")
+
+    # Vitest runs first, so a False flag there is the earlier failure.
+    if not state.get("vitest_passed", True):
+        layer = "Vitest (component tests)"
+        failure_output = state.get("vitest_output", "")
+    else:
+        layer = "Playwright (E2E tests)"
+        failure_output = state.get("playwright_output", "")
+
+    logger.info(
+        "Retry %d/%d – %s failed, escalating coder tier …",
+        state.get("attempt", 0),
+        state.get("max_attempts", _ENV_MAX_ATTEMPTS) - 1,
+        layer,
+    )
+    messages = _store.append(
+        state["issue_id"],
+        "user",
+        f"The {layer} FAILED. Test output:\n---\n"
+        f"{failure_output[:_MAX_FRONTEND_FEEDBACK_CHARS]}\n---\n"
+        f"Please fix the implementation and regenerate all affected files.",
+    )
+    _llm.escalate_coder()
+    logger.debug("← node_on_frontend_test_failure")
+    return {
+        "messages": messages,
+        "vitest_passed": False,
+        "playwright_passed": False,
+    }
+
+
 def node_commit(state: IssueState) -> dict:
     """Commit, push, open MR, close the Redmine issue, drop the history."""
     logger.debug("→ node_commit")
@@ -330,8 +519,9 @@ def node_commit(state: IssueState) -> dict:
         subject=subject,
         description=(
             f"## Summary\n{state.get('plan', '')}\n\n"
-            f"## Test output\n```\n"
-            f"{state.get('test_output', '')[:_MAX_MR_TEST_OUTPUT_CHARS]}\n```"
+            f"## Test output\n"
+            f"_Stack: {state.get('stack', 'php')}_\n\n"
+            f"{_test_report(state)}"
         ),
     )
     if not mr["success"]:
@@ -373,10 +563,11 @@ def node_failure(state: IssueState) -> dict:
             f"Reopening issue."
         )
     else:
-        reason = f"Tests failed after {attempts} attempt(s)."
+        layer, failure_output = _last_failure_output(state)
+        reason = f"{layer} failed after {attempts} attempt(s)."
         note = (
-            "AI Developer failed to produce passing tests.\n\n"
-            f"{state.get('test_output', '')[:_MAX_NOTE_CHARS]}"
+            f"AI Developer failed to produce passing tests ({layer}).\n\n"
+            f"{failure_output[:_MAX_NOTE_CHARS]}"
         )
         telegram_notify(
             f"❌ Issue <b>#{issue_id}</b> – <i>{subject}</i>\n"

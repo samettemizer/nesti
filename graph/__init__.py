@@ -1,11 +1,12 @@
 """
-graph – LangGraph pipeline for the AI Developer orchestrator (Phase 2).
+graph – LangGraph pipeline for the AI Developer orchestrator (Phase 2),
+extended with the layered frontend test pipeline in Phase 4.
 
 Modules:
     state    – IssueState TypedDict flowing through every node.
     tools    – MCP-compatible atomic tool functions (Phase 3 reuses these).
     nodes    – LangGraph node functions (partial state updates).
-    edges    – conditional routing functions.
+    edges    – conditional routing functions, one router per test layer.
     builder  – graph assembly; exposes the compiled ``graph`` object.
 
 This package intentionally has NO import side effects: importing ``graph``

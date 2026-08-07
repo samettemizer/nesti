@@ -1,0 +1,39 @@
+# Node sandbox image used by FrontendRunner to run Vitest component tests.
+#
+# Build:
+#   docker build -t nesti-sandbox-node -f Dockerfile.sandbox.node .
+#
+# Selected via DOCKER_SANDBOX_NODE_IMAGE.  The orchestrator mounts the cloned
+# repository at /app; no browser is involved, so this layer is fast.
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Build tools required by npm packages that ship native addons.
+RUN apk add --no-cache python3 make g++
+
+# Dependencies are installed at container runtime from the mounted workspace.
+# This keeps the image generic and reusable across projects.
+#
+# `npm ci` requires a package-lock.json.  Generated workspaces almost never
+# ship one — a lockfile carries integrity hashes no model can synthesise — so
+# fall back to `npm install` when it is absent.  Without this fallback every
+# Vue issue would fail during install instead of on its actual tests.
+#
+# The second fallback (`npm ci || npm install`) covers the retry loop.  The
+# workspace is mounted read-write, so the first attempt's `npm install` leaves
+# a package-lock.json behind; if the next attempt edits package.json to fix a
+# failure, `npm ci` refuses with EUSAGE ("lock file ... does not satisfy") and
+# the layer dies for an infrastructure reason no code change can repair.
+# Falling through to `npm install` regenerates the lockfile instead.
+#
+# The e2e/ exclusion is not optional.  Vitest's default include glob is
+# `**/*.{test,spec}.?(c|m)[jt]s?(x)`, which matches the Playwright specs the
+# coding prompt puts in e2e/*.spec.js.  Vitest then tries to collect them and
+# dies with "Playwright Test did not expect test() to be called here" — on
+# every Vue issue, before the component results matter.  The generated
+# vitest.config.js is required to exclude e2e/ too (so `npm test` is correct
+# outside the sandbox), but this layer must not depend on the model getting
+# that right.  node_modules and dist are repeated explicitly so the flag is
+# safe whether Vitest treats CLI --exclude as append or replace.
+CMD ["sh", "-c", "if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi && npx vitest run --reporter=verbose --exclude '**/node_modules/**' --exclude '**/dist/**' --exclude 'e2e/**'"]
