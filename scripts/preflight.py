@@ -4,8 +4,8 @@ scripts/preflight.py – verify every external dependency before a live run.
 
 Prints one line per check and exits non-zero on the first HARD failure, so a
 live run is never started against a half-configured environment.  Checks are
-ordered cheapest-first: configuration, then Redmine, then GitLab, then the
-paid LLM call, then the local Docker/corpus state.
+ordered cheapest-first: configuration, then GitLab Issues, then the GitLab
+repository, then the paid LLM call, then the local Docker/corpus state.
 
 Usage:
     python scripts/preflight.py                 # everything
@@ -31,24 +31,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import skill_catalog  # noqa: E402  (after load_dotenv, like the orchestrator)
+from gitlab_issues_client import GitLabIssuesClient  # noqa: E402
 
 _REQUEST_TIMEOUT = 15
 _PLACEHOLDER_MARKERS = ("your_", "_here", "changeme", "xxx")
 
 _REQUIRED_VARS = (
-    "REDMINE_URL",
-    "REDMINE_API_KEY",
-    "REDMINE_PROJECT_ID",
     "GITLAB_URL",
     "GITLAB_TOKEN",
     "GITLAB_PROJECT_PATH",
     "ANTHROPIC_API_KEY",
-)
-
-_STATUS_VARS = (
-    ("REDMINE_NEW_STATUS_ID", "1"),
-    ("REDMINE_IN_PROGRESS_STATUS_ID", "2"),
-    ("REDMINE_CLOSED_STATUS_ID", "5"),
 )
 
 _SANDBOX_IMAGE_VARS = (
@@ -104,130 +96,89 @@ def check_configuration() -> None:
     else:
         _warn("DEEPSEEK_API_KEY", "absent – escalation jumps straight to Claude")
 
-    for name, default in _STATUS_VARS:
-        raw = os.environ.get(name, default)
-        try:
-            int(raw)
-        except ValueError:
-            _fail(f"{name} numeric", f"got {raw!r}")
-        _ok(name, raw)
 
 
-def check_redmine() -> None:
-    print("\n── Redmine ──")
-    base = os.environ["REDMINE_URL"].rstrip("/")
-    project = os.environ["REDMINE_PROJECT_ID"]
-    session = requests.Session()
-    session.headers.update({"X-Redmine-API-Key": os.environ["REDMINE_API_KEY"]})
-
-    url = f"{base}/projects/{project}.json"
-    try:
-        response = session.get(url, timeout=_REQUEST_TIMEOUT)
-    except Exception as exc:  # pylint: disable=broad-except
-        _fail("Redmine project reachable", f"GET {url} → {type(exc).__name__}: {exc}")
-    if response.status_code != 200:
-        _fail("Redmine project reachable", f"GET {url} → HTTP {response.status_code}")
-    _ok("Redmine project", response.json()["project"]["name"])
-
-    url = f"{base}/issue_statuses.json"
-    try:
-        response = session.get(url, timeout=_REQUEST_TIMEOUT)
-    except Exception as exc:  # pylint: disable=broad-except
-        _fail("Redmine statuses readable", f"GET {url} → {type(exc).__name__}: {exc}")
-    if response.status_code != 200:
-        _fail("Redmine statuses readable", f"GET {url} → HTTP {response.status_code}")
-
-    by_id = {s["id"]: s["name"] for s in response.json()["issue_statuses"]}
-    for name, default in _STATUS_VARS:
-        status_id = int(os.environ.get(name, default))
-        if status_id not in by_id:
-            _fail(
-                f"{name} exists in Redmine",
-                f"id {status_id} not among {sorted(by_id)}",
-            )
-        _ok(f"{name}={status_id}", by_id[status_id])
-
-    _check_redmine_workflow(session, base, by_id)
-
-
-def _check_redmine_workflow(session: requests.Session, base: str,
-                            by_id: dict[int, str]) -> None:
+def check_issues() -> None:
     """
-    Prove the API user may actually perform the three transitions the pipeline
-    needs, using a throwaway issue.
+    Verify the GitLab Issues intake end to end.
 
-    Redmine returns 204 for a PUT whose status change its workflow forbids and
-    silently drops the field, so a misconfigured workflow is invisible until a
-    real run strands an issue: the orchestrator logs "reopened" while the
-    issue stays in-progress and is never polled again.
+    The lifecycle probe replaces the old Redmine workflow probe and exists for
+    the same reason: a token that can read issues but not label or close them
+    produces a run that looks healthy and then strands its issue.  The probe
+    drives GitLabIssuesClient itself, so it exercises the exact code the
+    orchestrator uses rather than a parallel re-implementation.
     """
-    project = os.environ["REDMINE_PROJECT_ID"]
-    new_id = int(os.environ.get("REDMINE_NEW_STATUS_ID", "1"))
-    progress_id = int(os.environ.get("REDMINE_IN_PROGRESS_STATUS_ID", "2"))
-    closed_id = int(os.environ.get("REDMINE_CLOSED_STATUS_ID", "5"))
+    print("\n── GitLab Issues ──")
+    client = GitLabIssuesClient()
+    _ok("Opt-in label", f"{client.issue_label!r} (lock: {client.in_progress_label!r})")
 
-    created = session.post(
-        f"{base}/issues.json",
-        json={"issue": {
-            "project_id": project,
-            "subject": "nesti preflight workflow probe",
-            "description": "Created by scripts/preflight.py to verify status "
-                           "transitions. Safe to delete.",
-            "status_id": new_id,
-        }},
+    try:
+        response = client.session.get(client._project_api, timeout=_REQUEST_TIMEOUT)
+    except Exception as exc:  # pylint: disable=broad-except
+        _fail("Project reachable", f"{type(exc).__name__}: {exc}")
+    if response.status_code != 200:
+        _fail("Project reachable", f"HTTP {response.status_code}")
+    project = response.json()
+    if not project.get("issues_enabled", False):
+        _fail(
+            "Issues enabled",
+            f"the issue tracker is disabled on {client.project_path} "
+            f"(issues_access_level={project.get('issues_access_level')!r}); "
+            f"enable it in Settings → General → Visibility",
+        )
+    _ok("Issues enabled", f"access level {project.get('issues_access_level')}")
+
+    try:
+        pending = client.list_pending()
+    except Exception as exc:  # pylint: disable=broad-except
+        _fail("Pending queue readable", f"{type(exc).__name__}: {exc}")
+    _ok(
+        "Pending queue",
+        f"{len(pending)} issue(s) waiting"
+        + (f" (next: #{pending[0]['id']} {pending[0]['subject'][:40]})" if pending else ""),
+    )
+
+    _probe_issue_lifecycle(client)
+
+
+def _probe_issue_lifecycle(client: GitLabIssuesClient) -> None:
+    """Create a throwaway issue and drive it through the whole lifecycle."""
+    created = client.session.post(
+        f"{client._project_api}/issues",
+        json={
+            "title": "nesti preflight probe",
+            "description": "Created by scripts/preflight.py to verify the issue "
+                           "lifecycle. Safe to ignore; left closed.",
+            "labels": client.issue_label,
+        },
         timeout=_REQUEST_TIMEOUT,
     )
     if created.status_code not in (200, 201):
-        _fail("Redmine issue creation",
-              f"POST /issues.json → HTTP {created.status_code}: {created.text[:200]}")
-    probe_id = created.json()["issue"]["id"]
-    _ok("Redmine issue creation", f"probe issue #{probe_id}")
-
-    def _transition(target: int, label: str) -> bool:
-        session.put(
-            f"{base}/issues/{probe_id}.json",
-            json={"issue": {"status_id": target}},
-            timeout=_REQUEST_TIMEOUT,
+        _fail(
+            "Issue creation",
+            f"POST /issues → HTTP {created.status_code}: {created.text[:200]} — the "
+            f"token needs at least Reporter rights on {client.project_path}",
         )
-        actual = session.get(
-            f"{base}/issues/{probe_id}.json", timeout=_REQUEST_TIMEOUT
-        ).json()["issue"]["status"]["id"]
-        return actual == target
+    probe = created.json()
+    iid, web_url = probe["iid"], probe.get("web_url", "")
+    _ok("Issue creation", f"probe issue #{iid}")
 
-    try:
-        if not _transition(progress_id, "in-progress"):
-            _fail("Workflow: new → in-progress",
-                  f"the API user cannot move an issue to status "
-                  f"{progress_id} ({by_id.get(progress_id)}); every run would "
-                  f"fail to lock its issue")
-        _ok("Workflow: new → in-progress", by_id.get(progress_id, "?"))
+    if not client.lock_issue(iid):
+        _fail("Lock (add ::in-progress label)",
+              "the token cannot label issues; every run would fail to claim its issue")
+    _ok("Lock (add ::in-progress label)", client.in_progress_label)
 
-        # The failure path. A forbidden reopen is not fatal for a successful
-        # run, so this is a warning — but a failed issue then stays
-        # in-progress forever and is never retried.
-        if _transition(new_id, "new"):
-            _ok("Workflow: in-progress → new", by_id.get(new_id, "?"))
-            _transition(progress_id, "in-progress")
-        else:
-            _warn(
-                "Workflow: in-progress → new",
-                f"FORBIDDEN – a failed issue cannot be reopened and will stay "
-                f"in {by_id.get(progress_id)!r} forever instead of being "
-                f"retried. Grant this transition in Redmine "
-                f"(Administration → Workflow) for the API user's role.",
-            )
+    # The failure path: without this a failed issue never returns to the queue.
+    if not client.reopen_issue(iid, note="preflight: probing the failure path"):
+        _fail("Unlock (back to pending)",
+              "a failed issue could not be returned to the pending pool and would "
+              "never be retried")
+    _ok("Unlock (back to pending)", "lock label removed, issue still open")
 
-        if not _transition(closed_id, "closed"):
-            _fail("Workflow: in-progress → closed",
-                  f"the API user cannot move an issue to status "
-                  f"{closed_id} ({by_id.get(closed_id)}); a successful run "
-                  f"could open its MR but never close the issue")
-        _ok("Workflow: in-progress → closed",
-            f"{by_id.get(closed_id, '?')} (probe issue #{probe_id} left closed)")
-    finally:
-        # DELETE needs admin rights the bot usually lacks; leaving the probe
-        # closed is harmless and keeps preflight usable by a plain API user.
-        session.delete(f"{base}/issues/{probe_id}.json", timeout=_REQUEST_TIMEOUT)
+    if not client.close_issue(iid, note="preflight: probing the success path"):
+        _fail("Close (success path)",
+              "a successful run could open its MR but never close the issue")
+    _ok("Close (success path)", f"probe issue #{iid} left closed – {web_url}")
 
 
 def check_gitlab() -> None:
@@ -358,7 +309,7 @@ def main() -> int:
 
     print("Nesti preflight")
     check_configuration()
-    check_redmine()
+    check_issues()
     check_gitlab()
     if args.skip_llm:
         print("\n── Anthropic ──\n  SKIP  --skip-llm")

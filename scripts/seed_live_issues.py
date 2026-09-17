@@ -8,12 +8,13 @@ The issues drive one full pass of the Laravel + PrimeVue pipeline:
     2. PrimeVue DataTable         → Vitest + Playwright layers
     3. PrimeVue Dialog form       → all four layers, posting to issue 1's API
 
-Idempotent: an issue whose subject already exists in the configured "new"
-status is skipped, so re-running after a partial seed never duplicates work.
+Idempotent: an issue whose title already exists as an OPEN issue carrying the
+opt-in label is skipped, so re-running after a partial seed never duplicates
+work. GitLab titles are not unique, so the match is on exact title.
 
-RedmineClient deliberately exposes no issue-creation method (the orchestrator
-only reads and transitions issues), so this script POSTs directly rather than
-widening that client's surface for a one-off operator tool.
+GitLabIssuesClient deliberately exposes no issue-creation method — creating
+work is not the orchestrator's job — so this operator tool POSTs directly
+rather than widening that client's surface.
 
 Usage:
     python scripts/seed_live_issues.py --dry-run
@@ -23,16 +24,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Imported after load_dotenv, like the orchestrator does: the client resolves
+# its GitLab configuration from the environment.
+from gitlab_issues_client import GitLabIssuesClient  # noqa: E402
 
 _REQUEST_TIMEOUT = 30
 _LIST_LIMIT = 100
@@ -105,77 +108,68 @@ Acceptance Criteria:
 )
 
 
-def _session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update(
-        {
-            "X-Redmine-API-Key": os.environ["REDMINE_API_KEY"],
-            "Content-Type": "application/json",
-        }
-    )
-    return session
+def _client() -> GitLabIssuesClient:
+    """Reuse the orchestrator's client for config, auth and the label scheme."""
+    return GitLabIssuesClient()
 
 
-def _existing_new_subjects(session: requests.Session, base: str, project: str,
-                           status_id: int) -> dict[str, int]:
-    """Map subject → issue id for every issue already sitting in the new status."""
-    response = session.get(
-        f"{base}/issues.json",
+def _existing_open_titles(client: GitLabIssuesClient) -> dict[str, int]:
+    """Map title → iid for every open issue already carrying the opt-in label."""
+    response = client.session.get(
+        f"{client._project_api}/issues",
         params={
-            "project_id": project,
-            "status_id": status_id,
-            "limit": _LIST_LIMIT,
-            "sort": "id:asc",
+            "state": "opened",
+            "labels": client.issue_label,
+            "per_page": _LIST_LIMIT,
         },
         timeout=_REQUEST_TIMEOUT,
     )
     response.raise_for_status()
-    return {i["subject"]: i["id"] for i in response.json().get("issues", [])}
+    return {issue["title"]: issue["iid"] for issue in response.json()}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true",
-                        help="print what would be created without calling Redmine")
+                        help="print what would be created without calling GitLab")
     args = parser.parse_args()
 
-    base = os.environ["REDMINE_URL"].rstrip("/")
-    project = os.environ["REDMINE_PROJECT_ID"]
-    status_id = int(os.environ.get("REDMINE_NEW_STATUS_ID", "1"))
+    client = _client()
 
     if args.dry_run:
-        print(f"DRY RUN – would create in project {project!r} with status_id={status_id}\n")
+        print(
+            f"DRY RUN – would create in {client.project_path!r} "
+            f"with label {client.issue_label!r}\n"
+        )
         for index, issue in enumerate(ISSUES, start=1):
             print(f"── Issue {index} ─────────────────────────────────────────────")
-            print(f"Subject: {issue['subject']}")
+            print(f"Title: {issue['subject']}")
             print(issue["description"])
         return 0
 
-    session = _session()
-    existing = _existing_new_subjects(session, base, project, status_id)
+    existing = _existing_open_titles(client)
 
     created: list[int] = []
     for issue in ISSUES:
-        subject = issue["subject"]
-        if subject in existing:
-            print(f"SKIP #{existing[subject]} {subject}")
+        title = issue["subject"]
+        if title in existing:
+            print(f"SKIP #{existing[title]} {title}")
             continue
-        payload = {
-            "issue": {
-                "project_id": project,
-                "subject": subject,
+        response = client.session.post(
+            f"{client._project_api}/issues",
+            json={
+                "title": title,
                 "description": issue["description"],
-                "status_id": status_id,
-            }
-        }
-        response = session.post(f"{base}/issues.json", json=payload,
-                                timeout=_REQUEST_TIMEOUT)
+                "labels": client.issue_label,
+            },
+            timeout=_REQUEST_TIMEOUT,
+        )
         if response.status_code not in (200, 201):
-            print(f"FAIL  {subject} → HTTP {response.status_code}: {response.text[:300]}")
+            print(f"FAIL  {title} → HTTP {response.status_code}: {response.text[:300]}")
             return 1
-        issue_id = response.json()["issue"]["id"]
-        created.append(issue_id)
-        print(f"CREATED #{issue_id} {subject}")
+        payload = response.json()
+        created.append(payload["iid"])
+        print(f"CREATED #{payload['iid']} {title}  {payload.get('web_url', '')}")
 
     print(f"\nCreated {len(created)} issue(s): {created or '(none – all already seeded)'}")
     return 0
