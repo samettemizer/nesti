@@ -22,6 +22,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
+# The orchestrator chowns the mounted workspace back to the host user, so the
+# cloned repo is owned by uid 1000 while this container runs as root. git then
+# refuses it with "fatal: detected dubious ownership", and because composer
+# shells out to git that fatal becomes the FIRST line of the test output fed
+# back to the model on a retry — sending it off to fix a git permission
+# problem instead of its own code. '*' rather than '/app' because the mount
+# point is configurable via DOCKER_SANDBOX_WORKDIR; the container is an
+# ephemeral single-purpose sandbox, so there is nothing else here to protect.
+RUN git config --global --add safe.directory '*'
+
 WORKDIR /app
 
 # Default command: install deps, prepare the Laravel app (if any), run tests.

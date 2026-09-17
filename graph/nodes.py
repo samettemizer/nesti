@@ -66,6 +66,7 @@ from graph.tools import (
 from llm_client import LLMClient
 from conversation_store import ConversationStore
 from prompt_builder import build_plan_prompt, build_code_prompt
+from layer_output import condense
 from telegram_notifier import notify as telegram_notify
 
 logger = logging.getLogger(__name__)
@@ -73,8 +74,15 @@ logger = logging.getLogger(__name__)
 _llm = LLMClient()
 _store = ConversationStore()
 
-# Phase 1 truncation limits, unchanged.
-_MAX_NOTE_CHARS = 1000
+# Output budgets. Both are applied by layer_output.condense, which strips
+# installer chatter and keeps the TAIL — the assertion failure and the
+# `Tests: N failed` summary are always last, so slicing from the front used to
+# leave a note containing nothing but npm advisories.
+#
+# The reopen note is the only thing a human sees on a failed issue, and 1000
+# chars of *condensed* output is still thin for a PHPUnit stack trace; GitLab
+# comments have no practical size limit, so the budget is 3000.
+_MAX_NOTE_CHARS = 3000
 _MAX_MR_TEST_OUTPUT_CHARS = 2000
 
 # Documented /api paths listed in the Merge Request body.  A large API surface
@@ -293,7 +301,7 @@ def _test_report(state: IssueState) -> str:
         sections.append(("PHPUnit", ""))
 
     return "\n\n".join(
-        f"### {label}\n```\n{output[:_MAX_MR_TEST_OUTPUT_CHARS]}\n```"
+        f"### {label}\n```\n{condense(output, _MAX_MR_TEST_OUTPUT_CHARS)}\n```"
         for label, output in sections
     )
 
@@ -860,7 +868,7 @@ def node_failure(state: IssueState) -> dict:
         reason = f"{layer} failed after {attempts} attempt(s)."
         note = (
             f"AI Developer failed to produce passing tests ({layer}).\n\n"
-            f"{failure_output[:_MAX_NOTE_CHARS]}"
+            f"{condense(failure_output, _MAX_NOTE_CHARS)}"
         )
         telegram_notify(
             f"❌ Issue <b>#{issue_id}</b> – <i>{subject}</i>\n"

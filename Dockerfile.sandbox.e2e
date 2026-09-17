@@ -28,6 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
  && rm -rf /var/lib/apt/lists/*
 
+# See Dockerfile.sandbox: the workspace is chowned back to the host user, so
+# git (which composer shells out to) would otherwise abort with "dubious
+# ownership" and that fatal would lead the retry prompt.
+RUN git config --global --add safe.directory '*'
+
 # Same two-step lockfile fallback as the Node sandbox — missing lockfile falls
 # back to `npm install`, stale lockfile falls through `npm ci` to `npm install`
 # (see Dockerfile.sandbox.node for the full reasoning).

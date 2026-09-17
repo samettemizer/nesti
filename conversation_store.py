@@ -21,13 +21,15 @@ import os
 
 import redis
 
+from layer_output import condense
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_REDIS_URL = "redis://nesti-redis:6379/0"
 _DEFAULT_TTL_DAYS = 7
 _SOCKET_CONNECT_TIMEOUT = 3  # seconds
 _KEY_PREFIX = "ai-dev:issue:"
-_TEST_FAILURE_OUTPUT_LIMIT = 2000  # chars of layer output fed back to the model
+_TEST_FAILURE_OUTPUT_LIMIT = 2000  # chars of *condensed* layer output fed back
 
 
 class ConversationStore:
@@ -148,7 +150,7 @@ class ConversationStore:
             f"The {layer} layer FAILED for the code you generated.\n"
             "Test output:\n"
             "---\n"
-            f"{test_output[:_TEST_FAILURE_OUTPUT_LIMIT]}\n"
+            f"{condense(test_output, _TEST_FAILURE_OUTPUT_LIMIT)}\n"
             "---\n"
             "Analyse the failure and correct the implementation. Output the "
             "COMPLETE set of files for this change using the FILE format, "

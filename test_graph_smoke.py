@@ -851,6 +851,83 @@ client.session.put = _put_returning({"iid": 7, "labels": ["nesti"], "state": "cl
 check(client.close_issue(7, note="x") is True,
       "an unpostable note does not fail the close")
 
+# ═════ Scenario 12e: failure output must carry signal, not installer chatter ═════
+print("\n── Scenario 12e: layer_output.condense ──")
+from layer_output import condense as _condense  # noqa: E402
+
+_NOISY = (
+    "added 199 packages, and audited 200 packages in 1m\n"
+    "56 packages are looking for funding\n"
+    "  run `npm fund` for details\n"
+    "2 high severity vulnerabilities\n"
+    "To address all issues, run:\n"
+    "  npm audit fix --force\n"
+    "Run `npm audit` for details.\n"
+    "npm notice New major version of npm available! 10.9.8 -> 12.0.2\n"
+    "[PrimeUI] PrimeUI license is not configured.\n"
+    "Installing dependencies from lock file (including require-dev)\n"
+    "Nothing to install, update or remove\n"
+    "Generating optimized autoload files\n"
+    "  - Locking phpunit/phpunit (11.5.56)\n"
+    "  - Downloading sebastian/diff (6.0.2)\n"
+    "  dedoc/scramble ........................................ DONE\n"
+    " \x1b[31m\u00d7\x1b[39m HelloWorldDialog > dialog has the expected header text\n"
+    "   \x1b[31mAssertionError\x1b[39m: expected '' to contain 'Hello World'\n"
+    "    at resources/js/components/__tests__/HelloWorldDialog.test.js:24:31\n"
+    " Tests  1 failed | 1 passed (2)\n"
+)
+_out = _condense(_NOISY, 1000)
+check("AssertionError: expected '' to contain 'Hello World'" in _out,
+      "the assertion failure survives condensing")
+check("HelloWorldDialog.test.js:24:31" in _out,
+      "the file:line of the failure survives (the old head-slice cut it off)")
+check("Tests  1 failed | 1 passed (2)" in _out,
+      "the run summary survives — it is the LAST line, so only a tail keeps it")
+for noise in ("npm notice", "npm audit", "looking for funding", "PrimeUI",
+              "Nothing to install", "- Locking ", "- Downloading ",
+              "dedoc/scramble", "severity vulnerabilit"):
+    check(noise not in _out, f"installer noise dropped: {noise!r}")
+check("\x1b[" not in _out and "[31m" not in _out,
+      "ANSI colour escapes stripped (they leaked into issue comments verbatim)")
+
+# Conservatism: a line is noise only when it MATCHES the pattern, not when it
+# merely mentions one of those words. Dropping a real error would be far worse.
+_lookalike = "Failed asserting that 2 high severity vulnerabilities were reported\n"
+check(_lookalike.strip() in _condense(_lookalike, 500),
+      "a real message that merely mentions a noise phrase is kept")
+
+# Tail selection and bounds.
+_long = "".join(f"line {n}\n" for n in range(1, 2001))
+_tailed = _condense(_long, 200)
+check("line 2000" in _tailed and "\nline 1\n" not in _tailed,
+      "condense keeps the end of a long output, not the beginning")
+check(len(_tailed) <= 200 + 40, "condensed output respects its budget")
+check("trimmed" in _tailed, "a trimmed output says so")
+check(_tailed.split("\n")[1].startswith("line "),
+      "the tail starts on a line boundary, never mid-line")
+
+# Degenerate inputs must never lose information or raise.
+_all_noise = "npm notice\nnpm notice again\nadded 3 packages\n"
+check(_condense(_all_noise, 500).strip() != "",
+      "output that is entirely noise still yields something rather than nothing")
+check(_condense("", 500) == "", "empty input stays empty")
+check(_condense("boom", 0) == "", "a non-positive budget yields nothing")
+check(_condense("boom", 500) == "boom", "short output passes through untouched")
+
+# The three consumers must actually use it, or the fix silently regresses.
+_nodes_src = open("graph/nodes.py").read()
+_store_src = open("conversation_store.py").read()
+check("condense(failure_output, _MAX_NOTE_CHARS)" in _nodes_src,
+      "the reopen note a human reads is condensed")
+check("condense(output, _MAX_MR_TEST_OUTPUT_CHARS)" in _nodes_src,
+      "the Merge Request test report is condensed")
+check("condense(test_output, _TEST_FAILURE_OUTPUT_LIMIT)" in _store_src,
+      "the retry feedback fed back to the model is condensed")
+check("[:_MAX_NOTE_CHARS]" not in _nodes_src
+      and "[:_MAX_MR_TEST_OUTPUT_CHARS]" not in _nodes_src
+      and "[:_TEST_FAILURE_OUTPUT_LIMIT]" not in _store_src,
+      "no head-slice truncation of layer output remains anywhere")
+
 # ═════ Scenario 13: TaskEngine thin wrapper ═════
 print("\n── Scenario 13: TaskEngine.run_once() ──")
 import task_engine  # noqa: E402
@@ -911,6 +988,15 @@ check("DOCKER_SANDBOX_PHP_IMAGE" in runner_src and "DOCKER_SANDBOX_IMAGE\"" not 
 check(all(s in runner_src for s in ("detach=True", "wait(timeout=",
                                     "remove(force=True)", "finally:")),
       "docker_runner keeps the detach → wait → logs → finally:remove sequence")
+
+# The workspace is chowned back to the host user, so git inside the root-run
+# sandbox aborts with "dubious ownership" unless the mount is marked safe.
+# composer shells out to git, which puts that fatal at the TOP of the output
+# fed back to the model on a retry — it then tries to fix git instead of its
+# own code. Both images that ship git must keep the exemption.
+for dockerfile in ("Dockerfile.sandbox", "Dockerfile.sandbox.e2e"):
+    check("safe.directory" in open(dockerfile).read(),
+          f"{dockerfile} marks the mounted workspace safe for git")
 
 # ── Phase 5: role, pins and the vendored corpus ──────────────────────────────
 import prompt_builder                              # noqa: E402
