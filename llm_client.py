@@ -92,8 +92,7 @@ class _OllamaBase(BaseLLMClient):
 
     @property
     def available(self) -> bool:
-        return os.environ.get("LOCAL_LLM_ENABLED").strip().lower() == "true"
-        # return bool(self.base_url and self.model)
+        return os.environ.get("LOCAL_LLM_ENABLED", "false").strip().lower() == "true"
 
     def _call(
         self,
@@ -178,8 +177,7 @@ class HermesLLMClient(_OllamaBase):
 
     @property
     def available(self) -> bool:
-        return os.environ.get("HERMES3_LLM_ENABLED").strip().lower() == "true"
-        # return bool(self.base_url and self.model)
+        return os.environ.get("HERMES3_LLM_ENABLED", "false").strip().lower() == "true"
 
 
 class QwenLLMClient(_OllamaBase):

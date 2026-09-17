@@ -27,7 +27,7 @@ _DEFAULT_REDIS_URL = "redis://nesti-redis:6379/0"
 _DEFAULT_TTL_DAYS = 7
 _SOCKET_CONNECT_TIMEOUT = 3  # seconds
 _KEY_PREFIX = "ai-dev:issue:"
-_TEST_FAILURE_OUTPUT_LIMIT = 2000  # chars of PHPUnit output fed back to the model
+_TEST_FAILURE_OUTPUT_LIMIT = 2000  # chars of layer output fed back to the model
 
 
 class ConversationStore:
@@ -130,22 +130,32 @@ class ConversationStore:
         )
         return messages
 
-    def append_test_failure(self, issue_id: int, test_output: str) -> list[dict]:
+    def append_test_failure(
+        self, issue_id: int, test_output: str, layer: str = "PHPUnit"
+    ) -> list[dict]:
         """
-        Append a user-role message describing the test failure.
+        Append a user-role message describing a test-layer failure.
 
         This is what makes the LLM aware of WHY the previous attempt failed:
         the corrective turn is added to the shared history so the next
         generate_code() call sees the prior attempt and its failure reason.
+
+        ``layer`` names the gate that went red (PHPUnit, OpenAPI documentation,
+        Vitest, Playwright).  Every layer funnels through this one method, so
+        the 2000-char feedback budget is defined in exactly one place.
         """
         content = (
-            "The code you generated was tested and the tests FAILED.\n"
+            f"The {layer} layer FAILED for the code you generated.\n"
             "Test output:\n"
             "---\n"
             f"{test_output[:_TEST_FAILURE_OUTPUT_LIMIT]}\n"
             "---\n"
-            "Please analyse the failure, correct the implementation, and produce "
-            "all affected files again using the FILE format."
+            "Analyse the failure and correct the implementation. Output the "
+            "COMPLETE set of files for this change using the FILE format, "
+            "including the files that were already correct: any file you wrote "
+            "before and now omit is deleted from the workspace. Keep the same "
+            "path for a file you are only editing — renaming a migration "
+            "leaves the old table behind and breaks the next attempt."
         )
         return self.append(issue_id, "user", content)
 

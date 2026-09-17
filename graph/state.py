@@ -29,6 +29,14 @@ Design notes
   A frontend-only repository has no composer.json, so forcing the PHP layer on
   it would fail every attempt and end in permanent failure — keeping the flag
   explicit is what makes Vue-only issues reachable.
+
+• The Phase 5 flags follow the same "descriptive label vs. routing gate"
+  split.  ``is_laravel`` says what the repository *is*; ``run_openapi`` says
+  whether the OpenAPI layer applies to *this attempt* — it needs a Laravel
+  app, a routes/api.php, and a code change that actually touched the API
+  surface.  ``written_files`` exists to answer that last question: without the
+  repo-relative paths from the previous node_code run, every attempt would
+  re-export the document even for a pure CSS change.
 """
 
 from typing import TypedDict
@@ -36,7 +44,7 @@ from typing import TypedDict
 
 class IssueState(TypedDict, total=False):
     # ── Input ──────────────────────────────────────────────────────────────
-    issue: dict                        # raw Redmine issue dict
+    issue: dict                        # normalised GitLab issue (id/subject/description)
     issue_id: int
     subject: str
 
@@ -56,12 +64,24 @@ class IssueState(TypedDict, total=False):
     stack: str                         # "php" | "vue" | "fullstack" | "unknown"
     run_phpunit: bool                  # False only for the "vue" stack
 
+    # ── Laravel detection / bootstrap (Phase 5) ────────────────────────────
+    is_laravel: bool                   # repository contains artisan
+    bootstrapped: bool                 # True when this run scaffolded the skeleton
+    has_api_routes: bool               # routes/api.php exists
+    run_openapi: bool                  # OpenAPI layer applies to this attempt
+
     # ── Test / retry state ─────────────────────────────────────────────────
     attempt: int                       # current attempt index (incremented by node_code)
     max_attempts: int                  # from MAX_CODE_RETRIES + 1
     files_written: bool                # True if the last code response yielded FILE blocks
+    written_files: list[str]           # repo-relative paths written by the last node_code
     test_output: str                   # last PHPUnit output
     test_passed: bool
+
+    # ── OpenAPI layer results (Phase 5) ────────────────────────────────────
+    openapi_passed: bool
+    openapi_output: str
+    openapi_paths: list[str]           # paths present in the exported document
 
     # ── Frontend test results (Phase 4) ────────────────────────────────────
     vitest_passed: bool

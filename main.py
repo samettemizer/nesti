@@ -40,7 +40,7 @@ def main() -> None:
     parser.add_argument(
         "--loop",
         action="store_true",
-        help="Keep polling Redmine for new issues instead of exiting after one.",
+        help="Keep polling GitLab Issues for new work instead of exiting after one.",
     )
     parser.add_argument(
         "--poll-interval",

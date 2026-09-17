@@ -6,9 +6,10 @@
 # Selected via DOCKER_SANDBOX_PHP_IMAGE.  The Node (Vitest) and Playwright
 # (E2E) sandboxes live in Dockerfile.sandbox.node and Dockerfile.sandbox.e2e.
 #
-# The orchestrator mounts the cloned repository at /app and runs:
-#   ./vendor/bin/phpunit --testdox
-FROM php:8.2-cli
+# The orchestrator mounts the cloned repository at /app.  For a Laravel repo
+# (artisan present) it prepares the app and runs `php artisan test`; a non-
+# Laravel repo falls back to `./vendor/bin/phpunit --testdox`.
+FROM php:8.3-cli
 
 # System libraries required by common PHP extensions
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -23,5 +24,9 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /app
 
-# Default command: install dependencies then run tests
-CMD ["bash", "-c", "composer install --no-interaction --prefer-dist && ./vendor/bin/phpunit --testdox"]
+# Default command: install deps, prepare the Laravel app (if any), run tests.
+# Kept byte-identical to docker_runner._TEST_COMMAND so the image is usable
+# standalone.  The EXIT trap restores host ownership of everything the
+# container creates even when the suite goes red — without it a failing
+# attempt would leave the workspace root-owned and the retry could not write.
+CMD ["bash", "-lc", "set -e; NESTI_OWNER=\"$(stat -c %u:%g /app)\"; trap 'chown -R \"$NESTI_OWNER\" /app || true' EXIT; composer install --no-interaction --prefer-dist --no-progress; if [ -f artisan ]; then [ -f .env ] || cp .env.example .env; php artisan key:generate --force; php artisan config:clear; rm -f database/database.sqlite; touch database/database.sqlite; php artisan migrate --force; php artisan test; else ./vendor/bin/phpunit --testdox; fi"]

@@ -7,6 +7,10 @@ plain JSON-serialisable dicts, as required at the MCP transport boundary.
 
 from mcp_server.server import app
 from skill_loader import load_skills, format_skills_for_prompt
+from graph.tools import (
+    tool_skill_catalog_select,
+    tool_skill_catalog_status,
+)
 
 
 @app.tool()
@@ -41,3 +45,45 @@ def skill_fetch_url(url: str) -> dict:
         "success": True,
         "result": {"title": skill.title, "content": skill.content}
     }
+
+
+@app.tool()
+def skill_catalog_select(
+    text: str, max_component_docs: int = 3, max_topic_docs: int = 2
+) -> dict:
+    """
+    Select vendored PrimeVue / Laravel docs matching text from the offline
+    corpus. Picks up to max_component_docs component docs and max_topic_docs
+    topic docs by alias/trigger matching.
+    Returns count: int, docs: [{title, url, chars}], and formatted: str
+    (prompt-ready). Skill dataclasses never cross the transport boundary.
+    """
+    result = tool_skill_catalog_select(
+        text,
+        max_component_docs=max_component_docs,
+        max_topic_docs=max_topic_docs,
+    )
+    if not result.get("success"):
+        return result
+    skills = result["result"]
+    return {
+        "success": True,
+        "result": {
+            "count": len(skills),
+            "docs": [
+                {"title": s.title, "url": s.url, "chars": len(s.content)}
+                for s in skills
+            ],
+            "formatted": format_skills_for_prompt(skills),
+        },
+    }
+
+
+@app.tool()
+def skill_catalog_status() -> dict:
+    """
+    Report whether the vendored skill corpus is present and how large it is.
+    Returns available: bool, components: int, topics: int, primevue_version:
+    str, and laravel_branch: str.
+    """
+    return tool_skill_catalog_status()

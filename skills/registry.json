@@ -1,0 +1,1219 @@
+{
+  "generated_at": "2026-09-16T18:14:49Z",
+  "primevue": {
+    "version": "5.0.1",
+    "source_pattern": "https://primevue.dev/llms/components/{slug}.md",
+    "components": [
+      {
+        "name": "Accordion",
+        "slug": "accordion",
+        "aliases": [
+          "accordion"
+        ],
+        "path": "primevue/accordion.md",
+        "chars": 31610
+      },
+      {
+        "name": "AnimateOnScroll",
+        "slug": "animateonscroll",
+        "aliases": [
+          "animateonscroll",
+          "animate on scroll"
+        ],
+        "path": "primevue/animateonscroll.md",
+        "chars": 10305
+      },
+      {
+        "name": "AutoComplete",
+        "slug": "autocomplete",
+        "aliases": [
+          "autocomplete",
+          "auto complete"
+        ],
+        "path": "primevue/autocomplete.md",
+        "chars": 43385
+      },
+      {
+        "name": "Avatar",
+        "slug": "avatar",
+        "aliases": [
+          "avatar"
+        ],
+        "path": "primevue/avatar.md",
+        "chars": 11456
+      },
+      {
+        "name": "Badge",
+        "slug": "badge",
+        "aliases": [
+          "badge"
+        ],
+        "path": "primevue/badge.md",
+        "chars": 7322
+      },
+      {
+        "name": "BlockUI",
+        "slug": "blockui",
+        "aliases": [
+          "blockui",
+          "block ui"
+        ],
+        "path": "primevue/blockui.md",
+        "chars": 3378
+      },
+      {
+        "name": "Breadcrumb",
+        "slug": "breadcrumb",
+        "aliases": [
+          "breadcrumb"
+        ],
+        "path": "primevue/breadcrumb.md",
+        "chars": 9907
+      },
+      {
+        "name": "Button",
+        "slug": "button",
+        "aliases": [
+          "button"
+        ],
+        "path": "primevue/button.md",
+        "chars": 50276
+      },
+      {
+        "name": "Card",
+        "slug": "card",
+        "aliases": [
+          "card"
+        ],
+        "path": "primevue/card.md",
+        "chars": 8560
+      },
+      {
+        "name": "Carousel",
+        "slug": "carousel",
+        "aliases": [
+          "carousel"
+        ],
+        "path": "primevue/carousel.md",
+        "chars": 26062
+      },
+      {
+        "name": "CascadeSelect",
+        "slug": "cascadeselect",
+        "aliases": [
+          "cascadeselect",
+          "cascade select"
+        ],
+        "path": "primevue/cascadeselect.md",
+        "chars": 48350
+      },
+      {
+        "name": "Checkbox",
+        "slug": "checkbox",
+        "aliases": [
+          "checkbox"
+        ],
+        "path": "primevue/checkbox.md",
+        "chars": 15318
+      },
+      {
+        "name": "Chip",
+        "slug": "chip",
+        "aliases": [
+          "chip"
+        ],
+        "path": "primevue/chip.md",
+        "chars": 7649
+      },
+      {
+        "name": "CommandMenu",
+        "slug": "commandmenu",
+        "aliases": [
+          "commandmenu",
+          "command menu"
+        ],
+        "path": "primevue/commandmenu.md",
+        "chars": 32874
+      },
+      {
+        "name": "Compare",
+        "slug": "compare",
+        "aliases": [
+          "compare"
+        ],
+        "path": "primevue/compare.md",
+        "chars": 18698
+      },
+      {
+        "name": "ConfirmDialog",
+        "slug": "confirmdialog",
+        "aliases": [
+          "confirmdialog",
+          "confirm dialog"
+        ],
+        "path": "primevue/confirmdialog.md",
+        "chars": 13498
+      },
+      {
+        "name": "ConfirmPopup",
+        "slug": "confirmpopup",
+        "aliases": [
+          "confirmpopup",
+          "confirm popup"
+        ],
+        "path": "primevue/confirmpopup.md",
+        "chars": 10209
+      },
+      {
+        "name": "ContextMenu",
+        "slug": "contextmenu",
+        "aliases": [
+          "contextmenu",
+          "context menu"
+        ],
+        "path": "primevue/contextmenu.md",
+        "chars": 22424
+      },
+      {
+        "name": "DataTable",
+        "slug": "datatable",
+        "aliases": [
+          "datatable",
+          "data table"
+        ],
+        "path": "primevue/datatable.md",
+        "chars": 223837
+      },
+      {
+        "name": "DataView",
+        "slug": "dataview",
+        "aliases": [
+          "dataview",
+          "data view"
+        ],
+        "path": "primevue/dataview.md",
+        "chars": 29840
+      },
+      {
+        "name": "DatePicker",
+        "slug": "datepicker",
+        "aliases": [
+          "datepicker",
+          "date picker",
+          "calendar"
+        ],
+        "path": "primevue/datepicker.md",
+        "chars": 45878
+      },
+      {
+        "name": "DeferredContent",
+        "slug": "deferredcontent",
+        "aliases": [
+          "deferredcontent",
+          "deferred content"
+        ],
+        "path": "primevue/deferredcontent.md",
+        "chars": 3205
+      },
+      {
+        "name": "Dialog",
+        "slug": "dialog",
+        "aliases": [
+          "dialog"
+        ],
+        "path": "primevue/dialog.md",
+        "chars": 35192
+      },
+      {
+        "name": "Divider",
+        "slug": "divider",
+        "aliases": [
+          "divider"
+        ],
+        "path": "primevue/divider.md",
+        "chars": 5835
+      },
+      {
+        "name": "Dock",
+        "slug": "dock",
+        "aliases": [
+          "dock"
+        ],
+        "path": "primevue/dock.md",
+        "chars": 16494
+      },
+      {
+        "name": "Drawer",
+        "slug": "drawer",
+        "aliases": [
+          "drawer",
+          "sidebar panel"
+        ],
+        "path": "primevue/drawer.md",
+        "chars": 26387
+      },
+      {
+        "name": "Dynamic Dialog",
+        "slug": "dynamicdialog",
+        "aliases": [
+          "dynamicdialog",
+          "dynamic dialog"
+        ],
+        "path": "primevue/dynamicdialog.md",
+        "chars": 9634
+      },
+      {
+        "name": "Fieldset",
+        "slug": "fieldset",
+        "aliases": [
+          "fieldset"
+        ],
+        "path": "primevue/fieldset.md",
+        "chars": 12230
+      },
+      {
+        "name": "FileUpload",
+        "slug": "fileupload",
+        "aliases": [
+          "fileupload",
+          "file upload"
+        ],
+        "path": "primevue/fileupload.md",
+        "chars": 21157
+      },
+      {
+        "name": "FloatLabel",
+        "slug": "floatlabel",
+        "aliases": [
+          "floatlabel",
+          "float label"
+        ],
+        "path": "primevue/floatlabel.md",
+        "chars": 4844
+      },
+      {
+        "name": "Fluid",
+        "slug": "fluid",
+        "aliases": [
+          "fluid"
+        ],
+        "path": "primevue/fluid.md",
+        "chars": 3077
+      },
+      {
+        "name": "Focus Trap",
+        "slug": "focustrap",
+        "aliases": [
+          "focustrap",
+          "focus trap"
+        ],
+        "path": "primevue/focustrap.md",
+        "chars": 1912
+      },
+      {
+        "name": "Gallery",
+        "slug": "gallery",
+        "aliases": [
+          "gallery"
+        ],
+        "path": "primevue/gallery.md",
+        "chars": 37417
+      },
+      {
+        "name": "IconField",
+        "slug": "iconfield",
+        "aliases": [
+          "iconfield",
+          "icon field"
+        ],
+        "path": "primevue/iconfield.md",
+        "chars": 8557
+      },
+      {
+        "name": "IftaLabel",
+        "slug": "iftalabel",
+        "aliases": [
+          "iftalabel",
+          "ifta label"
+        ],
+        "path": "primevue/iftalabel.md",
+        "chars": 2742
+      },
+      {
+        "name": "Inplace",
+        "slug": "inplace",
+        "aliases": [
+          "inplace"
+        ],
+        "path": "primevue/inplace.md",
+        "chars": 7257
+      },
+      {
+        "name": "InputColor",
+        "slug": "inputcolor",
+        "aliases": [
+          "inputcolor",
+          "input color"
+        ],
+        "path": "primevue/inputcolor.md",
+        "chars": 37797
+      },
+      {
+        "name": "InputGroup",
+        "slug": "inputgroup",
+        "aliases": [
+          "inputgroup",
+          "input group"
+        ],
+        "path": "primevue/inputgroup.md",
+        "chars": 9950
+      },
+      {
+        "name": "InputNumber",
+        "slug": "inputnumber",
+        "aliases": [
+          "inputnumber",
+          "input number"
+        ],
+        "path": "primevue/inputnumber.md",
+        "chars": 22368
+      },
+      {
+        "name": "InputOtp",
+        "slug": "inputotp",
+        "aliases": [
+          "inputotp",
+          "input otp"
+        ],
+        "path": "primevue/inputotp.md",
+        "chars": 9642
+      },
+      {
+        "name": "InputPassword",
+        "slug": "inputpassword",
+        "aliases": [
+          "inputpassword",
+          "input password",
+          "password field"
+        ],
+        "path": "primevue/inputpassword.md",
+        "chars": 30049
+      },
+      {
+        "name": "InputTags",
+        "slug": "inputtags",
+        "aliases": [
+          "inputtags",
+          "input tags"
+        ],
+        "path": "primevue/inputtags.md",
+        "chars": 16364
+      },
+      {
+        "name": "InputText",
+        "slug": "inputtext",
+        "aliases": [
+          "inputtext",
+          "input text"
+        ],
+        "path": "primevue/inputtext.md",
+        "chars": 24482
+      },
+      {
+        "name": "KeyFilter",
+        "slug": "keyfilter",
+        "aliases": [
+          "keyfilter",
+          "key filter"
+        ],
+        "path": "primevue/keyfilter.md",
+        "chars": 3823
+      },
+      {
+        "name": "Knob",
+        "slug": "knob",
+        "aliases": [
+          "knob"
+        ],
+        "path": "primevue/knob.md",
+        "chars": 9278
+      },
+      {
+        "name": "Label",
+        "slug": "label",
+        "aliases": [
+          "label"
+        ],
+        "path": "primevue/label.md",
+        "chars": 4991
+      },
+      {
+        "name": "Listbox",
+        "slug": "listbox",
+        "aliases": [
+          "listbox"
+        ],
+        "path": "primevue/listbox.md",
+        "chars": 28778
+      },
+      {
+        "name": "Mask",
+        "slug": "mask",
+        "aliases": [
+          "mask"
+        ],
+        "path": "primevue/mask.md",
+        "chars": 6133
+      },
+      {
+        "name": "MegaMenu",
+        "slug": "megamenu",
+        "aliases": [
+          "megamenu",
+          "mega menu"
+        ],
+        "path": "primevue/megamenu.md",
+        "chars": 26551
+      },
+      {
+        "name": "Menu",
+        "slug": "menu",
+        "aliases": [
+          "menu"
+        ],
+        "path": "primevue/menu.md",
+        "chars": 25621
+      },
+      {
+        "name": "Menubar",
+        "slug": "menubar",
+        "aliases": [
+          "menubar"
+        ],
+        "path": "primevue/menubar.md",
+        "chars": 20919
+      },
+      {
+        "name": "Message",
+        "slug": "message",
+        "aliases": [
+          "message"
+        ],
+        "path": "primevue/message.md",
+        "chars": 22321
+      },
+      {
+        "name": "MeterGroup",
+        "slug": "metergroup",
+        "aliases": [
+          "metergroup",
+          "meter group"
+        ],
+        "path": "primevue/metergroup.md",
+        "chars": 10951
+      },
+      {
+        "name": "OrderList",
+        "slug": "orderlist",
+        "aliases": [
+          "orderlist",
+          "order list"
+        ],
+        "path": "primevue/orderlist.md",
+        "chars": 11449
+      },
+      {
+        "name": "OrganizationChart",
+        "slug": "organizationchart",
+        "aliases": [
+          "organizationchart",
+          "organization chart",
+          "orgchart",
+          "org chart"
+        ],
+        "path": "primevue/organizationchart.md",
+        "chars": 18220
+      },
+      {
+        "name": "Paginator",
+        "slug": "paginator",
+        "aliases": [
+          "paginator"
+        ],
+        "path": "primevue/paginator.md",
+        "chars": 13328
+      },
+      {
+        "name": "Panel",
+        "slug": "panel",
+        "aliases": [
+          "panel"
+        ],
+        "path": "primevue/panel.md",
+        "chars": 14957
+      },
+      {
+        "name": "PickList",
+        "slug": "picklist",
+        "aliases": [
+          "picklist",
+          "pick list"
+        ],
+        "path": "primevue/picklist.md",
+        "chars": 15976
+      },
+      {
+        "name": "Popover",
+        "slug": "popover",
+        "aliases": [
+          "popover"
+        ],
+        "path": "primevue/popover.md",
+        "chars": 6753
+      },
+      {
+        "name": "ProgressBar",
+        "slug": "progressbar",
+        "aliases": [
+          "progressbar",
+          "progress bar"
+        ],
+        "path": "primevue/progressbar.md",
+        "chars": 8132
+      },
+      {
+        "name": "ProgressSpinner",
+        "slug": "progressspinner",
+        "aliases": [
+          "progressspinner",
+          "progress spinner"
+        ],
+        "path": "primevue/progressspinner.md",
+        "chars": 3672
+      },
+      {
+        "name": "RadioButton",
+        "slug": "radiobutton",
+        "aliases": [
+          "radiobutton",
+          "radio button"
+        ],
+        "path": "primevue/radiobutton.md",
+        "chars": 17605
+      },
+      {
+        "name": "Rating",
+        "slug": "rating",
+        "aliases": [
+          "rating"
+        ],
+        "path": "primevue/rating.md",
+        "chars": 10099
+      },
+      {
+        "name": "Ripple",
+        "slug": "ripple",
+        "aliases": [
+          "ripple"
+        ],
+        "path": "primevue/ripple.md",
+        "chars": 2381
+      },
+      {
+        "name": "ScrollArea",
+        "slug": "scrollarea",
+        "aliases": [
+          "scrollarea",
+          "scroll area"
+        ],
+        "path": "primevue/scrollarea.md",
+        "chars": 28458
+      },
+      {
+        "name": "ScrollTop",
+        "slug": "scrolltop",
+        "aliases": [
+          "scrolltop",
+          "scroll top"
+        ],
+        "path": "primevue/scrolltop.md",
+        "chars": 4058
+      },
+      {
+        "name": "Select",
+        "slug": "select",
+        "aliases": [
+          "select",
+          "dropdown"
+        ],
+        "path": "primevue/select.md",
+        "chars": 55863
+      },
+      {
+        "name": "SelectButton",
+        "slug": "selectbutton",
+        "aliases": [
+          "selectbutton",
+          "select button"
+        ],
+        "path": "primevue/selectbutton.md",
+        "chars": 9106
+      },
+      {
+        "name": "Sidebar",
+        "slug": "sidebar",
+        "aliases": [
+          "sidebar"
+        ],
+        "path": "primevue/sidebar.md",
+        "chars": 112090
+      },
+      {
+        "name": "Skeleton",
+        "slug": "skeleton",
+        "aliases": [
+          "skeleton"
+        ],
+        "path": "primevue/skeleton.md",
+        "chars": 10430
+      },
+      {
+        "name": "Slider",
+        "slug": "slider",
+        "aliases": [
+          "slider"
+        ],
+        "path": "primevue/slider.md",
+        "chars": 15851
+      },
+      {
+        "name": "Speed Dial",
+        "slug": "speeddial",
+        "aliases": [
+          "speeddial",
+          "speed dial"
+        ],
+        "path": "primevue/speeddial.md",
+        "chars": 16820
+      },
+      {
+        "name": "SplitButton",
+        "slug": "splitbutton",
+        "aliases": [
+          "splitbutton",
+          "split button"
+        ],
+        "path": "primevue/splitbutton.md",
+        "chars": 26720
+      },
+      {
+        "name": "Splitter",
+        "slug": "splitter",
+        "aliases": [
+          "splitter"
+        ],
+        "path": "primevue/splitter.md",
+        "chars": 21456
+      },
+      {
+        "name": "Stepper",
+        "slug": "stepper",
+        "aliases": [
+          "stepper"
+        ],
+        "path": "primevue/stepper.md",
+        "chars": 26713
+      },
+      {
+        "name": "StyleClass",
+        "slug": "styleclass",
+        "aliases": [
+          "styleclass",
+          "style class"
+        ],
+        "path": "primevue/styleclass.md",
+        "chars": 10313
+      },
+      {
+        "name": "Tabs",
+        "slug": "tabs",
+        "aliases": [
+          "tabs"
+        ],
+        "path": "primevue/tabs.md",
+        "chars": 27597
+      },
+      {
+        "name": "Tag",
+        "slug": "tag",
+        "aliases": [
+          "tag"
+        ],
+        "path": "primevue/tag.md",
+        "chars": 6255
+      },
+      {
+        "name": "Terminal",
+        "slug": "terminal",
+        "aliases": [
+          "terminal"
+        ],
+        "path": "primevue/terminal.md",
+        "chars": 5173
+      },
+      {
+        "name": "Textarea",
+        "slug": "textarea",
+        "aliases": [
+          "textarea"
+        ],
+        "path": "primevue/textarea.md",
+        "chars": 22764
+      },
+      {
+        "name": "TieredMenu",
+        "slug": "tieredmenu",
+        "aliases": [
+          "tieredmenu",
+          "tiered menu"
+        ],
+        "path": "primevue/tieredmenu.md",
+        "chars": 20462
+      },
+      {
+        "name": "Timeline",
+        "slug": "timeline",
+        "aliases": [
+          "timeline"
+        ],
+        "path": "primevue/timeline.md",
+        "chars": 21073
+      },
+      {
+        "name": "Toast",
+        "slug": "toast",
+        "aliases": [
+          "toast",
+          "notification"
+        ],
+        "path": "primevue/toast.md",
+        "chars": 24141
+      },
+      {
+        "name": "ToggleButton",
+        "slug": "togglebutton",
+        "aliases": [
+          "togglebutton",
+          "toggle button"
+        ],
+        "path": "primevue/togglebutton.md",
+        "chars": 11345
+      },
+      {
+        "name": "ToggleSwitch",
+        "slug": "toggleswitch",
+        "aliases": [
+          "toggleswitch",
+          "toggle switch"
+        ],
+        "path": "primevue/toggleswitch.md",
+        "chars": 11078
+      },
+      {
+        "name": "Toolbar",
+        "slug": "toolbar",
+        "aliases": [
+          "toolbar"
+        ],
+        "path": "primevue/toolbar.md",
+        "chars": 5343
+      },
+      {
+        "name": "Tooltip",
+        "slug": "tooltip",
+        "aliases": [
+          "tooltip"
+        ],
+        "path": "primevue/tooltip.md",
+        "chars": 7659
+      },
+      {
+        "name": "Tree",
+        "slug": "tree",
+        "aliases": [
+          "tree"
+        ],
+        "path": "primevue/tree.md",
+        "chars": 39032
+      },
+      {
+        "name": "TreeSelect",
+        "slug": "treeselect",
+        "aliases": [
+          "treeselect",
+          "tree select"
+        ],
+        "path": "primevue/treeselect.md",
+        "chars": 28149
+      },
+      {
+        "name": "TreeTable",
+        "slug": "treetable",
+        "aliases": [
+          "treetable",
+          "tree table"
+        ],
+        "path": "primevue/treetable.md",
+        "chars": 102032
+      },
+      {
+        "name": "VirtualScroller",
+        "slug": "virtualscroller",
+        "aliases": [
+          "virtualscroller",
+          "virtual scroller"
+        ],
+        "path": "primevue/virtualscroller.md",
+        "chars": 12704
+      },
+      {
+        "name": "Chart",
+        "slug": "chart",
+        "aliases": [
+          "chart"
+        ],
+        "path": "primevue/chart.md",
+        "chars": 29497
+      }
+    ],
+    "pages": [
+      {
+        "slug": "installation",
+        "path": "primevue/pages/installation.md",
+        "chars": 94
+      },
+      {
+        "slug": "vite",
+        "path": "primevue/pages/vite.md",
+        "chars": 2150
+      }
+    ]
+  },
+  "laravel": {
+    "branch": "13.x",
+    "source_pattern": "https://raw.githubusercontent.com/laravel/docs/{branch}/{topic}.md",
+    "topics": [
+      {
+        "topic": "migrations",
+        "title": "Database: Migrations",
+        "triggers": [
+          "migration",
+          "migrate",
+          "schema",
+          "column",
+          "new table",
+          "index",
+          "foreign key"
+        ],
+        "path": "laravel/migrations.md",
+        "chars": 59551,
+        "branch": "13.x"
+      },
+      {
+        "topic": "seeding",
+        "title": "Database: Seeding",
+        "triggers": [
+          "seed",
+          "seeder",
+          "sample data",
+          "demo data"
+        ],
+        "path": "laravel/seeding.md",
+        "chars": 5552,
+        "branch": "13.x"
+      },
+      {
+        "topic": "eloquent-factories",
+        "title": "Eloquent: Factories",
+        "triggers": [
+          "factory",
+          "faker",
+          "fake data",
+          "test data"
+        ],
+        "path": "laravel/eloquent-factories.md",
+        "chars": 22802,
+        "branch": "13.x"
+      },
+      {
+        "topic": "eloquent",
+        "title": "Eloquent: Getting Started",
+        "triggers": [
+          "model",
+          "eloquent",
+          "soft delete",
+          "casts",
+          "query scope"
+        ],
+        "path": "laravel/eloquent.md",
+        "chars": 69293,
+        "branch": "13.x"
+      },
+      {
+        "topic": "eloquent-relationships",
+        "title": "Eloquent: Relationships",
+        "triggers": [
+          "relationship",
+          "hasmany",
+          "belongsto",
+          "belongstomany",
+          "hasone",
+          "pivot"
+        ],
+        "path": "laravel/eloquent-relationships.md",
+        "chars": 98484,
+        "branch": "13.x"
+      },
+      {
+        "topic": "eloquent-resources",
+        "title": "Eloquent: API Resources",
+        "triggers": [
+          "api resource",
+          "jsonresource",
+          "resource collection",
+          "transform response"
+        ],
+        "path": "laravel/eloquent-resources.md",
+        "chars": 42925,
+        "branch": "13.x"
+      },
+      {
+        "topic": "eloquent-mutators",
+        "title": "Eloquent: Mutators & Casting",
+        "triggers": [
+          "accessor",
+          "mutator",
+          "attribute cast",
+          "appends"
+        ],
+        "path": "laravel/eloquent-mutators.md",
+        "chars": 36575,
+        "branch": "13.x"
+      },
+      {
+        "topic": "validation",
+        "title": "Validation",
+        "triggers": [
+          "validate",
+          "validation",
+          "rules",
+          "formrequest",
+          "form request"
+        ],
+        "path": "laravel/validation.md",
+        "chars": 114317,
+        "branch": "13.x"
+      },
+      {
+        "topic": "controllers",
+        "title": "Controllers",
+        "triggers": [
+          "controller",
+          "crud",
+          "resource controller"
+        ],
+        "path": "laravel/controllers.md",
+        "chars": 29934,
+        "branch": "13.x"
+      },
+      {
+        "topic": "routing",
+        "title": "Routing",
+        "triggers": [
+          "route",
+          "endpoint",
+          "api route",
+          "route model binding"
+        ],
+        "path": "laravel/routing.md",
+        "chars": 40414,
+        "branch": "13.x"
+      },
+      {
+        "topic": "requests",
+        "title": "HTTP Requests",
+        "triggers": [
+          "request input",
+          "query parameter",
+          "uploaded file"
+        ],
+        "path": "laravel/requests.md",
+        "chars": 33529,
+        "branch": "13.x"
+      },
+      {
+        "topic": "responses",
+        "title": "HTTP Responses",
+        "triggers": [
+          "response",
+          "json response",
+          "status code",
+          "redirect"
+        ],
+        "path": "laravel/responses.md",
+        "chars": 33207,
+        "branch": "13.x"
+      },
+      {
+        "topic": "middleware",
+        "title": "Middleware",
+        "triggers": [
+          "middleware",
+          "throttle",
+          "rate limit"
+        ],
+        "path": "laravel/middleware.md",
+        "chars": 20548,
+        "branch": "13.x"
+      },
+      {
+        "topic": "authentication",
+        "title": "Authentication",
+        "triggers": [
+          "login",
+          "authenticate",
+          "auth guard",
+          "session auth"
+        ],
+        "path": "laravel/authentication.md",
+        "chars": 46753,
+        "branch": "13.x"
+      },
+      {
+        "topic": "authorization",
+        "title": "Authorization",
+        "triggers": [
+          "policy",
+          "gate",
+          "permission",
+          "authorize",
+          "role"
+        ],
+        "path": "laravel/authorization.md",
+        "chars": 32610,
+        "branch": "13.x"
+      },
+      {
+        "topic": "sanctum",
+        "title": "Laravel Sanctum",
+        "triggers": [
+          "sanctum",
+          "api token",
+          "bearer token",
+          "spa authentication"
+        ],
+        "path": "laravel/sanctum.md",
+        "chars": 26009,
+        "branch": "13.x"
+      },
+      {
+        "topic": "testing",
+        "title": "Testing: Getting Started",
+        "triggers": [
+          "phpunit",
+          "pest",
+          "test suite",
+          "assertion"
+        ],
+        "path": "laravel/testing.md",
+        "chars": 11285,
+        "branch": "13.x"
+      },
+      {
+        "topic": "database-testing",
+        "title": "Database Testing",
+        "triggers": [
+          "refreshdatabase",
+          "database test",
+          "assertdatabasehas"
+        ],
+        "path": "laravel/database-testing.md",
+        "chars": 8389,
+        "branch": "13.x"
+      },
+      {
+        "topic": "http-tests",
+        "title": "HTTP Tests",
+        "triggers": [
+          "getjson",
+          "postjson",
+          "feature test",
+          "http test"
+        ],
+        "path": "laravel/http-tests.md",
+        "chars": 61279,
+        "branch": "13.x"
+      },
+      {
+        "topic": "artisan",
+        "title": "Artisan Console",
+        "triggers": [
+          "artisan",
+          "console command",
+          "scheduler"
+        ],
+        "path": "laravel/artisan.md",
+        "chars": 37611,
+        "branch": "13.x"
+      },
+      {
+        "topic": "vite",
+        "title": "Asset Bundling (Vite)",
+        "triggers": [
+          "vite",
+          "asset bundle",
+          "compile assets"
+        ],
+        "path": "laravel/vite.md",
+        "chars": 43414,
+        "branch": "13.x"
+      },
+      {
+        "topic": "structure",
+        "title": "Directory Structure",
+        "triggers": [
+          "directory structure",
+          "where to put"
+        ],
+        "path": "laravel/structure.md",
+        "chars": 13401,
+        "branch": "13.x"
+      },
+      {
+        "topic": "blade",
+        "title": "Blade Templates",
+        "triggers": [
+          "blade",
+          "view template",
+          "layout"
+        ],
+        "path": "laravel/blade.md",
+        "chars": 71219,
+        "branch": "13.x"
+      },
+      {
+        "topic": "database",
+        "title": "Database: Getting Started",
+        "triggers": [
+          "sqlite",
+          "mysql",
+          "transaction",
+          "connection"
+        ],
+        "path": "laravel/database.md",
+        "chars": 23432,
+        "branch": "13.x"
+      }
+    ]
+  }
+}

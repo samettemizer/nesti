@@ -13,9 +13,20 @@
 # this image does not carry, and Playwright then refuses to launch with
 # "Executable doesn't exist at /ms-playwright/…". That is not hypothetical —
 # ^1.50.0 currently resolves well past 1.50.
-FROM mcr.microsoft.com/playwright:v1.50.0-jammy
+FROM mcr.microsoft.com/playwright:v1.50.0-noble
 
 WORKDIR /app
+
+# Ubuntu 24.04 (noble) carries php8.3.  Install the PHP CLI + extensions
+# Laravel needs, replace the image's bundled Node 20 with Node 22 (vitest/vite
+# refuse Node 20), and add Composer so the CMD's artisan branch can boot the app.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      php8.3-cli php8.3-sqlite3 php8.3-mbstring php8.3-xml php8.3-curl php8.3-zip php8.3-intl \
+      unzip ca-certificates curl gnupg \
+ && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
+ && rm -rf /var/lib/apt/lists/*
 
 # Same two-step lockfile fallback as the Node sandbox — missing lockfile falls
 # back to `npm install`, stale lockfile falls through `npm ci` to `npm install`
@@ -31,4 +42,9 @@ WORKDIR /app
 # pin slips through it fetches the matching build instead of failing the whole
 # E2E layer on an infrastructure mismatch the model cannot fix by rewriting
 # its code.  Only chromium is fetched — the suite runs headless Chromium.
-CMD ["sh", "-c", "if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi && npx playwright install chromium && npm run build && npx playwright test --reporter=list"]
+#
+# For a Laravel repo the artisan branch prepares the app (composer install,
+# .env, key, sqlite db, migrate --seed) so Playwright's webServer can boot it
+# via `php artisan serve`; a pure SPA repo skips to the lockfile-tolerant npm
+# install and the vite build/preview contract.
+CMD ["bash", "-lc", "set -e; if [ -f artisan ]; then composer install --no-interaction --prefer-dist --no-progress; [ -f .env ] || cp .env.example .env; php artisan key:generate --force; php artisan config:clear; rm -f database/database.sqlite; touch database/database.sqlite; php artisan migrate --force --seed; fi; if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi; npx playwright install chromium; npm run build; npx playwright test --reporter=list"]

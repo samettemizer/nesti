@@ -1,5 +1,5 @@
 """
-skill_loader.py – fetches skill documentation referenced by URL in Redmine issues.
+skill_loader.py – fetches skill documentation referenced by URL in issue text.
 
 Workflow:
   1. Extract all HTTP/HTTPS URLs from the issue subject and description.

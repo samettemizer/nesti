@@ -1,7 +1,7 @@
 """
 mcp_server/server.py – Nesti MCP Server.
 
-Exposes Redmine, GitLab, Docker, and skill tools via the Model Context Protocol.
+Exposes GitLab Issues, GitLab, Docker, and skill tools via the Model Context Protocol.
 Compatible with Claude Code CLI, VS Code Claude extension, and Cursor.
 
 Run directly:
@@ -36,7 +36,7 @@ app = FastMCP("nesti")
 
 # Importing the tool modules runs their @app.tool() decorators, which
 # registers every tool on ``app``.  Keep this below the ``app`` assignment.
-from mcp_server.tools import redmine, gitlab, docker, skills  # noqa: E402,F401
+from mcp_server.tools import issues, gitlab, docker, skills  # noqa: E402,F401
 
 
 async def main() -> None:

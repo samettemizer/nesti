@@ -3,7 +3,7 @@ GitLab client – handles all Git and GitLab operations.
 
 Responsibilities:
 - Clone the Hello World repository into the workspace.
-- Create a feature branch named after the Redmine issue.
+- Create a feature branch named after the issue.
 - Stage and commit the generated files.
 - Push the branch to GitLab.
 - Open a Merge Request via the GitLab REST API.
@@ -95,11 +95,15 @@ class GitLabClient:
         """Open a GitLab Merge Request and return the MR dict, or None on failure."""
         encoded_path = requests.utils.quote(self.project_path, safe="")
         url = f"{self.gitlab_url}/api/v4/projects/{encoded_path}/merge_requests"
+        # "Closes #N" is a GitLab closing keyword: it cross-links the MR to the
+        # issue in the UI and closes the issue when the MR is merged. Now that
+        # issues live in the same GitLab project as the code, that linkage is
+        # native — under Redmine it could only ever be a plain-text mention.
         payload = {
             "source_branch": branch_name,
             "target_branch": self.default_branch,
             "title": f"[Issue #{issue_id}] {subject}",
-            "description": description or f"Closes Redmine issue #{issue_id}\n\n{subject}",
+            "description": f"Closes #{issue_id}\n\n{description or subject}",
             "remove_source_branch": True,
         }
         response = self._session.post(url, json=payload, timeout=30)

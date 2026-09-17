@@ -5,7 +5,7 @@
 #
 # Selected via DOCKER_SANDBOX_NODE_IMAGE.  The orchestrator mounts the cloned
 # repository at /app; no browser is involved, so this layer is fast.
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
