@@ -12,6 +12,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN echo '#!/bin/bash\npython /orchestrator/scripts/oauth.py "$@"' > /usr/local/bin/nesti && chmod +x /usr/local/bin/nesti
 
 ENTRYPOINT ["python", "main.py"]
 CMD ["--loop"]

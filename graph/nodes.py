@@ -61,7 +61,7 @@ from graph.tools import (
     tool_docker_run_tests, tool_gitlab_commit_and_push, tool_gitlab_open_mr,
     tool_issue_set_status, tool_detect_stack, tool_vitest_run_tests,
     tool_playwright_run_tests, tool_laravel_bootstrap, tool_openapi_export,
-    tool_skill_catalog_select, tool_skill_catalog_status,
+    tool_skill_catalog_select, tool_skill_catalog_status, tool_quota_check,
 )
 from llm_client import LLMClient
 from conversation_store import ConversationStore
@@ -757,6 +757,20 @@ def node_on_layer_failure(state: IssueState) -> dict:
     rather than inheriting a stale pass from the previous round.
     """
     logger.debug("→ node_on_layer_failure")
+
+    quota = tool_quota_check()
+    if quota["success"]:
+        for name, usage in quota["result"].items():
+            remaining = usage.get("remaining", 999)
+            limit = usage.get("limit", 999)
+            if remaining < 3 or (limit > 0 and (remaining / limit) < 0.1):
+                telegram_notify(
+                    f"⚠️ Low Quota Warning: Provider '{name}' has only {remaining} requests left."
+                )
+                logger.warning("Low Quota Warning for %s: %d left", name, remaining)
+    else:
+        logger.warning("Failed to check provider usage quota: %s", quota["error"])
+
     layer, failure_output = _last_failure_output(state)
     logger.info(
         "Retry %d/%d – %s failed, escalating coder tier …",

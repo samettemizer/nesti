@@ -3,13 +3,10 @@ llm_client.py – provider cascade for planning and code generation.
 
 Provider roles
 ──────────────
-  Planning  │ Hermes-3    (local via Ollama)
-            │   → DeepSeek  (mid-tier paid API)
-            │   → Claude Sonnet  (last-resort paid API)
-
-  Coding    │ Qwen3:30b   (local – via Ollama)
-            │   → DeepSeek  (mid-tier paid API)
-            │   → Claude Sonnet  (last-resort paid API)
+  Planning  │   → Consumer Account
+  Coding    │     or
+            │   → DeepSeek API (mid-tier paid)
+            │   → Claude API   (last-resort paid)
 
 Cascade rules
 ─────────────
@@ -19,7 +16,7 @@ Cascade rules
                               the minimum coder tier for the NEXT attempt.
   • Every provider failure and tier escalation emits a Telegram notification.
   • A provider is silently skipped at init-time when its env vars are absent,
-    so the system degrades gracefully (e.g. Hermes-3 not yet installed).
+    so the system degrades gracefully
 """
 
 import logging
@@ -29,6 +26,7 @@ from abc import ABC, abstractmethod
 import anthropic
 import requests
 
+from scripts.oauth import TokenStore
 from telegram_notifier import notify as telegram_notify
 
 logger = logging.getLogger(__name__)
@@ -164,7 +162,7 @@ class _OllamaBase(BaseLLMClient):
 
 
 class HermesLLMClient(_OllamaBase):
-    """Hermes-3 – primary planner."""
+    """Hermes-3 – planner"""
     name = "Hermes-3"
 
     def __init__(self) -> None:
@@ -181,7 +179,7 @@ class HermesLLMClient(_OllamaBase):
 
 
 class QwenLLMClient(_OllamaBase):
-    """Qwen3:30b – primary code generator."""
+    """Qwen3:30b – code generator."""
 
     name = "Qwen3:30b"
 
@@ -288,8 +286,17 @@ class AnthropicLLMClient(BaseLLMClient):
     name = "Claude Sonnet"
 
     def __init__(self) -> None:
-        self.client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         self.model: str = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
+    def _get_active_api_key(self) -> str:
+        try:
+            store = TokenStore()
+            token_data = store.get_token("claude")
+            if token_data and "access_token" in token_data:
+                return token_data["access_token"]
+        except Exception:
+            pass
+        return os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
     def _call(
         self,
@@ -297,12 +304,15 @@ class AnthropicLLMClient(BaseLLMClient):
         user_prompt: str,
         messages: list[dict] | None = None,
     ) -> str:
+        api_key = self._get_active_api_key()
+        client = anthropic.Anthropic(api_key=api_key)
+        
         msg_list = messages if messages else [{"role": "user", "content": user_prompt}]
         # Anthropic keeps the system prompt separate and rejects system-role
         # entries inside the messages array, so strip any that were carried in
         # the shared history.
         msg_list = [m for m in msg_list if m.get("role") != "system"]
-        message = self.client.messages.create(
+        message = client.messages.create(
             model=self.model,
             max_tokens=_DEFAULT_MAX_TOKENS,
             system=system_prompt,
@@ -340,9 +350,6 @@ class AnthropicLLMClient(BaseLLMClient):
 class LLMClient:
     """
     Unified LLM client with 3-tier cascading fallback.
-
-    Planning cascade (fully automatic within every call):
-        Hermes-3  →  DeepSeek  →  Claude Sonnet
 
     Coding cascade (hybrid):
         • API / timeout errors  → immediate cascade within the same attempt.
