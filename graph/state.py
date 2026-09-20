@@ -78,6 +78,15 @@ class IssueState(TypedDict, total=False):
     test_output: str                   # last PHPUnit output
     test_passed: bool
 
+    # ── Provider attribution (Phase 7) ─────────────────────────────────────
+    # Who produced the code that is being tested / merged. Recorded by
+    # node_code from the coder that actually answered, because the chain head
+    # moves during a run (escalation, API cascade) and would misattribute the
+    # work if it were read again at commit time.
+    coder_provider: str                # e.g. "Claude Pro/Max (consumer)"
+    coder_model: str                   # e.g. "claude-sonnet-4-6"
+    coder_billing: str                 # "consumer subscription" | "platform API" | "local model"
+
     # ── OpenAPI layer results (Phase 5) ────────────────────────────────────
     openapi_passed: bool
     openapi_output: str

@@ -17,6 +17,14 @@ services:
       - /tmp:/tmp
       # Optional: persist logs on the host
       - ./logs:/orchestrator/logs
+    ports:
+      # nesti /provider login antigravity runs a short-lived local HTTP
+      # listener (scripts/oauth.py AntigravityProvider) to capture Google's
+      # OAuth redirect, because Antigravity's hosted callback page consumes
+      # the code server-side and never displays it for a manual paste.
+      # Bound to localhost only, matching nesti-redis's port below — never
+      # exposed to the network.
+      - "127.0.0.1:51121:51121"
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-60}

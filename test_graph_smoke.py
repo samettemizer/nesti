@@ -972,8 +972,17 @@ import graph.tools as tools_mod
 import inspect
 tool_fns = [f for n, f in inspect.getmembers(tools_mod, inspect.isfunction)
             if n.startswith("tool_")]
-check(len(tool_fns) == 16, "16 MCP tool functions defined")
+check(len(tool_fns) == 17, "17 MCP tool functions defined")
 check("langgraph" not in inspect.getsource(tools_mod), "tools.py has no LangGraph imports")
+
+# Regression check for the TokenStore Redis-outage bug: tool_quota_check()
+# must degrade like every other store in this codebase (ConversationStore,
+# GitLabIssuesClient) — never crash the whole orchestrator loop just because
+# Redis is unreachable when node_on_layer_failure calls it on every retry.
+quota_result = tools_mod.tool_quota_check()
+check(quota_result == {"success": True, "result": {}},
+      "tool_quota_check degrades to an empty result on a Redis outage, "
+      "never raises/exits")
 
 env_example = open(".env.example").read()
 for var in ("DOCKER_SANDBOX_PHP_IMAGE", "DOCKER_SANDBOX_NODE_IMAGE",
