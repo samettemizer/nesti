@@ -111,6 +111,29 @@ RISK_NOTICES: Dict[str, str] = {
 # Provider Implementations
 # ---------------------------------------------------------
 
+def _window_usage(windows: list[dict[str, Any]], source: str) -> Dict[str, Any]:
+    """Quota summary for rate-limit *windows* ({label, used_percent, resets_at}).
+
+    node_on_layer_failure reasons about one remaining/limit pair per provider,
+    so ``remaining`` is the percent left in the most depleted window — the one
+    that blocks first. The CLI renders every window.
+    """
+    if not windows:
+        return {
+            "remaining": None,
+            "limit": None,
+            "reset_time": None,
+            "note": f"{source} reported no quota window for this account.",
+        }
+    tightest = max(windows, key=lambda w: w["used_percent"])
+    return {
+        "remaining": max(0, round(100 - tightest["used_percent"])),
+        "limit": 100,
+        "reset_time": tightest["resets_at"],
+        "windows": windows,
+    }
+
+
 class ClaudeProvider:
     """
     Claude Pro/Max via the same public OAuth client (client_id) and
@@ -258,22 +281,7 @@ class ClaudeProvider:
             for key, label in self._USAGE_WINDOWS
             if (window := payload.get(key)) and window.get("utilization") is not None
         ]
-        if not windows:
-            return {
-                "remaining": None,
-                "limit": None,
-                "reset_time": None,
-                "note": f"{self._USAGE_URL} reported no rate-limit window for this account.",
-            }
-        # node_on_layer_failure reasons about one remaining/limit pair per
-        # provider — report the most depleted window, the one that blocks first.
-        tightest = max(windows, key=lambda w: w["used_percent"])
-        return {
-            "remaining": max(0, round(100 - tightest["used_percent"])),
-            "limit": 100,
-            "reset_time": tightest["resets_at"],
-            "windows": windows,
-        }
+        return _window_usage(windows, self._USAGE_URL)
 
 
 class AntigravityProvider:
@@ -297,9 +305,9 @@ class AntigravityProvider:
     """
 
     name = "antigravity"
-    # get_usage() renews its own access token: Google does not rotate the
-    # refresh token, so an unpersisted renewal leaves the stored session intact.
-    usage_needs_fresh_credentials = False
+    # get_usage() authenticates with the stored one-hour access token;
+    # fetch_usage() renews it and resolves project_id first.
+    usage_needs_fresh_credentials = True
     _CLIENT_ID = os.environ.get("ANTIGRAVITY_CLIENT_ID", "")
     _CLIENT_SECRET = os.environ.get("ANTIGRAVITY_CLIENT_SECRET", "")
     _AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -307,6 +315,18 @@ class AntigravityProvider:
     _USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
     _CLOUD_CODE_BASE = "https://cloudcode-pa.googleapis.com"
     _DEFAULT_PROJECT_ID = "rising-fact-p41fc"
+    # Cloud Code serves only callers that identify as Antigravity: without
+    # this User-Agent fetchAvailableModels answers 403 PERMISSION_DENIED and
+    # loadCodeAssist omits cloudaicompanionProject.
+    _USER_AGENT = "antigravity"
+    # Quota families shown by /usage, in display order: (label, model-id
+    # prefix, required substring). A model counts toward the first match.
+    _USAGE_FAMILIES = (
+        ("Gemini Pro", "gemini", "pro"),
+        ("Gemini Flash", "gemini", "flash"),
+        ("Claude", "claude", ""),
+        ("GPT-OSS", "gpt-oss", ""),
+    )
     _CALLBACK_PORT = 51121
     # Bind every interface inside the container: Docker's published-port NAT
     # arrives via the container's bridge interface, not its loopback, so a
@@ -455,7 +475,7 @@ class AntigravityProvider:
         try:
             resp = requests.post(
                 f"{self._CLOUD_CODE_BASE}/v1internal:loadCodeAssist",
-                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                headers=self._cloud_code_headers(access_token),
                 json={"metadata": {"ideType": "ANTIGRAVITY"}},
                 timeout=10,
             )
@@ -470,6 +490,13 @@ class AntigravityProvider:
         except Exception:  # pylint: disable=broad-except
             pass
         return ""
+
+    def _cloud_code_headers(self, access_token: str) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "User-Agent": self._USER_AGENT,
+        }
 
     def _refresh_tokens(self, refresh_token: str) -> Dict[str, Any]:
         self._require_credentials()
@@ -505,70 +532,52 @@ class AntigravityProvider:
         return updated
 
     def get_usage(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
-        refresh_token = token_data.get("refresh_token")
-        if not refresh_token:
-            raise RuntimeError("Stored Antigravity token has no refresh_token.")
-        access_token = self._refresh_tokens(refresh_token)["access_token"]
-        project_id = (
-            token_data.get("project_id")
-            or self._load_project_id(access_token)
-            or self._DEFAULT_PROJECT_ID
-        )
-
+        project_id = token_data.get("project_id")
         resp = requests.post(
             f"{self._CLOUD_CODE_BASE}/v1internal:fetchAvailableModels",
-            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            headers=self._cloud_code_headers(token_data.get("access_token")),
             json={"project": project_id} if project_id else {},
             timeout=15,
         )
         if not resp.ok:
             raise RuntimeError(f"fetchAvailableModels failed ({resp.status_code}): {resp.text[:200]}")
+        payload = resp.json()
 
-        models = resp.json().get("models", {})
-        groups: Dict[str, float] = {}
-        resets: Dict[str, str] = {}
-        for model_name, info in models.items():
-            quota = (info or {}).get("quotaInfo")
-            if not quota:
-                continue
-            lower = model_name.lower()
-            if "claude" in lower:
-                group = "claude"
-            elif "gpt-oss" in lower:
-                group = "gpt-oss"
-            elif "gemini-3" in lower and "flash" in lower:
-                group = "gemini-3-flash"
-            elif "gemini-3" in lower:
-                group = "gemini-3-pro"
-            else:
-                continue
-            fraction = quota.get("remainingFraction")
-            if fraction is None:
-                continue
-            groups[group] = min(groups.get(group, fraction), fraction)
-            if quota.get("resetTime"):
-                resets[group] = quota["resetTime"]
-
-        if not groups:
-            return {
-                "remaining": None,
-                "limit": None,
-                "reset_time": None,
-                "note": "fetchAvailableModels returned no per-model quotaInfo for this account.",
-            }
-
-        # node_on_layer_failure's safety check reasons about one
-        # remaining/limit pair per provider — report the tightest (most
-        # depleted) model group, since that is the one that fails first.
-        worst_group = min(groups, key=groups.get)
-        worst_pct = round(groups[worst_group] * 100)
-        breakdown = ", ".join(f"{g}: {round(f * 100)}%" for g, f in groups.items())
-        return {
-            "remaining": worst_pct,
-            "limit": 100,
-            "reset_time": resets.get(worst_group),
-            "note": f"tightest quota group: {worst_group} ({worst_pct}% remaining); per-group: {breakdown}",
+        # Count only the models an agent can select (agentModelSorts): tab
+        # completion, image and search models are not what Nesti's coder
+        # spends. An absent list means every model counts.
+        agent_ids = {
+            model_id
+            for sort in payload.get("agentModelSorts") or []
+            for group in sort.get("groups") or []
+            for model_id in group.get("modelIds") or []
         }
+        tightest: Dict[str, Dict[str, Any]] = {}
+        for model_id, info in (payload.get("models") or {}).items():
+            quota = (info or {}).get("quotaInfo") or {}
+            fraction = quota.get("remainingFraction")
+            if fraction is None or (agent_ids and model_id not in agent_ids):
+                continue
+            lower = model_id.lower()
+            family = next(
+                (
+                    label
+                    for label, prefix, marker in self._USAGE_FAMILIES
+                    if lower.startswith(prefix) and marker in lower
+                ),
+                None,
+            )
+            if family is None:
+                continue
+            used = (1 - float(fraction)) * 100
+            if family not in tightest or used > tightest[family]["used_percent"]:
+                tightest[family] = {
+                    "label": f"Antigravity {family}",
+                    "used_percent": used,
+                    "resets_at": quota.get("resetTime"),
+                }
+        windows = [tightest[label] for label, _, _ in self._USAGE_FAMILIES if label in tightest]
+        return _window_usage(windows, "fetchAvailableModels")
 
 
 class CopilotProvider:
