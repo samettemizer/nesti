@@ -48,7 +48,7 @@ from docker_runner import DockerRunner
 from frontend_runner import FrontendRunner
 from gitlab_client import GitLabClient
 from gitlab_issues_client import GitLabIssuesClient
-from scripts.oauth import PROVIDERS, TokenStore
+from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
 from skill_catalog import catalog_status, select_skills
 from skill_loader import load_skills
@@ -1039,9 +1039,12 @@ def tool_quota_check() -> dict:
     """
     Report remaining usage/quota for every OAuth consumer provider
     (scripts/oauth.py) authenticated via '/provider login'.
-    result: {"<provider>": {"remaining": int, "limit": int,
-             "reset_time": int}, ...} — a provider never logged in is
-    omitted, never reported with a fake value.
+    result: {"<provider>": {"remaining": int | None, "limit": int | None,
+             "reset_time": ISO-8601 str | None, ...}, ...} — Claude adds
+             "windows" (label / used_percent / resets_at per rate-limit
+             window). A provider never logged in is omitted, never reported
+             with a fake value. Credentials renewed on the way are persisted
+             (scripts.oauth.fetch_usage).
 
     node_on_layer_failure calls this instead of importing scripts.oauth
     directly, so the quota check follows the same nodes.py -> tools.py
@@ -1050,12 +1053,10 @@ def tool_quota_check() -> dict:
     """
     try:
         store = TokenStore()
-        usage_by_provider = {}
-        for name, token_data in store.get_all_tokens().items():
-            provider = PROVIDERS.get(name)
-            if provider is None:
-                continue
-            usage_by_provider[name] = provider.get_usage(token_data)
+        usage_by_provider = {
+            name: fetch_usage(store, name, token_data)
+            for name, token_data in store.get_all_tokens().items()
+        }
         return _ok(usage_by_provider)
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_quota_check failed: %s", exc)

@@ -34,6 +34,7 @@ import os
 import secrets
 import sys
 import time
+from datetime import datetime
 from typing import Any, Dict, Optional, Protocol
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -54,6 +55,10 @@ _TOKEN_REFRESH_SKEW = 120
 
 class ConsumerProvider(Protocol):
     name: str
+    # True when get_usage() authenticates with the OAuth access token, so
+    # fetch_usage() must renew (and persist) it through fresh_credentials()
+    # first. get_usage() itself never persists anything.
+    usage_needs_fresh_credentials: bool
 
     def get_auth_url(self) -> str:
         ...
@@ -113,21 +118,31 @@ class ClaudeProvider:
 
     Authorize:      https://claude.ai/oauth/authorize
     Token exchange: https://platform.claude.com/v1/oauth/token
-    Profile:        https://api.anthropic.com/api/oauth/profile
+    Usage:          https://api.anthropic.com/api/oauth/usage
     """
 
     name = "claude"
+    usage_needs_fresh_credentials = True
     # this is a public information. (not about nesti or nesti's developers)
     _CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     _AUTH_URL = "https://claude.ai/oauth/authorize"
     _TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-    _PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+    _USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
     _REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
     _SCOPES = "user:inference user:profile user:sessions:claude_code user:mcp_servers"
     # The token endpoint has been observed taking 40-60s under load; the
     # official CLI's hardcoded 15s timeout is a documented source of
     # spurious login failures this CLI must not repeat.
     _TOKEN_TIMEOUT = 120
+    # Rate-limit windows reported by _USAGE_URL, in display order. Each is
+    # {"utilization": <percent used, 0-100>, "resets_at": <ISO-8601>} or null
+    # when the plan has no such window.
+    _USAGE_WINDOWS = (
+        ("seven_day", "7 Day"),
+        ("five_hour", "5 Hour"),
+        ("seven_day_sonnet", "7 Day Sonnet"),
+        ("seven_day_opus", "7 Day Opus"),
+    )
 
     def __init__(self) -> None:
         self._pending: Optional[Dict[str, str]] = None
@@ -219,42 +234,45 @@ class ClaudeProvider:
         return updated
 
     def get_usage(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
-        access_token = token_data.get("access_token")
-        refresh_token = token_data.get("refresh_token")
-        if refresh_token:
-            try:
-                access_token = self._refresh_tokens(refresh_token)["access_token"]
-            except Exception:  # pylint: disable=broad-except
-                pass  # fall back to the possibly-still-valid stored access_token
+        # Never renew the token here: a refresh rotates the refresh token and
+        # revokes the access token it replaces, and this method cannot persist
+        # the result — the stored session would be dead after one call.
+        # fetch_usage() renews through fresh_credentials() and saves first.
         resp = requests.get(
-            self._PROFILE_URL,
+            self._USAGE_URL,
             headers={
-                "Authorization": f"Bearer {access_token}",
+                "Authorization": f"Bearer {token_data.get('access_token')}",
                 "anthropic-beta": "oauth-2025-04-20",
             },
             timeout=15,
         )
         if not resp.ok:
-            raise RuntimeError(f"Profile request failed ({resp.status_code}): {resp.text[:200]}")
-        profile = resp.json()
-        # Anthropic's OAuth profile endpoint returns account/plan metadata,
-        # not a numeric remaining-messages count — Claude Pro/Max plans have
-        # no public quota-introspection API. Surfacing whatever identifying
-        # fields the endpoint actually returns rather than guessing a schema.
-        account_fields = {
-            k: v for k, v in profile.items()
-            if k in ("email", "email_address", "account", "organization",
-                      "subscription_type", "rate_limit_tier")
-        }
+            raise RuntimeError(f"Usage request failed ({resp.status_code}): {resp.text[:200]}")
+        payload = resp.json()
+        windows = [
+            {
+                "label": f"Claude {label}",
+                "used_percent": float(window["utilization"]),
+                "resets_at": window.get("resets_at"),
+            }
+            for key, label in self._USAGE_WINDOWS
+            if (window := payload.get(key)) and window.get("utilization") is not None
+        ]
+        if not windows:
+            return {
+                "remaining": None,
+                "limit": None,
+                "reset_time": None,
+                "note": f"{self._USAGE_URL} reported no rate-limit window for this account.",
+            }
+        # node_on_layer_failure reasons about one remaining/limit pair per
+        # provider — report the most depleted window, the one that blocks first.
+        tightest = max(windows, key=lambda w: w["used_percent"])
         return {
-            "remaining": None,
-            "limit": None,
-            "reset_time": None,
-            "account": account_fields or None,
-            "note": (
-                "Anthropic does not expose a numeric remaining-quota API for "
-                f"consumer plans; showing account/plan metadata from {self._PROFILE_URL}."
-            ),
+            "remaining": max(0, round(100 - tightest["used_percent"])),
+            "limit": 100,
+            "reset_time": tightest["resets_at"],
+            "windows": windows,
         }
 
 
@@ -279,6 +297,9 @@ class AntigravityProvider:
     """
 
     name = "antigravity"
+    # get_usage() renews its own access token: Google does not rotate the
+    # refresh token, so an unpersisted renewal leaves the stored session intact.
+    usage_needs_fresh_credentials = False
     _CLIENT_ID = os.environ.get("ANTIGRAVITY_CLIENT_ID", "")
     _CLIENT_SECRET = os.environ.get("ANTIGRAVITY_CLIENT_SECRET", "")
     _AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -564,6 +585,9 @@ class CopilotProvider:
     """
 
     name = "copilot"
+    # get_usage() authenticates with the PAT; fresh_credentials() renews the
+    # unrelated chat session token, which the PAT-only session cannot obtain.
+    usage_needs_fresh_credentials = False
     _PAT_CREATE_URL = "https://github.com/settings/personal-access-tokens/new"
     _API_BASE = "https://api.github.com"
     _API_VERSION = "2026-03-10"
@@ -695,6 +719,7 @@ class ChatGPTPlusProvider:
     """
 
     name = "chatgpt-plus"
+    usage_needs_fresh_credentials = False
     # this is a public information. (not about nesti or nesti's developers)
     _CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
     _AUTH_URL = "https://auth.openai.com/oauth/authorize"
@@ -904,6 +929,25 @@ class TokenStore:
         return self._memory.pop(key, None) is not None
 
 
+def fetch_usage(store: TokenStore, name: str, token_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Usage/quota for one stored session — the single entry point for usage reads.
+
+    When the provider's usage call authenticates with the OAuth access token
+    (``usage_needs_fresh_credentials``), the credential is renewed through
+    fresh_credentials() and written back *before* the request, exactly like
+    llm_client's consumer tier. Claude rotates the refresh token on every
+    renewal and revokes the access token it replaces, so a renewal that is
+    not persisted logs the whole pipeline out of the subscription.
+    """
+    provider = PROVIDERS[name]
+    if provider.usage_needs_fresh_credentials:
+        fresh = provider.fresh_credentials(token_data)
+        if fresh != token_data:
+            store.save_token(name, fresh)
+        token_data = fresh
+    return provider.get_usage(token_data)
+
+
 # ---------------------------------------------------------
 # CLI Dispatcher
 # ---------------------------------------------------------
@@ -972,18 +1016,61 @@ def _cmd_provider_logout(store: "TokenStore", provider_name: str) -> None:
         print(f"{provider_name} was not authenticated.")
 
 
+_USAGE_BAR_WIDTH = 24
+_ANSI_RESET = "\033[0m"
+_ANSI_GREEN = "\033[38;5;48m"
+_ANSI_YELLOW = "\033[38;5;220m"
+_ANSI_RED = "\033[38;5;196m"
+_ANSI_GRAY = "\033[38;5;245m"
+_ANSI_TRACK = "\033[38;5;237m"
+
+
+def _format_countdown(resets_at: str | None) -> str:
+    """Time left until *resets_at* as '2d4h' / '2h9m' / '9m'; '' when unknown."""
+    if not resets_at:
+        return ""
+    seconds = int(datetime.fromisoformat(resets_at).timestamp() - time.time())
+    if seconds <= 0:
+        return "now"
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes = seconds // 60
+    if days:
+        return f"{days}d{hours}h"
+    if hours:
+        return f"{hours}h{minutes}m"
+    return f"{minutes}m"
+
+
+def _format_usage_windows(windows: list[dict[str, Any]], color: bool) -> str:
+    """Label line, then a bar of the used share, the remaining percent and the reset countdown."""
+    lines = []
+    for window in windows:
+        used = min(max(window["used_percent"], 0.0), 100.0)
+        remaining = round(100 - used)
+        filled = round(used / 100 * _USAGE_BAR_WIDTH)
+        countdown = _format_countdown(window["resets_at"])
+        if color:
+            tone = _ANSI_GREEN if remaining >= 30 else _ANSI_YELLOW if remaining >= 10 else _ANSI_RED
+            bar = f"{tone}{'█' * filled}{_ANSI_TRACK}{'█' * (_USAGE_BAR_WIDTH - filled)}{_ANSI_RESET}"
+            stats = f"{tone}{remaining:>3}%{_ANSI_RESET}  {_ANSI_GRAY}{countdown}{_ANSI_RESET}"
+        else:
+            bar = "█" * filled + "░" * (_USAGE_BAR_WIDTH - filled)
+            stats = f"{remaining:>3}%  {countdown}".rstrip()
+        lines += [window["label"], f"{bar} {stats}"]
+    return "\n".join(lines)
+
+
 def _format_usage_line(name: str, usage: Dict[str, Any]) -> str:
     remaining, limit, used = usage.get("remaining"), usage.get("limit"), usage.get("used")
     if remaining is not None and limit is not None:
-        line = f"  [{name}]: {remaining} / {limit} remaining"
+        line = f"[{name}]: {remaining} / {limit} remaining"
     elif used is not None:
-        line = f"  [{name}]: {used} used this period (no hard remaining-quota API)"
+        line = f"[{name}]: {used} used this period (no hard remaining-quota API)"
     else:
-        line = f"  [{name}]: usage unknown"
-    if usage.get("account"):
-        line += f"\n      account: {usage['account']}"
+        line = f"[{name}]: usage unknown"
     if usage.get("note"):
-        line += f"\n      note: {usage['note']}"
+        line += f"\n    note: {usage['note']}"
     return line
 
 
@@ -1021,16 +1108,17 @@ def main() -> None:
             print("No authenticated providers. Use '/provider login [name]' first.")
             sys.exit(0)
 
-        print("Provider Quota/Usage:")
+        color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
         for name, token_data in tokens.items():
-            provider = PROVIDERS.get(name)
-            if provider is None:
-                continue
             try:
-                usage = provider.get_usage(token_data)
-                print(_format_usage_line(name, usage))
+                usage = fetch_usage(store, name, token_data)
+                print(
+                    _format_usage_windows(usage["windows"], color)
+                    if usage.get("windows")
+                    else _format_usage_line(name, usage)
+                )
             except Exception as exc:  # pylint: disable=broad-except
-                print(f"  [{name}]: Error fetching usage: {exc}")
+                print(f"[{name}]: Error fetching usage: {exc}")
     else:
         print(f"Unknown command: {cmd}")
         print_help()
