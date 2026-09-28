@@ -141,6 +141,38 @@ The only run-time fetch left is URLs the issue itself contains, handled by
 
 ---
 
+## Hierarchical Vector Memory
+
+Semantic retrieval on top of the keyword skill catalog, in two tiers that share
+one embedder (`embedding.py`: `BAAI/bge-small-en-v1.5`, 384 dims, fastembed on
+the CPU — offline, no API cost, weights baked into the images):
+
+| Tier | Store | Contents | Written by | Read by |
+|------|-------|----------|------------|---------|
+| Long-term docs | Qdrant (`nesti-qdrant`, collection `nesti_docs`) | the `skills/` corpus, chunked and embedded | `scripts/index_skills.py` | `plan`, `code` (filtered by detected stack) |
+| Solution cache | Redis 8 query engine (`nesti_solution_idx`) | subject, stack, MR URL and plan of every merged issue; TTL 90 days | `commit` | `plan` |
+| Episodic memory | Redis 8 query engine (`nesti_episode_idx`) | condensed output of each failed attempt of the issue in flight | `on_layer_failure` | `code` (older attempts only) |
+
+The vector index reaches passages past the catalog's 7 000-char cap and
+documents whose name the issue never mentions; chunks the catalog already
+injected are dropped. Hits below the cosine floors (`NESTI_SOLUTION_MIN_SCORE`
+0.80, `NESTI_EPISODE_MIN_SCORE` 0.60) are never injected. Episodes are deleted
+when their issue finishes.
+
+Memory is optional and never raises: an unreachable Qdrant, a pre-8 Redis or a
+missing embedder degrades retrieval to "no results", and
+`NESTI_MEMORY_ENABLED=false` runs the pipeline exactly as before. Index the
+corpus once after `docker-compose up` (and after `fetch_skills.py`); changing
+the embedding model requires `--recreate`:
+
+```bash
+docker exec nesti-orchestrator python scripts/index_skills.py
+```
+
+The seven `memory_*` MCP tools expose the same stores.
+
+---
+
 ## Frontend Testing
 
 When generated code contains `.vue` files, two extra layers run automatically:
@@ -177,7 +209,8 @@ repository layout misleads it; the default `auto` is right for most projects.
 |---------|------|------|
 | GitLab | `https://gitlab.yourdomain.com` | Repository + merge requests + issue intake |
 | Local LLM (optional) | your Ollama host | Local planner / coder tiers |
-| Redis | `nesti-redis:6379` | Conversation history |
+| Redis 8 | `nesti-redis:6379` | Conversation history, OAuth sessions, solution + episode cache |
+| Qdrant | `nesti-qdrant:6333` | Long-term document memory (vector index) |
 | Nesti MCP | stdio via `docker exec` | Tools for Claude Code / IDEs |
 | DeepSeek API | `api.deepseek.com` | Mid-tier paid fallback |
 | Claude (Sonnet) | `api.anthropic.com` | Last-resort fallback |
@@ -193,19 +226,22 @@ main.py                    <- CLI entry point (--loop / single-run)
 task_engine.py             <- invokes the LangGraph pipeline
 graph/
   state.py                 <- IssueState TypedDict
-  tools.py                 <- 16 atomic tool functions (issues, GitLab, sandboxes, skills)
+  tools.py                 <- 24 atomic tool functions (issues, GitLab, sandboxes, skills, memory, quota)
   nodes.py                 <- LangGraph nodes
   edges.py                 <- conditional routing, one router per test layer
   builder.py               <- compiled StateGraph (14 nodes)
 mcp_server/
-  server.py                <- MCP stdio server (FastMCP), 17 tools
-  tools/                   <- issues, GitLab, sandbox, skill MCP tools
+  server.py                <- MCP stdio server (FastMCP), 25 tools
+  tools/                   <- issues, GitLab, sandbox, skill, memory, quota MCP tools
   Dockerfile               <- standalone nesti-mcp container
 conversation_store.py      <- Redis-backed per-issue message history
 llm_client.py              <- provider cascade with multi-turn support
 prompt_builder.py          <- system + user prompt construction (Laravel 13 + PrimeVue 5 role)
 skill_loader.py            <- URL extraction + markdown fetching from issue text
 skill_catalog.py           <- deterministic offline skill selection from vendored corpus
+embedding.py               <- shared fastembed embedder for both memory tiers
+vector_store.py            <- Qdrant document memory (long-term)
+semantic_cache.py          <- Redis 8 solution cache + episodic memory (short-term)
 gitlab_issues_client.py    <- issue intake and lifecycle (label-based locking)
 gitlab_client.py           <- clone, branch, commit, push, MR
 docker_runner.py           <- PHPUnit sandbox execution + FILE-block writing
@@ -215,6 +251,8 @@ skills/                    <- vendored PrimeVue + Laravel documentation corpus
 templates/laravel/         <- bootstrap templates (vite.config.js, routes, views, tests)
 scripts/
   fetch_skills.py          <- regenerates the vendored corpus in skills/
+  index_skills.py          <- chunks + embeds skills/ into Qdrant
+  oauth.py                 <- `nesti` CLI: provider login / logout + /usage
   preflight.py             <- pre-run config + lifecycle + Docker verification
   seed_live_issues.py      <- creates demo issues with the opt-in label
 test_graph_smoke.py        <- offline smoke tests for the LangGraph pipeline
@@ -227,7 +265,7 @@ Dockerfile                 <- orchestrator container (Python 3.12-slim)
 Dockerfile.sandbox         <- PHPUnit sandbox (php:8.3-cli + Composer)
 Dockerfile.sandbox.node    <- Vitest sandbox (node:22-alpine)
 Dockerfile.sandbox.e2e     <- Playwright sandbox (playwright:v1.50.0-noble + Node 22)
-docker-compose.yml         <- nesti-orchestrator + nesti-redis + nesti-mcp
+docker-compose.yml         <- nesti-orchestrator + nesti-redis + nesti-mcp + nesti-qdrant
 .vscode/mcp.json.example   <- registers the nesti MCP server for VS Code Claude extension
 .env / .env.example        <- all configuration (shared by orchestrator and MCP server)
 ISSUE_GUIDELINE.md         <- how to write effective GitLab issues
@@ -274,9 +312,10 @@ docker-compose up --build -d
 docker-compose logs -f nesti-orchestrator
 ```
 
-This starts three containers: `nesti-orchestrator`, `nesti-redis`, and
-`nesti-mcp`. Redis starts automatically as a dependency and persists
-conversation history across restarts via the named `nesti_redis_data` volume.
+This starts four containers: `nesti-orchestrator`, `nesti-redis`,
+`nesti-mcp` and `nesti-qdrant`. Redis and Qdrant persist across restarts via
+the named `nesti_redis_data` and `nesti_qdrant_data` volumes. Index the skill
+corpus once afterwards (see [Hierarchical Vector Memory](#hierarchical-vector-memory)).
 
 **6. Connect the MCP server (optional)**
 ```bash
@@ -293,8 +332,8 @@ the Claude extension automatically.
 
 ## MCP Server
 
-`nesti-mcp` exposes all 16 `graph/tools.py` functions plus one extra skill
-tool over the Model Context Protocol (stdio transport) — **17 tools** in total.
+`nesti-mcp` exposes all 24 `graph/tools.py` functions plus one extra skill
+tool over the Model Context Protocol (stdio transport) — **25 tools** in total.
 Any MCP-compatible client — Claude Code CLI, VS Code Claude extension, Cursor —
 can drive the same GitLab/Docker toolchain the orchestrator uses, e.g.:
 
@@ -317,6 +356,46 @@ Dependency: `mcp>=1.0.0,<2`. The MCP SDK renamed `FastMCP` to `MCPServer` in
 
 ---
 
+## Consumer Subscriptions & Quota
+
+`scripts/oauth.py` is the container's `nesti` command. It logs consumer
+subscriptions in and out (`nesti /provider login|logout <name>` for `claude`,
+`antigravity`, `chatgpt-plus`, `copilot`) and shows their remaining quota:
+
+```bash
+docker exec -it nesti-orchestrator nesti /usage
+```
+
+```
+Claude 7 Day
+███░░░░░░░░░░░░░░░░░░░░░  89%  1d23h
+Claude 5 Hour
+██░░░░░░░░░░░░░░░░░░░░░░  90%  4h11m
+Antigravity Gemini Pro
+███████░░░░░░░░░░░░░░░░░  69%  6d2h
+Antigravity Claude
+░░░░░░░░░░░░░░░░░░░░░░░░ 100%  6d23h
+```
+
+The bar is the used share, the percentage what is left, the last column the
+time until that window resets (coloured on a TTY unless `NO_COLOR` is set).
+
+| Provider | Source | Shown |
+|----------|--------|-------|
+| `claude` | `api.anthropic.com/api/oauth/usage` | 7 Day, 5 Hour (+ Sonnet / Opus weekly when the plan has them) |
+| `antigravity` | Cloud Code `v1internal:fetchAvailableModels` (`User-Agent: antigravity`) | Gemini Pro, Gemini Flash, Claude, GPT-OSS — agent-selectable models only |
+| `copilot` | GitHub premium-request billing API | requests used this month; no remaining figure |
+| `chatgpt-plus` | — | `usage unknown`; no quota source is implemented |
+
+Every read goes through `fetch_usage()`: an access token near expiry is renewed
+and saved to Redis *before* the usage call. Anthropic rotates the refresh token
+and revokes the old access token on each renewal, so an unsaved renewal logs the
+subscription out. The pipeline reads the same numbers (`tool_quota_check`, MCP
+`quota_check`) on every test-layer failure and sends a Telegram warning when the
+most depleted window drops below 10 %.
+
+---
+
 ## Configuration
 
 See `.env.example` for all variables. Key ones:
@@ -329,6 +408,8 @@ See `.env.example` for all variables. Key ones:
 | `GITLAB_PROJECT_PATH` | **Yes** | — |
 | `GITLAB_ISSUE_LABEL` | No | `nesti` |
 | `REDIS_URL` | No | `redis://nesti-redis:6379/0` |
+| `NESTI_MEMORY_ENABLED` | No | `true` |
+| `QDRANT_URL` | No | `http://nesti-qdrant:6333` |
 | `HERMES3_LLM_ENABLED` | No | `false` |
 | `HERMES3_LLM_URL` | No | — |
 | `LOCAL_LLM_ENABLED` | No | `false` |
@@ -351,7 +432,7 @@ See `.env.example` for all variables. Key ones:
 **Offline smoke tests** (no Docker, no network):
 ```bash
 python test_graph_smoke.py
-# 232 checks — covers every node, every routing edge, the full state machine
+# 303 checks — covers every node, every routing edge, the full state machine
 ```
 
 **Live integration tests** (needs Docker + network):
