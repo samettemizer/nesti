@@ -27,6 +27,17 @@ Context budget strategy
 
   The coding-phase issue-URL budget is evaluated at call time — not at import
   time — so .env loading order never causes a stale value.
+
+  Phase 8 memory sections (additive, and empty whenever memory is off):
+    • Retrieved Reference Snippets — Qdrant chunks of the vendored corpus,
+      minus any passage the keyword catalog already injected verbatim.  The
+      test is on content, not on the document URL: the catalog injects only
+      the first 7 000 chars of a document, and the passages past that cap are
+      exactly what the vector index exists to reach.
+    • Past Nesti Experience        — plans of similar merged issues (planning).
+    • Earlier Failed Attempts      — older failures of this issue (coding).
+  If the local Qwen tier starts truncating, lower _QDRANT_CODE_BUDGET rather
+  than _CATALOG_CODE_BUDGET: the catalog is the proven source.
 """
 
 import os
@@ -38,6 +49,15 @@ _PLAN_SKILL_CHAR_BUDGET: int = 15_000              # issue-URL skills, planning 
 _CODE_SKILL_CHAR_BUDGET_WHEN_ENABLED: int = 8_000  # issue-URL skills, coding phase (gated)
 _CATALOG_PLAN_BUDGET: int = 20_000                 # vendored corpus, planning phase
 _CATALOG_CODE_BUDGET: int = 14_000                 # vendored corpus, coding phase (always on)
+_QDRANT_PLAN_BUDGET: int = 6_000                   # retrieved doc chunks, planning phase
+_QDRANT_CODE_BUDGET: int = 5_000                   # retrieved doc chunks, coding phase
+_SOLUTION_PLAN_BUDGET: int = 4_000                 # past solved issues, planning phase
+_EPISODE_CODE_BUDGET: int = 3_000                  # recalled failures, coding phase
+
+# A past plan larger than the remaining budget is cut to fit, but only when at
+# least this much of it survives; a shorter stub carries no reusable approach.
+_MIN_SOLUTION_PLAN_CHARS: int = 500
+_PLAN_TRUNCATION_MARKER: str = "\n[… rest of this plan truncated …]"
 
 # ── Framework versions ─────────────────────────────────────────────────────────
 _LARAVEL_MAJOR: str = "13"
@@ -222,6 +242,139 @@ def _format_catalog_section(catalog_skills: "list[Skill] | None", char_budget: i
     )
 
 
+def chunk_body(chunk: dict) -> str:
+    """A retrieved chunk's passage, without the context line the indexer prepends."""
+    text = chunk.get("text", "") or ""
+    prefix = f"# {chunk.get('doc_title', '')}\n## {chunk.get('heading', '')}\n\n"
+    return (text[len(prefix):] if text.startswith(prefix) else text).strip()
+
+
+def drop_injected_chunks(chunks: "list[dict] | None", injected_text: str) -> list[dict]:
+    """
+    Keep only the chunks whose passage is NOT already verbatim in *injected_text*.
+
+    *injected_text* is the keyword-catalog documentation of the same prompt.
+    De-duplicating on content rather than on the document URL is deliberate:
+    the catalog injects a document only up to its 7 000-char cap (and the
+    prompt budget may cut it further), so a URL match would also discard the
+    passages past the cap — the content the vector index exists to reach.
+    """
+    if not chunks:
+        return []
+    if not injected_text:
+        return list(chunks)
+    return [chunk for chunk in chunks if chunk_body(chunk) not in injected_text]
+
+
+def _format_retrieved_section(
+    chunks: "list[dict] | None",
+    char_budget: int,
+    exclude_text: str = "",
+) -> str:
+    """
+    Render Qdrant document chunks as a prompt section, best score first.
+
+    A chunk whose passage already appears verbatim in ``exclude_text`` — the
+    rendered catalog section of the same prompt — is dropped before any budget
+    is spent.  A chunk that does not fit the remaining budget is skipped, never
+    truncated.  Returns ``""`` when nothing fits.
+    """
+    if not chunks:
+        return ""
+    blocks: list[str] = []
+    used = 0
+    for chunk in sorted(
+        drop_injected_chunks(chunks, exclude_text),
+        key=lambda c: c.get("score", 0.0),
+        reverse=True,
+    ):
+        url = chunk.get("doc_url", "")
+        title = chunk.get("doc_title", "")
+        heading = chunk.get("heading", "")
+        body = chunk_body(chunk)
+        if not body:
+            continue
+        block = f"### {title} — {heading}\nSource: {url}\n{body}\n"
+        if used + len(block) > char_budget:
+            continue
+        blocks.append(block)
+        used += len(block)
+    if not blocks:
+        return ""
+    return (
+        "\n## Retrieved Reference Snippets (semantic search over the vendored corpus)\n"
+        + "\n".join(blocks)
+    )
+
+
+def _format_solutions_section(solutions: "list[dict] | None", char_budget: int) -> str:
+    """
+    Render similar, already-merged issues and the plans that solved them.
+
+    A plan longer than the remaining budget is cut on a line boundary when at
+    least ``_MIN_SOLUTION_PLAN_CHARS`` of it survive, otherwise skipped: the
+    head of a plan (objective, schema, files) is the reusable part.
+    """
+    if not solutions:
+        return ""
+    blocks: list[str] = []
+    used = 0
+    for solution in solutions:
+        header = (
+            f"### Issue #{solution.get('issue_id', '?')}: {solution.get('subject', '')}  "
+            f"(similarity {solution.get('similarity', 0)}, MR {solution.get('mr_url', '')})\n"
+        )
+        plan = (solution.get("plan") or "").strip()
+        if not plan:
+            continue
+        room = char_budget - used - len(header) - 1
+        if len(plan) > room:
+            room -= len(_PLAN_TRUNCATION_MARKER)
+            if room < _MIN_SOLUTION_PLAN_CHARS:
+                continue
+            cut = plan.rfind("\n", 0, room)
+            plan = plan[:cut if cut > 0 else room].rstrip() + _PLAN_TRUNCATION_MARKER
+        block = f"{header}{plan}\n"
+        blocks.append(block)
+        used += len(block)
+    if not blocks:
+        return ""
+    return (
+        "\n## Past Nesti Experience (similar issues already merged)\n"
+        "These are for reference only — the task below is authoritative. Reuse the\n"
+        "approach where it fits; do not copy file paths or names that this issue does\n"
+        "not ask for.\n"
+        + "\n".join(blocks)
+    )
+
+
+def _format_episodes_section(episodes: "list[dict] | None", char_budget: int) -> str:
+    """
+    Render older failed attempts of this issue (episodic memory).
+
+    An episode that does not fit the remaining budget is skipped, not cut.
+    """
+    if not episodes:
+        return ""
+    blocks: list[str] = []
+    used = 0
+    for episode in episodes:
+        summary = (episode.get("summary") or "").strip()
+        if not summary:
+            continue
+        block = (
+            f"### Attempt {episode.get('attempt', '?')} — {episode.get('layer', '')} "
+            f"(similarity {episode.get('similarity', 0)})\n{summary}\n"
+        )
+        if used + len(block) > char_budget:
+            continue
+        blocks.append(block)
+        used += len(block)
+    if not blocks:
+        return ""
+    return "\n## Earlier Failed Attempts on This Issue\n" + "\n".join(blocks)
+
+
 # ── Public builder functions ───────────────────────────────────────────────────
 
 def build_plan_prompt(
@@ -229,6 +382,8 @@ def build_plan_prompt(
     skills: "list[Skill] | None" = None,
     catalog_skills: "list[Skill] | None" = None,
     repo_context: str = "",
+    retrieved_chunks: "list[dict] | None" = None,
+    past_solutions: "list[dict] | None" = None,
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the planning phase.
@@ -251,6 +406,13 @@ def build_plan_prompt(
         one that already has the feature's foundations, and re-creates them —
         a second `create_<table>_table` migration then fails the PHP layer
         with "table already exists" on every attempt.
+    retrieved_chunks:
+        Qdrant chunks of the vendored corpus (Phase 8); injected within
+        _QDRANT_PLAN_BUDGET, minus passages the catalog section already holds.
+    past_solutions:
+        Similar merged issues from the Redis solution cache (Phase 8);
+        injected within _SOLUTION_PLAN_BUDGET above the reference docs,
+        because they are about this project and the docs are generic.
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
@@ -264,6 +426,10 @@ def build_plan_prompt(
         )
 
     catalog_section = _format_catalog_section(catalog_skills, _CATALOG_PLAN_BUDGET)
+    solutions_section = _format_solutions_section(past_solutions, _SOLUTION_PLAN_BUDGET)
+    retrieved_section = _format_retrieved_section(
+        retrieved_chunks, _QDRANT_PLAN_BUDGET, exclude_text=catalog_section
+    )
 
     skills_section = ""
     if skills:
@@ -277,7 +443,7 @@ GitLab Issue #{issue_id}: {subject}
 
 ### Description
 {description or "(no description provided)"}
-{repo_section}{catalog_section}{skills_section}
+{repo_section}{solutions_section}{catalog_section}{retrieved_section}{skills_section}
 ## Required Plan Structure
 Produce a numbered implementation plan covering:
 1. Objective – one sentence
@@ -300,6 +466,8 @@ def build_code_prompt(
     skills: "list[Skill] | None" = None,
     catalog_skills: "list[Skill] | None" = None,
     repo_context: str = "",
+    retrieved_chunks: "list[dict] | None" = None,
+    recalled_failures: "list[dict] | None" = None,
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the code-generation phase.
@@ -321,6 +489,13 @@ def build_code_prompt(
         Inventory of what the cloned repository already contains.  See
         build_plan_prompt; the coding phase needs it most, because it is the
         phase that would otherwise emit a duplicate migration.
+    retrieved_chunks:
+        Qdrant chunks of the vendored corpus (Phase 8); injected within
+        _QDRANT_CODE_BUDGET, minus passages the catalog section already holds.
+    recalled_failures:
+        Older failed attempts of this issue from episodic memory (Phase 8);
+        injected within _EPISODE_CODE_BUDGET, last before the instructions,
+        where the model is told to correct itself.
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
@@ -334,6 +509,10 @@ def build_code_prompt(
         )
 
     catalog_section = _format_catalog_section(catalog_skills, _CATALOG_CODE_BUDGET)
+    retrieved_section = _format_retrieved_section(
+        retrieved_chunks, _QDRANT_CODE_BUDGET, exclude_text=catalog_section
+    )
+    episodes_section = _format_episodes_section(recalled_failures, _EPISODE_CODE_BUDGET)
 
     skills_section = ""
     code_budget = _get_code_skill_budget()
@@ -351,7 +530,7 @@ GitLab Issue #{issue_id}: {subject}
 {repo_section}
 ## Approved Implementation Plan
 {plan.strip()}
-{catalog_section}{skills_section}
+{catalog_section}{retrieved_section}{episodes_section}{skills_section}
 ## Instructions
 Implement the approved plan above:
 - Produce every file listed in the plan using the FILE format.

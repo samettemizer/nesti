@@ -49,8 +49,10 @@ from frontend_runner import FrontendRunner
 from gitlab_client import GitLabClient
 from gitlab_issues_client import GitLabIssuesClient
 from scripts.oauth import PROVIDERS, TokenStore
+from semantic_cache import get_semantic_memory
 from skill_catalog import catalog_status, select_skills
 from skill_loader import load_skills
+from vector_store import get_document_memory
 
 logger = logging.getLogger(__name__)
 
@@ -893,6 +895,140 @@ def tool_skill_catalog_status() -> dict:
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_skill_catalog_status failed: %s", exc)
         return _err(exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hierarchical vector memory (Phase 8)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Disabled memory is not an error.  When a backing store reports
+# ``available is False`` (Qdrant not running, pre-8 Redis, embedder missing,
+# NESTI_MEMORY_ENABLED=false) the read tools return an empty list and the
+# write tools ``{"stored": False, "reason": "memory unavailable"}``, both with
+# success=True.  success=False is reserved for a genuine exception — otherwise
+# every attempt of every issue would log a warning on an install that simply
+# chose not to run the memory layer.
+#
+# The two stores are process-wide singletons constructed on first call, so
+# importing this module performs no network I/O.
+
+_MEMORY_UNAVAILABLE = {"stored": False, "reason": "memory unavailable"}
+
+
+def tool_memory_search_docs(text: str, stack: str = "", limit: int = 6) -> dict:
+    """
+    Semantic search over the vendored skills/ corpus indexed in Qdrant.
+    stack "php" / "vue" narrows the search to Laravel / PrimeVue docs; any
+    other value searches both stacks and interleaves them rank by rank, so
+    the PrimeVue-heavy corpus cannot crowd out the Laravel docs.
+    result: [{"doc_title", "doc_url", "doc_path", "source", "stack",
+              "heading", "text", "score"}, ...]; [] when unavailable.
+    """
+    try:
+        memory = get_document_memory()
+        if not memory.available:
+            return _ok([])
+        return _ok(memory.search(text, stack=stack, limit=limit))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_memory_search_docs failed: %s", exc)
+        return _err(exc)
+
+
+def tool_memory_find_similar(text: str, limit: int = 2) -> dict:
+    """
+    Previously merged issues similar to *text* (Redis solution cache).
+    result: [{"issue_id", "subject", "plan", "mr_url", "stack", "similarity"},
+             ...] most similar first, above NESTI_SOLUTION_MIN_SCORE.
+    """
+    try:
+        memory = get_semantic_memory()
+        if not memory.available:
+            return _ok([])
+        return _ok(memory.find_similar_solutions(text, limit=limit))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_memory_find_similar failed: %s", exc)
+        return _err(exc)
+
+
+def tool_memory_remember_solution(
+    issue_id: int, subject: str, description: str, plan: str, stack: str, mr_url: str
+) -> dict:
+    """
+    Store the plan that produced a merged issue in the solution cache.
+    result: {"stored": bool} (plus "reason" when not stored).
+    """
+    try:
+        memory = get_semantic_memory()
+        if not memory.available:
+            return _ok(dict(_MEMORY_UNAVAILABLE))
+        stored = memory.remember_solution(issue_id, subject, description, plan, stack, mr_url)
+        return _ok({"stored": True} if stored else {"stored": False, "reason": "write failed"})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_memory_remember_solution(issue #%s) failed: %s", issue_id, exc)
+        return _err(exc)
+
+
+def tool_memory_remember_failure(issue_id: int, attempt: int, layer: str, output: str) -> dict:
+    """
+    Store one failed attempt of an issue in episodic memory.
+    result: {"stored": bool} (plus "reason" when not stored).
+    """
+    try:
+        memory = get_semantic_memory()
+        if not memory.available:
+            return _ok(dict(_MEMORY_UNAVAILABLE))
+        stored = memory.remember_failure(issue_id, attempt, layer, output)
+        return _ok({"stored": True} if stored else {"stored": False, "reason": "write failed"})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_memory_remember_failure(issue #%s) failed: %s", issue_id, exc)
+        return _err(exc)
+
+
+def tool_memory_recall_failures(issue_id: int, text: str, attempt: int, limit: int = 2) -> dict:
+    """
+    Older failed attempts of an issue similar to *text*.  ``attempt`` is the
+    attempt about to run; the one that just failed (attempt - 1) is excluded
+    because its output is already in the conversation history.
+    result: [{"issue_id", "attempt", "layer", "summary", "similarity"}, ...].
+    """
+    try:
+        memory = get_semantic_memory()
+        if not memory.available:
+            return _ok([])
+        return _ok(memory.recall_failures(issue_id, text, attempt=attempt, limit=limit))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_memory_recall_failures(issue #%s) failed: %s", issue_id, exc)
+        return _err(exc)
+
+
+def tool_memory_forget_episodes(issue_id: int) -> dict:
+    """
+    Drop every episodic-memory row of an issue.  result: {"deleted": int}.
+    """
+    try:
+        return _ok({"deleted": get_semantic_memory().forget_episodes(issue_id)})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_memory_forget_episodes(issue #%s) failed: %s", issue_id, exc)
+        return _err(exc)
+
+
+def tool_memory_status() -> dict:
+    """
+    Report both memory tiers.
+    result: {"qdrant": {"available", "url", "collection", "points", "model",
+                        "dim", "error"},
+             "redis": {"available", "url", "solutions", "episodes", "engine"}}.
+    Counts are None, never guessed, when they cannot be read.
+    """
+    try:
+        return _ok({
+            "qdrant": get_document_memory().status(),
+            "redis": get_semantic_memory().status(),
+        })
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_memory_status failed: %s", exc)
+        return _err(exc)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

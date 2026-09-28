@@ -98,6 +98,13 @@ class IssueState(TypedDict, total=False):
     playwright_passed: bool
     playwright_output: str
 
+    # ── Hierarchical vector memory (Phase 8) ───────────────────────────────
+    # How much memory reached the prompts — reported in the MR body so a
+    # reviewer sees it without reading logs.  All zero when memory is off.
+    retrieved_chunks: int              # doc chunks injected into the last prompt
+    past_solutions: int                # similar merged issues injected at plan time
+    recalled_failures: int             # older failed attempts injected at code time
+
     # ── Terminal flags ─────────────────────────────────────────────────────
     mr_url: str                        # set when MR is opened
     failure_reason: str                # set when all attempts exhausted

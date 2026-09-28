@@ -62,10 +62,13 @@ from graph.tools import (
     tool_issue_set_status, tool_detect_stack, tool_vitest_run_tests,
     tool_playwright_run_tests, tool_laravel_bootstrap, tool_openapi_export,
     tool_skill_catalog_select, tool_skill_catalog_status, tool_quota_check,
+    tool_memory_search_docs, tool_memory_find_similar, tool_memory_remember_solution,
+    tool_memory_remember_failure, tool_memory_recall_failures,
+    tool_memory_forget_episodes,
 )
 from llm_client import LLMClient
 from conversation_store import ConversationStore
-from prompt_builder import build_plan_prompt, build_code_prompt
+from prompt_builder import build_plan_prompt, build_code_prompt, drop_injected_chunks
 from layer_output import condense
 from telegram_notifier import notify as telegram_notify
 
@@ -91,6 +94,16 @@ _MAX_MR_OPENAPI_PATHS = 40
 
 # Fallback when the initial state somehow lacks max_attempts (unit tests).
 _ENV_MAX_ATTEMPTS = int(os.environ.get("MAX_CODE_RETRIES", "2")) + 1
+
+# Phase 8 retrieval sizes. Qdrant is asked for more chunks than a prompt keeps
+# so that dropping the passages the keyword catalog already injected still
+# leaves a full set of complementary ones.
+_DOC_CHUNK_SEARCH_LIMIT = 8
+_DOC_CHUNK_KEEP = 6
+# The failure text used to query episodic memory is condensed exactly like the
+# stored episodes (semantic_cache._EPISODE_OUTPUT_LIMIT); embedding the raw
+# output would embed its first 512 tokens — installer chatter, not the error.
+_EPISODE_QUERY_CHARS = 1200
 
 # Fed into node_test's short-circuit when the coder produced no parseable
 # files; on_test_failure then appends it to the history, replacing Phase 1's
@@ -127,6 +140,32 @@ def _select_catalog_skills(
             ", ".join(skill.title for skill in selected),
         )
     return selected
+
+
+def _retrieve_chunks(
+    text: str, catalog_skills: list, stack: str = "", limit: int = _DOC_CHUNK_SEARCH_LIMIT
+) -> list[dict]:
+    """
+    Semantic doc chunks from Qdrant, minus passages the catalog already injected.
+
+    The test is on content, not URL: a catalog document is capped at 7 000
+    chars, and its passages past the cap must stay retrievable.  Memory is
+    optional: an unavailable store yields ``[]`` silently (the tool reports
+    success with an empty list); only a genuine error is logged.
+    """
+    result = tool_memory_search_docs(text, stack=stack, limit=limit)
+    if not result["success"]:
+        logger.warning("Document memory search failed: %s", result["error"])
+        return []
+    injected = "\n".join(skill.content for skill in catalog_skills)
+    chunks = drop_injected_chunks(result["result"], injected)[:_DOC_CHUNK_KEEP]
+    if chunks:
+        logger.info(
+            "Retrieved doc chunks%s: %s",
+            f" (stack={stack})" if stack else "",
+            ", ".join(f"{c['doc_title']} — {c['heading']}" for c in chunks),
+        )
+    return chunks
 
 
 def _prune_stale_files(
@@ -314,10 +353,13 @@ def node_setup(state: IssueState) -> dict:
     """
     Create tempdir workspace, clone repo, create branch.
     Lock the issue (status → in-progress) so no other worker picks it up.
+    Put the coder chain back on its head tier: ``_llm`` lives for the whole
+    loop process, and one issue's escalations must not start the next one.
     """
     logger.debug("→ node_setup")
     issue_id = state["issue_id"]
     subject = state.get("subject", f"issue-{issue_id}")
+    _llm.reset_coder_tier()
 
     # Lock first so no other worker grabs the issue during the clone.
     # Phase 1 ignored the lock result as well – log and continue.
@@ -431,17 +473,39 @@ def node_plan(state: IssueState) -> dict:
     issue_id = state["issue_id"]
     logger.info("Phase 1 – Generating plan for issue #%s …", issue_id)
 
+    issue_text = f"{state.get('subject', '')}\n{state['issue'].get('description', '') or ''}"
     catalog_skills = _select_catalog_skills(
-        f"{state.get('subject', '')}\n{state['issue'].get('description', '') or ''}",
+        issue_text,
         max_component_docs=3,
         max_topic_docs=2,
     )
     repo_context = _repo_inventory(state.get("repo_path", ""))
+
+    # Phase 8 memory: how similar issues were solved before (Redis solution
+    # cache) and the corpus passages the keyword catalog missed (Qdrant).
+    past = tool_memory_find_similar(issue_text, limit=2)
+    if not past["success"]:
+        logger.warning("Solution cache lookup failed: %s", past["error"])
+    past_solutions = past["result"] if past["success"] else []
+    retrieved = _retrieve_chunks(issue_text, catalog_skills)
+    if past_solutions or retrieved:
+        logger.info(
+            "Memory: %d past solution(s), %d doc chunk(s) injected into the plan prompt.",
+            len(past_solutions),
+            len(retrieved),
+        )
+    memory_counts = {
+        "retrieved_chunks": len(retrieved),
+        "past_solutions": len(past_solutions),
+    }
+
     system_prompt, user_prompt = build_plan_prompt(
         state["issue"],
         skills=state.get("skills", []),
         catalog_skills=catalog_skills,
         repo_context=repo_context,
+        retrieved_chunks=retrieved,
+        past_solutions=past_solutions,
     )
     prior = _store.load(issue_id)
     if prior:
@@ -459,12 +523,12 @@ def node_plan(state: IssueState) -> dict:
         # All planners failed – route_after_plan will send us to node_failure.
         logger.error("All planners failed for issue #%s: %s", issue_id, exc)
         logger.debug("← node_plan (failed)")
-        return {"plan": "", "error": str(exc), "messages": messages}
+        return {"plan": "", "error": str(exc), "messages": messages, **memory_counts}
 
     logger.debug("Plan:\n%s", plan)
     messages = _store.append(issue_id, "assistant", plan)
     logger.debug("← node_plan")
-    return {"plan": plan, "messages": messages}
+    return {"plan": plan, "messages": messages, **memory_counts}
 
 
 def node_code(state: IssueState) -> dict:
@@ -486,22 +550,59 @@ def node_code(state: IssueState) -> dict:
     # The plan is part of the haystack here: it names the PrimeVue components
     # and Laravel artefacts the issue text may only have implied.  One topic
     # doc instead of two keeps room for the plan itself in the coder context.
-    catalog_skills = _select_catalog_skills(
+    haystack = (
         f"{state.get('subject', '')}\n"
         f"{state['issue'].get('description', '') or ''}\n"
-        f"{state.get('plan', '')}",
+        f"{state.get('plan', '')}"
+    )
+    catalog_skills = _select_catalog_skills(
+        haystack,
         max_component_docs=3,
         max_topic_docs=1,
     )
     # Rebuilt every attempt: the previous attempt's own files are part of the
     # repository now, and a retry must see them rather than re-inventing them.
     repo_context = _repo_inventory(state.get("repo_path", ""))
+
+    # Phase 8 memory.  The stack payload filter engages only from attempt 2:
+    # before node_detect_stack has run, ``stack`` is merely the seeded default
+    # ("php"), and filtering on it would hide every PrimeVue doc from a Vue
+    # issue's first attempt.
+    detected = state.get("stack", "") if attempt > 1 else ""
+    stack_filter = detected if detected in ("php", "vue") else ""
+    retrieved = _retrieve_chunks(haystack, catalog_skills, stack=stack_filter)
+    # Attempt N-1 just failed and is verbatim in the history already, so
+    # episodic recall has something older to offer only from attempt 3 on.
+    recalled: list[dict] = []
+    if attempt > 2:
+        layer, last_output = _last_failure_output(state)
+        rc = tool_memory_recall_failures(
+            issue_id,
+            f"{layer} failure: {condense(last_output, _EPISODE_QUERY_CHARS)}",
+            attempt=attempt,
+            limit=2,
+        )
+        if not rc["success"]:
+            logger.warning("Episodic memory recall failed: %s", rc["error"])
+        recalled = rc["result"] if rc["success"] else []
+        if recalled:
+            logger.info(
+                "Memory: %d earlier failed attempt(s) recalled into the code prompt.",
+                len(recalled),
+            )
+    memory_counts = {
+        "retrieved_chunks": len(retrieved),
+        "recalled_failures": len(recalled),
+    }
+
     system_prompt, user_prompt = build_code_prompt(
         state["issue"],
         state.get("plan", ""),
         skills=state.get("skills", []),
         catalog_skills=catalog_skills,
         repo_context=repo_context,
+        retrieved_chunks=retrieved,
+        recalled_failures=recalled,
     )
     messages = _store.append(issue_id, "user", user_prompt)
 
@@ -525,6 +626,7 @@ def node_code(state: IssueState) -> dict:
             "files_written": False,
             "attempt": max_attempts,
             "error": str(exc),
+            **memory_counts,
         }
 
     attribution = _llm.last_coder_attribution()
@@ -562,6 +664,7 @@ def node_code(state: IssueState) -> dict:
         "coder_provider": attribution["provider"],
         "coder_model": attribution["model"],
         "coder_billing": attribution["billing"],
+        **memory_counts,
     }
 
 
@@ -817,6 +920,13 @@ def node_on_layer_failure(state: IssueState) -> dict:
     messages = _store.append_test_failure(
         state["issue_id"], failure_output, layer=layer
     )
+    # After the conversation append on purpose: a memory outage must never cost
+    # the pipeline its primary corrective feedback.
+    stored = tool_memory_remember_failure(
+        state["issue_id"], state.get("attempt", 0), layer, failure_output
+    )
+    if not stored["success"]:
+        logger.warning("Failed to store episodic memory: %s", stored["error"])
     _llm.escalate_coder()
     logger.debug("← node_on_layer_failure (%s)", layer)
     return {
@@ -880,7 +990,9 @@ def node_commit(state: IssueState) -> dict:
             f"## Test output\n"
             f"_Stack: {state.get('stack', 'php')} · "
             f"Laravel: {state.get('is_laravel', False)} · "
-            f"bootstrapped: {state.get('bootstrapped', False)}_\n\n"
+            f"bootstrapped: {state.get('bootstrapped', False)} · "
+            f"memory: {state.get('retrieved_chunks', 0)} doc chunk(s), "
+            f"{state.get('past_solutions', 0)} past solution(s)_\n\n"
             f"{_test_report(state)}"
         ),
     )
@@ -895,6 +1007,24 @@ def node_commit(state: IssueState) -> dict:
     tool_issue_set_status(
         issue_id, "closed", note=f"AI Developer opened MR: {mr_url}"
     )
+    # Phase 8 self-updating loop: the plan that produced this MR becomes the
+    # next similar issue's "past experience".  Episodes die with the run —
+    # a reopened issue reusing this iid must not recall them as its own.
+    remembered = tool_memory_remember_solution(
+        issue_id=issue_id,
+        subject=subject,
+        description=state["issue"].get("description", "") or "",
+        plan=state.get("plan", ""),
+        stack=state.get("stack", ""),
+        mr_url=mr_url,
+    )
+    if not remembered["success"]:
+        logger.warning(
+            "Failed to store the solution of issue #%s: %s", issue_id, remembered["error"]
+        )
+    elif remembered["result"].get("stored"):
+        logger.info("Solution of issue #%s stored in the solution cache.", issue_id)
+    tool_memory_forget_episodes(issue_id)
     # Work is done – drop the conversation history for this issue.
     _store.delete(issue_id)
     logger.debug("← node_commit (mr=%s)", mr_url)
@@ -942,6 +1072,7 @@ def node_failure(state: IssueState) -> dict:
     # by that run, so the history is kept, matching Phase 1.
     if attempts > 0:
         _store.delete(issue_id)
+        tool_memory_forget_episodes(issue_id)
 
     logger.debug("← node_failure (%s)", reason)
     return {"failure_reason": reason}

@@ -91,6 +91,9 @@ def reset_calls(issue_id: int) -> None:
         "openapi": 0, "vitest": 0, "playwright": 0,
         "bootstrap": [], "layers": [],
         "pushes": [], "mrs": [], "history_at_commit": None, "workspaces": [],
+        "plan_prompts": [], "code_prompts": [],
+        "memory_search": [], "memory_similar": [], "memory_remember_solution": [],
+        "memory_remember_failure": [], "memory_forget": [], "memory_recall": [],
     })
 
 
@@ -110,6 +113,7 @@ def initial(issue_id: int) -> dict:
         "openapi_passed": False, "openapi_output": "", "openapi_paths": [],
         "vitest_passed": False, "vitest_output": "",
         "playwright_passed": False, "playwright_output": "",
+        "retrieved_chunks": 0, "past_solutions": 0, "recalled_failures": 0,
         "mr_url": "", "failure_reason": "", "error": "",
     }
 
@@ -117,7 +121,9 @@ def initial(issue_id: int) -> dict:
 def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=False,
                 openapi_outcomes=(True,),
                 vitest_outcomes=(True,), playwright_outcomes=(True,),
-                laravel_repo: bool = False, bootstrap_created: bool = False):
+                laravel_repo: bool = False, bootstrap_created: bool = False,
+                doc_chunks=(), similar_solutions=(), recalled=(),
+                memory_error: str = ""):
     """
     Install fakes on graph.nodes (node functions resolve names at call time).
 
@@ -125,6 +131,11 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     REAL tool_detect_stack reports is_laravel/has_api_routes.  It defaults to
     False on purpose: dropping a composer.json into every fake clone would turn
     the Vue-only scenario into "fullstack" and silently void that regression.
+
+    The Phase 8 memory fixtures default to empty, so every scenario that does
+    not ask for memory runs against a degraded (empty) memory layer — the
+    regression net for graceful degradation.  ``memory_error`` makes every
+    memory tool report a genuine failure instead.
     """
 
     def fake_set_status(issue_id, status, note=""):
@@ -209,18 +220,48 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             "paths": [], "undocumented": ["POST /api/tasks"]}}
     nodes.tool_openapi_export = fake_openapi
 
+    # Phase 8 memory fakes – record every call, return the fixtures.
+    def _memory(key, record, result):
+        calls[key].append(record)
+        if memory_error:
+            return {"success": False, "error": memory_error}
+        return {"success": True, "result": result}
+
+    nodes.tool_memory_search_docs = lambda text, stack="", limit=6: _memory(
+        "memory_search", {"text": text, "stack": stack, "limit": limit}, list(doc_chunks))
+    nodes.tool_memory_find_similar = lambda text, limit=2: _memory(
+        "memory_similar", text, list(similar_solutions))
+    nodes.tool_memory_recall_failures = lambda issue_id, text, attempt, limit=2: _memory(
+        "memory_recall", {"issue_id": issue_id, "text": text, "attempt": attempt},
+        list(recalled))
+    nodes.tool_memory_remember_failure = lambda issue_id, attempt, layer, output: _memory(
+        "memory_remember_failure",
+        {"issue_id": issue_id, "attempt": attempt, "layer": layer, "output": output},
+        {"stored": True})
+    nodes.tool_memory_remember_solution = (
+        lambda issue_id, subject, description, plan, stack, mr_url: _memory(
+            "memory_remember_solution",
+            {"issue_id": issue_id, "subject": subject, "plan": plan,
+             "stack": stack, "mr_url": mr_url},
+            {"stored": True}))
+    nodes.tool_memory_forget_episodes = lambda issue_id: _memory(
+        "memory_forget", issue_id, {"deleted": 0})
+
     # LLM fakes (instance attributes shadow bound methods)
     if plan_exc:
         def fail_plan(sp, up, messages=None):
             raise RuntimeError(plan_exc)
         nodes._llm.generate_plan = fail_plan
     else:
-        nodes._llm.generate_plan = (
-            lambda sp, up, messages=None: "1. Objective: implement Hello\n2. Files: src/Hello.php")
+        def fake_plan(sp, up, messages=None):
+            calls["plan_prompts"].append(up)
+            return "1. Objective: implement Hello\n2. Files: src/Hello.php"
+        nodes._llm.generate_plan = fake_plan
 
     seq = list(code_responses)
 
     def fake_code(system_prompt, user_prompt, messages=None):
+        calls["code_prompts"].append(user_prompt)
         if code_exc_first:
             raise RuntimeError("All coding providers exhausted.")
         return seq.pop(0) if len(seq) > 1 else seq[0]
@@ -584,6 +625,235 @@ check("not a Laravel app" in _bootstrap_raised,
 check(calls["docker"] == 0, "no coding or testing attempted after the refusal")
 check(not os.path.exists(calls["workspaces"][0]),
       "node_bootstrap removed its workspace before raising (no tempdir leak)")
+
+# ═════ Scenario 19: Phase 8 hierarchical memory end-to-end ═════
+print("\n── Scenario 19: Phase 8 hierarchical memory end-to-end ──")
+_CHUNKS = [
+    {"doc_title": "Database: Migrations", "heading": "Creating Tables",
+     "doc_url": "https://raw.githubusercontent.com/laravel/docs/13.x/migrations.md",
+     "doc_path": "laravel/migrations.md", "source": "laravel", "stack": "php",
+     "text": "# Database: Migrations\n## Creating Tables\n\nUse Schema::create.",
+     "score": 0.81},
+    {"doc_title": "HTTP Tests", "heading": "Testing JSON APIs",
+     "doc_url": "https://raw.githubusercontent.com/laravel/docs/13.x/http-tests.md",
+     "doc_path": "laravel/http-tests.md", "source": "laravel", "stack": "php",
+     "text": "# HTTP Tests\n## Testing JSON APIs\n\nUse getJson and assertJson.",
+     "score": 0.74},
+]
+_SOLUTIONS = [{"issue_id": 77, "subject": "Add hello endpoint", "similarity": 0.91,
+               "mr_url": "https://gitlab.example/mr/77", "stack": "php",
+               "plan": "1. Objective: say hello from PAST-PLAN-MARKER"}]
+_RECALLED = [{"issue_id": 119, "attempt": 1, "layer": "PHPUnit", "similarity": 0.88,
+              "summary": "EARLIER-FAILURE-MARKER: no such table hello"}]
+f = run(1190, docker_outcomes=[False, False, True], code_responses=[GOOD_CODE],
+        doc_chunks=_CHUNKS, similar_solutions=_SOLUTIONS, recalled=_RECALLED)
+check(f["mr_url"] == "https://gitlab.example/mr/1190" and f["attempt"] == 3,
+      "memory-enabled issue reaches its MR on attempt 3")
+check(len(calls["memory_similar"]) == 1 and "Test issue 1190" in calls["memory_similar"][0],
+      "the solution cache is consulted once, at plan time, with the issue text")
+check([c["stack"] for c in calls["memory_search"]] == ["", "", "php", "php"],
+      "doc search: unfiltered at plan time and on attempt 1 (seeded stack ignored), "
+      "stack=php once node_detect_stack has run")
+check(len(calls["memory_recall"]) == 1 and calls["memory_recall"][0]["attempt"] == 3,
+      "episodic recall runs only from attempt 3 (attempt 2 has nothing older than "
+      "the failure already in the history)")
+check("PHPUnit failure:" in calls["memory_recall"][0]["text"]
+      and "PHPUnit FAILURES!" in calls["memory_recall"][0]["text"],
+      "recall is queried with the failing layer and its (condensed) output")
+check([(e["attempt"], e["layer"]) for e in calls["memory_remember_failure"]]
+      == [(1, "PHPUnit"), (2, "PHPUnit")]
+      and all("PHPUnit FAILURES!" in e["output"] for e in calls["memory_remember_failure"]),
+      "each failed attempt is stored once with its layer and output")
+check(len(calls["memory_remember_solution"]) == 1
+      and calls["memory_remember_solution"][0]["mr_url"] == "https://gitlab.example/mr/1190"
+      and calls["memory_remember_solution"][0]["plan"] == f["plan"]
+      and calls["memory_remember_solution"][0]["stack"] == "php",
+      "the merged plan is written back to the solution cache with the real MR URL")
+check(calls["memory_forget"] == [1190], "episodes are dropped once the issue is done")
+check(f["retrieved_chunks"] == 2 and f["past_solutions"] == 1 and f["recalled_failures"] == 1,
+      "state counters report what reached the prompts")
+check("## Past Nesti Experience" in calls["plan_prompts"][0]
+      and "PAST-PLAN-MARKER" in calls["plan_prompts"][0],
+      "past solutions are rendered into the plan prompt")
+check(all("## Retrieved Reference Snippets" in p
+          for p in calls["plan_prompts"] + calls["code_prompts"]),
+      "retrieved doc chunks reach the plan prompt and every code prompt")
+check(all("EARLIER-FAILURE-MARKER" not in p for p in calls["code_prompts"][:2])
+      and "## Earlier Failed Attempts on This Issue" in calls["code_prompts"][2]
+      and "EARLIER-FAILURE-MARKER" in calls["code_prompts"][2],
+      "recalled failures appear only in the attempt-3 code prompt")
+check("doc chunk(s)" in calls["mrs"][0] and "past solution(s)" in calls["mrs"][0]
+      and "memory: 2 doc chunk(s), 1 past solution(s)" in calls["mrs"][0],
+      "the MR body reports memory usage")
+
+# Catalog de-duplication at node level is on CONTENT: a passage the keyword
+# catalog already injected is dropped, but a passage of the same document that
+# lies past the catalog's 7 000-char cap must survive — reaching it is the
+# point of the vector index.
+reset_calls(1191)
+patch_tools(docker_outcomes=[True], code_responses=[GOOD_CODE], doc_chunks=_CHUNKS)
+from skill_loader import Skill  # noqa: E402
+_dedup = nodes._retrieve_chunks("x", [Skill(
+    title="Database: Migrations", url=_CHUNKS[0]["doc_url"],
+    content="# Database: Migrations\n\n## Creating Tables\n\nUse Schema::create.\n")])
+check([c["doc_title"] for c in _dedup] == ["HTTP Tests"],
+      "_retrieve_chunks drops a passage the catalog already injected")
+_kept = nodes._retrieve_chunks("x", [Skill(
+    title="Database: Migrations", url=_CHUNKS[0]["doc_url"],
+    content="# Database: Migrations\n\n## Introduction\n\nOnly the first 7 000 chars.")])
+check([c["doc_title"] for c in _kept] == ["Database: Migrations", "HTTP Tests"],
+      "_retrieve_chunks keeps a passage of a catalog document that lies past its cap")
+
+# ═════ Scenario 20: Phase 8 memory unavailable ═════
+print("\n── Scenario 20: Phase 8 memory unavailable → pipeline unchanged ──")
+f = run(1200, docker_outcomes=[False, False, True], code_responses=[GOOD_CODE],
+        doc_chunks=_CHUNKS, similar_solutions=_SOLUTIONS, recalled=_RECALLED,
+        memory_error="Qdrant and Redis are down")
+check(f["mr_url"] == "https://gitlab.example/mr/1200",
+      "an issue still reaches its MR when every memory tool fails")
+check(f["retrieved_chunks"] == 0 and f["past_solutions"] == 0 and f["recalled_failures"] == 0,
+      "no memory is counted when none was injected")
+check("memory: 0 doc chunk(s), 0 past solution(s)" in calls["mrs"][0],
+      "the MR body renders zero memory usage")
+check(all("## Retrieved Reference Snippets" not in p and "## Past Nesti Experience" not in p
+          and "## Earlier Failed Attempts" not in p
+          for p in calls["plan_prompts"] + calls["code_prompts"]),
+      "no memory section is rendered into any prompt")
+check(len(calls["memory_remember_failure"]) == 2,
+      "a failing episodic write never blocks the retry loop")
+
+# ═════ Scenario 21: Phase 8 pure-function checks (no Redis, no Qdrant) ═════
+print("\n── Scenario 21: Phase 8 formatters, chunker and degradation ──")
+import prompt_builder as _pb  # noqa: E402
+_url_x = "https://example/x.md"
+_catalog_rendered = "### Skill: X\nSource: " + _url_x + "\n\n# X\n\n## H\n\nalready injected body\n"
+check(_pb._format_retrieved_section(
+          [{"doc_title": "X", "heading": "H", "doc_url": _url_x,
+            "text": "# X\n## H\n\nalready injected body", "score": 0.9}],
+          6000, exclude_text=_catalog_rendered) == "",
+      "_format_retrieved_section drops a passage already in the catalog section")
+check("past the cap" in _pb._format_retrieved_section(
+          [{"doc_title": "X", "heading": "Deep", "doc_url": _url_x,
+            "text": "# X\n## Deep\n\npast the cap", "score": 0.9}],
+          6000, exclude_text=_catalog_rendered),
+      "_format_retrieved_section keeps a same-document passage the catalog cut off")
+_big = [{"doc_title": f"D{i}", "heading": "H", "doc_url": f"https://example/{i}.md",
+         "text": "y" * 4000, "score": 0.9 - i / 10} for i in range(2)]
+_rendered = _pb._format_retrieved_section(_big, 6000)
+check(_rendered.count("\nSource: ") == 1 and "### D0 — H" in _rendered,
+      "_format_retrieved_section skips (never truncates) a chunk over budget")
+check(_pb._format_retrieved_section(
+          [{"doc_title": "T", "heading": "H", "doc_url": "u",
+            "text": "# T\n## H\n\nbody text", "score": 1.0}], 6000).count("# T\n## H") == 0,
+      "the indexer's embedding context line is not repeated in the prompt")
+check(_pb._format_solutions_section([], 4000) == "" and _pb._format_episodes_section([], 3000) == "",
+      "empty memory renders no section")
+_long_plan = "\n".join(f"{n}. step {'z' * 60}" for n in range(1, 120))
+_sol = _pb._format_solutions_section(
+    [{"issue_id": 5, "subject": "s", "similarity": 0.9, "mr_url": "u", "plan": _long_plan}], 4000)
+check("### Issue #5: s" in _sol and "truncated" in _sol and len(_sol) < 4000 + 400,
+      "an over-budget past plan is cut to fit rather than silently dropped")
+
+from scripts.index_skills import chunk_document, _MAX_CHUNK_CHARS  # noqa: E402
+_doc = "# Title\n\n## Alpha\n\n" + "a" * 300 + "\n\n## Beta\n\n" + "b" * 400 + "\n"
+_chunks = chunk_document(_doc, "Title", "x/title.md")
+check(len(_chunks) == 2 and all(c["text"].startswith("# Title\n## ") for c in _chunks),
+      "chunk_document yields one chunk per ## section, each with its context line")
+check([c["id"] for c in _chunks] == [c["id"] for c in chunk_document(_doc, "Title", "x/title.md")],
+      "chunk ids are deterministic (re-indexing overwrites, never duplicates)")
+_huge = "# T\n\n## Big\n\n" + "\n\n".join("p" * 700 for _ in range(10)) + "\n\n" + "q" * 5000
+_hchunks = chunk_document(_huge, "T", "x/t.md")
+check(len(_hchunks) > 3 and all(
+          len(c["text"]) <= _MAX_CHUNK_CHARS + len(f"# T\n## {c['heading']}\n\n")
+          for c in _hchunks),
+      "long sections split on paragraphs, giant paragraphs hard-cut, all within the cap")
+check(len(chunk_document("# Stub\n\nTiny page.", "Stub", "x/stub.md")) == 1,
+      "a stub document still keeps one chunk (stays hash-tracked in the index)")
+
+import embedding as _embedding  # noqa: E402
+os.environ["NESTI_MEMORY_ENABLED"] = "false"
+try:
+    _off = _embedding.Embedder()
+    check(_off.available is False and _off.embed_query("x") == []
+          and _off.embed_documents(["x"]) == [],
+          "NESTI_MEMORY_ENABLED=false: embedder unavailable, embeds return [] without raising")
+finally:
+    os.environ.pop("NESTI_MEMORY_ENABLED", None)
+
+import semantic_cache as _sc  # noqa: E402
+_sm = _sc.SemanticMemory()   # REDIS_URL points at 127.0.0.1:1 (unreachable)
+check(_sm.available is False and _sm.find_similar_solutions("x") == []
+      and _sm.remember_solution(1, "s", "d", "p", "php", "u") is False
+      and _sm.recall_failures(1, "x", attempt=5) == [] and _sm.forget_episodes(1) == 0,
+      "SemanticMemory degrades on an unreachable Redis: reads [], writes False")
+check(_sm.status()["solutions"] is None and _sm.status()["engine"] == "unavailable",
+      "unreadable memory counts are None, never guessed")
+
+import vector_store as _vs  # noqa: E402
+_php = [{"stack": "php", "score": 0.70, "doc_title": "Routing"},
+        {"stack": "php", "score": 0.66, "doc_title": "Controllers"}]
+_vue = [{"stack": "vue", "score": 0.69, "doc_title": "ToggleSwitch"},
+        {"stack": "vue", "score": 0.68, "doc_title": "ToggleButton"},
+        {"stack": "vue", "score": 0.67, "doc_title": "Gallery"}]
+check([h["doc_title"] for h in _vs._interleave([_vue, _php], 4)]
+      == ["Routing", "ToggleSwitch", "Controllers", "ToggleButton"],
+      "an unfiltered doc search interleaves both stacks — the PrimeVue-heavy corpus "
+      "cannot crowd the Laravel docs out of a backend issue's prompt")
+check(_vs._interleave([[], _vue], 2) == _vue[:2] and _vs._interleave([[], []], 3) == [],
+      "interleaving tolerates an empty stack")
+
+# ═════ Scenario 22: coder chain escalation and per-issue reset ═════
+print("\n── Scenario 22: coder escalation + per-issue reset ──")
+from llm_client import LLMClient  # noqa: E402
+
+
+class _StubCoder:
+    def __init__(self, name, available=True, fail=False):
+        self.name, self.label, self.available, self.fail = name, name, available, fail
+
+    def generate_code(self, system_prompt, user_prompt, messages=None):
+        if self.fail:
+            raise RuntimeError(f"{self.name} down")
+        return f"code from {self.name}"
+
+
+_chain = LLMClient()
+_a, _b, _c, _d = (_StubCoder("A", fail=True), _StubCoder("B", available=False),
+                  _StubCoder("C"), _StubCoder("D"))
+_chain._coders = [_a, _b, _c, _d]
+check(_chain.generate_code("s", "u") == "code from C" and _chain.current_coder_name == "C",
+      "an API failure cascades past the unavailable tier to the next live coder")
+_chain.escalate_coder()
+check(_chain.current_coder_name == "D",
+      "a test failure escalates to a HIGHER tier than the one that produced the code "
+      "(never 'C → C' after an API cascade)")
+_d.fail = True
+check(_chain.generate_code("s", "u") == "code from C",
+      "a dead escalated tier falls back to the strongest untried tier below it "
+      "instead of declaring the chain exhausted while a reachable coder was never asked")
+_c.fail = True
+try:
+    _chain.generate_code("s", "u")
+    _exhausted = False
+except RuntimeError:
+    _exhausted = True
+check(_exhausted and _chain.current_coder_name == "none (all exhausted)",
+      "every reachable coder failed → exhausted")
+_a.fail = False
+_chain.reset_coder_tier()
+check(_chain.current_coder_name == "A" and _chain.generate_code("s", "u") == "code from A",
+      "reset_coder_tier puts the next issue back on the head of the chain")
+
+# The loop process keeps one LLMClient: a new issue must not inherit the
+# previous issue's exhausted chain (observed live: attempt 1 of the next issue
+# started at "none (all exhausted)" and failed without a single coder call).
+nodes._llm._min_coder_tier = len(nodes._llm._coders)
+nodes._llm._api_failed_coders = set(range(len(nodes._llm._coders)))
+check(nodes._llm.current_coder_name == "none (all exhausted)", "precondition: chain exhausted")
+f = run(1220, docker_outcomes=[True], code_responses=[GOOD_CODE])
+check(f["mr_url"] == "https://gitlab.example/mr/1220"
+      and nodes._llm.current_coder_name != "none (all exhausted)",
+      "node_setup resets the coder chain at the start of every issue")
 
 # ═════ Scenario 12: nodes/edges testable in isolation (total=False state) ═════
 print("\n── Scenario 12: isolated node/edge tests with partial state ──")
@@ -972,7 +1242,7 @@ import graph.tools as tools_mod
 import inspect
 tool_fns = [f for n, f in inspect.getmembers(tools_mod, inspect.isfunction)
             if n.startswith("tool_")]
-check(len(tool_fns) == 17, "17 MCP tool functions defined")
+check(len(tool_fns) == 24, "24 MCP tool functions defined (17 + 7 Phase 8 memory tools)")
 check("langgraph" not in inspect.getsource(tools_mod), "tools.py has no LangGraph imports")
 
 # Regression check for the TokenStore Redis-outage bug: tool_quota_check()

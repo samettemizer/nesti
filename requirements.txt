@@ -11,3 +11,12 @@ langchain-core>=0.3.0
 # the decorator API. mcp_server/server.py builds on FastMCP, and its import
 # order plus the __main__ delegation guard are load-bearing invariants, so the boring fix is to stay on the 1.x line.
 mcp>=1.0.0,<2
+# Phase 8 vector memory. The Qdrant client and the nesti-qdrant image
+# (docker-compose.yml, qdrant/qdrant:v1.19.1) are one coupled setting: the
+# client warns on every connection when its minor version drifts more than one
+# away from the server's, so bump both together.
+qdrant-client>=1.19,<1.20
+# In-process CPU embeddings (BAAI/bge-small-en-v1.5, 384 dims) shared by the
+# Qdrant document index and the Redis 8 semantic cache. The model weights are
+# baked into both images at build time (see Dockerfile).
+fastembed>=0.5,<1

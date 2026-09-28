@@ -904,6 +904,13 @@ class LLMClient:
         – If the floor provider has an API error, it cascades upward within
           that same call and also advances _min_coder_tier so the next call
           won't retry a known-broken provider.
+        – When every tier from the floor up has failed, the tiers BELOW the
+          floor that have not failed during this issue are tried, strongest
+          first.  Escalation passed over them for output quality, not because
+          they are down, and a weaker answer beats abandoning the attempt
+          while a reachable coder was never asked.
+        – reset_coder_tier() clears the floor and that failure record at the
+          start of every issue (graph/nodes.py keeps one LLMClient per loop).
 
     Unavailable tiers are skipped at attempt time, never removed: a consumer
     session logged in (or out) while the loop runs changes the next call.
@@ -958,6 +965,9 @@ class LLMClient:
 
         # Minimum coder tier; raised by escalate_coder() after test failures
         self._min_coder_tier: int = 0
+        # Tiers that raised an API error during the current issue; never
+        # retried (not even as a fallback) until reset_coder_tier().
+        self._api_failed_coders: set[int] = set()
 
         # Provider that last answered successfully. The pipeline logs and the
         # Merge Request body attribute the work to it, so it must be the
@@ -1029,11 +1039,13 @@ class LLMClient:
         messages: list[dict] | None = None,
     ) -> str:
         """
-        Try coders starting from _min_coder_tier.
+        Try coders starting from _min_coder_tier, then fall back below it.
 
         API failures advance _min_coder_tier immediately so the next call
         in the same attempt, or any subsequent attempt, won't retry a
-        provider that is currently unreachable.
+        provider that is currently unreachable.  When every tier from the
+        floor up has failed, the untried tiers below the floor answer instead
+        (strongest first) — see the class docstring.
 
         *messages*, when provided, is forwarded verbatim to each provider as the
         conversation history; when None the providers behave single-turn.
@@ -1042,17 +1054,21 @@ class LLMClient:
         """
         last_exc: Exception | None = None
 
-        for idx in range(self._min_coder_tier, len(self._coders)):
+        for idx in self._coder_order():
             provider = self._coders[idx]
-            if not provider.available:
-                logger.debug("Coder %s skipped – unavailable.", provider.name)
-                continue
             try:
                 result = provider.generate_code(system_prompt, user_prompt, messages)
                 self._last_coder = provider
                 if idx > self._min_coder_tier:
                     logger.info(
                         "Code obtained via tier-%d coder: %s (API cascade).",
+                        idx,
+                        provider.label,
+                    )
+                elif idx < self._min_coder_tier:
+                    logger.info(
+                        "Code obtained via tier-%d coder: %s (fallback below the "
+                        "escalation floor – every higher tier failed).",
                         idx,
                         provider.label,
                     )
@@ -1063,8 +1079,10 @@ class LLMClient:
                     f"⚠️ Coder <b>{provider.name}</b> failed (tier {idx}):\n"
                     f"<code>{exc}</code>"
                 )
-                # Advance floor so next call skips this broken provider
-                self._min_coder_tier = idx + 1
+                self._api_failed_coders.add(idx)
+                if idx >= self._min_coder_tier:
+                    # Advance floor so next call skips this broken provider
+                    self._min_coder_tier = idx + 1
                 last_exc = exc
 
         err = "All coding providers exhausted."
@@ -1087,8 +1105,14 @@ class LLMClient:
         """
         old_name = self.current_coder_name
 
-        for idx in range(self._min_coder_tier + 1, len(self._coders)):
-            if not self._coders[idx].available:
+        # Step up from the tier that actually serves the next call, not from
+        # the raw floor: after an API cascade the floor can sit on an
+        # unavailable tier below it, and "escalating" from there lands on the
+        # very provider that just failed the tests (DeepSeek → DeepSeek).
+        current = self._effective_coder_tier()
+        start = (current if current is not None else self._min_coder_tier) + 1
+        for idx in range(start, len(self._coders)):
+            if not self._usable_coder(idx):
                 continue
             self._min_coder_tier = idx
             new_name = self._coders[idx].name
@@ -1107,13 +1131,47 @@ class LLMClient:
             old_name,
         )
 
+    def reset_coder_tier(self) -> None:
+        """
+        Put the coder floor back on the head of the chain for a new issue.
+
+        ``graph/nodes.py`` holds one module-level LLMClient for the whole
+        ``--loop`` process, so without a reset the escalations and API-failure
+        advances of one issue carry over to every later one — and an issue
+        that escalated past the last tier leaves the next issue starting at
+        "none (all exhausted)", failing it without a single coder call.
+        """
+        if not self._min_coder_tier and not self._api_failed_coders:
+            return
+        old_name = self.current_coder_name
+        self._min_coder_tier = 0
+        self._api_failed_coders.clear()
+        logger.info(
+            "Coder tier reset for the next issue: %s → %s", old_name, self.current_coder_name
+        )
+
+    def _usable_coder(self, idx: int) -> bool:
+        """Configured/logged in, and no API failure during the current issue."""
+        return self._coders[idx].available and idx not in self._api_failed_coders
+
+    def _coder_order(self) -> list[int]:
+        """Tiers generate_code() tries: the floor upward, then below it, strongest first."""
+        usable = [idx for idx in range(len(self._coders)) if self._usable_coder(idx)]
+        floor = self._min_coder_tier
+        return [idx for idx in usable if idx >= floor] + [
+            idx for idx in reversed(usable) if idx < floor
+        ]
+
+    def _effective_coder_tier(self) -> int | None:
+        """Index of the coder generate_code() will try first, or None."""
+        order = self._coder_order()
+        return order[0] if order else None
+
     @property
     def current_coder_name(self) -> str:
         """Human-readable name of the coder tier that will be tried next."""
-        for idx in range(self._min_coder_tier, len(self._coders)):
-            if self._coders[idx].available:
-                return self._coders[idx].name
-        return "none (all exhausted)"
+        idx = self._effective_coder_tier()
+        return self._coders[idx].name if idx is not None else "none (all exhausted)"
 
     @property
     def last_coder_label(self) -> str:

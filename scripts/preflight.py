@@ -299,6 +299,46 @@ def check_skill_catalog() -> None:
     )
 
 
+def check_vector_memory() -> None:
+    """Phase 8 memory is optional by design: this section warns, never fails."""
+    print("\n── Vector memory (optional) ──")
+    from embedding import get_embedder
+    from graph.tools import tool_memory_status
+
+    embedder = get_embedder()
+    if not embedder.enabled:
+        _warn("Vector memory", "NESTI_MEMORY_ENABLED=false – prompts use the keyword catalog only")
+        return
+    if embedder.embed_query("preflight"):
+        _ok("Embedding model", f"{embedder.model_name} ({embedder.dim} dims)")
+    else:
+        _warn("Embedding model", f"{embedder.model_name} failed to load: {embedder.error}")
+
+    status = tool_memory_status()
+    if not status["success"]:
+        _warn("Memory status", status["error"])
+        return
+
+    qdrant = status["result"]["qdrant"]
+    target = f"{qdrant['collection']} @ {qdrant['url']}"
+    if qdrant["points"] is None:
+        _warn("Qdrant document memory", f"{target} unreachable or not indexed – "
+              f"{qdrant.get('error') or 'no detail'}")
+    elif qdrant["points"] == 0:
+        _warn("Qdrant document memory", f"{target} is empty – run scripts/index_skills.py")
+    else:
+        _ok("Qdrant document memory", f"{qdrant['points']} chunk(s) in {target}")
+
+    semantic = status["result"]["redis"]
+    if semantic["engine"] != "redis-query-engine":
+        _warn("Redis query engine", f"{semantic['url']} unreachable or without FT.CREATE – "
+              "Redis 8+ is required; solution cache and episodic memory disabled")
+    else:
+        _ok("Redis query engine",
+            f"{semantic['solutions']} solution(s), {semantic['episodes']} episode(s) "
+            f"@ {semantic['url']}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-llm", action="store_true",
@@ -321,6 +361,7 @@ def main() -> int:
     else:
         check_docker()
     check_skill_catalog()
+    check_vector_memory()
 
     print(f"\nPREFLIGHT OK ({_warnings} warning(s))")
     return 0
