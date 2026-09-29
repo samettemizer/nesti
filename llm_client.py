@@ -490,8 +490,8 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
     Claude Code's own traffic: `Authorization: Bearer` (not the `x-api-key`
     the anthropic SDK sends), the `oauth-2025-04-20` beta header, and a system
     prompt that identifies as Claude Code. That is why this is a raw requests
-    call instead of reusing AnthropicLLMClient's SDK path. See CLAUDE.md
-    "OAuth Consumer-Provider CLI" for the accepted-risk decision it implements.
+    call instead of reusing AnthropicLLMClient's SDK path. The accepted-risk
+    decision it implements is recorded in the scripts/oauth.py docstring.
     """
 
     name = "Claude Pro/Max (consumer)"

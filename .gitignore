@@ -19,6 +19,8 @@ venv/
 # Workspace temp dirs
 /workspace/
 /tmp/
+/.private/
+.omp/
 
 # Logs
 logs/
@@ -30,4 +32,3 @@ logs/
 .idea/
 *.swp
 *.swo
-CLAUDE.md

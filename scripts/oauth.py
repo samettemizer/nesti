@@ -20,8 +20,7 @@ Provider status as of 2026-09-20 (see RISK_NOTICES below for citations):
                  server-side for unofficial harnesses
                  (github.com/anthropics/claude-code/issues/8052). This was
                  explicitly accepted as a known risk for this project, not
-                 discovered and ignored — see CLAUDE.md "OAuth
-                 Consumer-Provider CLI". Revisit if Anthropic tightens
+                 discovered and ignored. Revisit if Anthropic tightens
                  enforcement further.
 """
 
