@@ -1,0 +1,15 @@
+# The build context is the repo root and both images run `COPY . .`
+# (Dockerfile, mcp_server/Dockerfile): anything not listed here is baked into
+# nesti-orchestrator and nesti-mcp.
+
+# Secrets: docker-compose injects .env at run time through env_file.
+**/.env
+
+# Host-only: git history and the local virtualenv (both images pip-install
+# their own dependencies from requirements.txt).
+.git
+.venv
+
+# Private agent context and working notes (mirrors .gitignore).
+**/.omp
+.private
