@@ -905,9 +905,9 @@ def node_on_layer_failure(state: IssueState) -> dict:
             remaining = usage.get("remaining")
             limit = usage.get("limit")
             # A provider with no quota-introspection API (see
-            # scripts.oauth.ChatGPTPlusProvider/CopilotProvider) reports
-            # remaining=None honestly rather than a guessed number — that
-            # must read as "unknown", never as "critically low".
+            # scripts.oauth.CopilotProvider) reports remaining=None honestly
+            # rather than a guessed number — that must read as "unknown",
+            # never as "critically low".
             if remaining is None:
                 continue
             if remaining < 3 or (limit and limit > 0 and (remaining / limit) < 0.1):

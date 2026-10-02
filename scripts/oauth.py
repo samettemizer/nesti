@@ -33,7 +33,7 @@ import os
 import secrets
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -717,6 +717,7 @@ class ChatGPTPlusProvider:
 
     Authorize:      https://auth.openai.com/oauth/authorize
     Token exchange: https://auth.openai.com/oauth/token
+    Usage:          https://chatgpt.com/backend-api/wham/usage
     Scopes:         openid profile email offline_access
 
     The container has no bound host port for a loopback callback (see the
@@ -727,11 +728,14 @@ class ChatGPTPlusProvider:
     """
 
     name = "chatgpt-plus"
-    usage_needs_fresh_credentials = False
+    usage_needs_fresh_credentials = True
     # this is a public information. (not about nesti or nesti's developers)
     _CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
     _AUTH_URL = "https://auth.openai.com/oauth/authorize"
     _TOKEN_URL = "https://auth.openai.com/oauth/token"
+    # What the official Codex CLI's /status reads (openai/codex,
+    # backend-client rate_limit_status_url). Undocumented, like Claude's.
+    _USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
     _REDIRECT_URI = "http://localhost:1455/auth/callback"
     _SCOPES = "openid profile email offline_access"
 
@@ -850,19 +854,52 @@ class ChatGPTPlusProvider:
         return self._store_shape(self._refresh_tokens(refresh_token), previous=token_data)
 
     def get_usage(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
-        # OpenAI does not publish a quota-introspection endpoint for
-        # ChatGPT Plus/Codex. Reporting a made-up number here would feed a
-        # false sense of safety into the pipeline's quota check, so this is
-        # intentionally left unknown rather than guessed.
-        return {
-            "remaining": None,
-            "limit": None,
-            "reset_time": None,
-            "note": (
-                "OpenAI does not publish a public quota API for ChatGPT "
-                "Plus/Codex; check usage at https://chatgpt.com/#settings/usage."
-            ),
-        }
+        # Never renew the token here: fetch_usage() renews through
+        # fresh_credentials() and saves the result before calling this.
+        account_id = token_data.get("account_id")
+        if not account_id:
+            raise RuntimeError(
+                "stored session carries no account_id — run "
+                "'nesti /provider login chatgpt-plus' again."
+            )
+        resp = requests.get(
+            self._USAGE_URL,
+            headers={
+                "Authorization": f"Bearer {token_data.get('access_token')}",
+                "ChatGPT-Account-Id": account_id,
+            },
+            timeout=15,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"Usage request failed ({resp.status_code}): {resp.text[:200]}")
+        rate_limit = resp.json().get("rate_limit") or {}
+        # Each window is {"used_percent", "limit_window_seconds", "reset_at":
+        # <unix seconds>}. Longest first, like Claude's "7 Day" above "5 Hour";
+        # ordered by length rather than by key, so a label never depends on
+        # which slot a window arrives in.
+        reported = sorted(
+            (w for key in ("primary_window", "secondary_window") if (w := rate_limit.get(key))),
+            key=lambda w: w["limit_window_seconds"],
+            reverse=True,
+        )
+        windows = [
+            {
+                "label": f"ChatGPT {self._window_label(w['limit_window_seconds'])}",
+                "used_percent": float(w["used_percent"]),
+                "resets_at": datetime.fromtimestamp(w["reset_at"], tz=timezone.utc).isoformat(),
+            }
+            for w in reported
+        ]
+        return _window_usage(windows, self._USAGE_URL)
+
+    @staticmethod
+    def _window_label(seconds: int) -> str:
+        """'7 Day' / '5 Hour' for a window length, matching Claude's labels."""
+        if seconds % 86400 == 0:
+            return f"{seconds // 86400} Day"
+        if seconds % 3600 == 0:
+            return f"{seconds // 3600} Hour"
+        return f"{seconds // 60} Min"
 
 
 PROVIDERS: Dict[str, ConsumerProvider] = {

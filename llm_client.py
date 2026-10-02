@@ -561,7 +561,7 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
 
     def __init__(self) -> None:
         super().__init__()
-        self.model: str = os.environ.get("NESTI_CHATGPT_MODEL", "gpt-5.1-codex")
+        self.model: str = os.environ.get("NESTI_CHATGPT_MODEL", "gpt-6.1-sol")
 
     def _call(
         self,
@@ -631,8 +631,14 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
     def _read_stream(cls, resp: requests.Response) -> str:
         deltas: list[str] = []
         completed = ""
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data:"):
+        # The Codex backend sends this stream without a Content-Type, so
+        # requests has no encoding to apply and iter_lines(decode_unicode=True)
+        # yields bytes. Split on bytes, then decode each complete line as
+        # UTF-8 (the SSE wire encoding): a multi-byte character can never be
+        # cut at a chunk boundary or mis-read as Latin-1.
+        for raw_line in resp.iter_lines():
+            line = raw_line.decode("utf-8", errors="replace")
+            if not line.startswith("data:"):
                 continue
             raw = line[len("data:") :].strip()
             if not raw or raw == "[DONE]":

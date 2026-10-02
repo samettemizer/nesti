@@ -399,7 +399,11 @@ time until that window resets (coloured on a TTY unless `NO_COLOR` is set).
 | `claude` | `api.anthropic.com/api/oauth/usage` | 7 Day, 5 Hour (+ Sonnet / Opus weekly when the plan has them) |
 | `antigravity` | Cloud Code `v1internal:fetchAvailableModels` (`User-Agent: antigravity`) | Gemini Pro, Gemini Flash, Claude, GPT-OSS — agent-selectable models only |
 | `copilot` | GitHub premium-request billing API | requests used this month; no remaining figure |
-| `chatgpt-plus` | — | `usage unknown`; no quota source is implemented |
+| `chatgpt-plus` | `chatgpt.com/backend-api/wham/usage` | 7 Day, 5 Hour (only returned windows) |
+
+ChatGPT Plus inference uses the signed-in subscription through the Codex backend,
+with `NESTI_CHATGPT_MODEL=gpt-6.1-sol`. Its usage endpoint is internal, not a
+stable public API; missing quota windows remain unknown rather than guessed.
 
 Every read goes through `fetch_usage()`: an access token near expiry is renewed
 and saved to Redis *before* the usage call. Anthropic rotates the refresh token

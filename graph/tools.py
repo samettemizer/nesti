@@ -1044,10 +1044,11 @@ def tool_quota_check() -> dict:
     Report remaining usage/quota for every OAuth consumer provider
     (scripts/oauth.py) authenticated via '/provider login'.
     result: {"<provider>": {"remaining": int | None, "limit": int | None,
-             "reset_time": ISO-8601 str | None, ...}, ...} — Claude adds
-             "windows" (label / used_percent / resets_at per rate-limit
-             window). A provider never logged in is omitted, never reported
-             with a fake value. Credentials renewed on the way are persisted
+             "reset_time": ISO-8601 str | None, ...}, ...} — claude,
+             antigravity and chatgpt-plus add "windows" (label /
+             used_percent / resets_at per rate-limit window). A provider
+             never logged in is omitted, never reported with a fake value.
+             Credentials renewed on the way are persisted
              (scripts.oauth.fetch_usage).
 
     node_on_layer_failure calls this instead of importing scripts.oauth

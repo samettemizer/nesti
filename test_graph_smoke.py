@@ -926,6 +926,66 @@ check(f["mr_url"] == "https://gitlab.example/mr/1220"
       and nodes._llm.current_coder_name != "none (all exhausted)",
       "node_setup resets the coder chain at the start of every issue")
 
+# ═════ Scenario 23: ChatGPT subscription — Codex backend stream and quota ═════
+print("\n── Scenario 23: ChatGPT subscription (Codex backend) ──")
+import io  # noqa: E402
+from datetime import datetime  # noqa: E402
+import requests  # noqa: E402
+import scripts.oauth as _oauth  # noqa: E402
+from llm_client import ChatGPTConsumerClient  # noqa: E402
+
+# chatgpt.com streams the answer without a Content-Type. Observed live: every
+# request died in the stream parser with "startswith first arg must be bytes",
+# so the subscription never answered and the chain silently moved on.
+_sse_text = "Türkçe — ğüşıöç → " * 40   # multi-byte characters over many 512-byte chunks
+_sse_events = [{"type": "response.output_text.delta", "delta": _sse_text[i:i + 50]}
+               for i in range(0, len(_sse_text), 50)]
+_sse_events.append({"type": "response.completed", "response": {"output": []}})
+_sse_resp = requests.Response()
+_sse_resp.status_code = 200
+_sse_resp.raw = io.BytesIO(b"".join(
+    b"data: " + json.dumps(e, ensure_ascii=False).encode("utf-8") + b"\n\n" for e in _sse_events))
+check(ChatGPTConsumerClient._read_stream(_sse_resp) == _sse_text,
+      "a Codex SSE stream without a Content-Type decodes as UTF-8, intact across chunk boundaries")
+
+
+class _UsageResponse:
+    ok, status_code, text = True, 200, ""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def _chatgpt_usage(rate_limit):
+    real_get = _oauth.requests.get
+    _oauth.requests.get = lambda *a, **k: _UsageResponse({"plan_type": "plus", "rate_limit": rate_limit})
+    try:
+        return _oauth.PROVIDERS["chatgpt-plus"].get_usage({"access_token": "t", "account_id": "a"})
+    finally:
+        _oauth.requests.get = real_get
+
+
+_usage = _chatgpt_usage({
+    "primary_window": {"used_percent": 30, "limit_window_seconds": 18000, "reset_at": 1790000000},
+    "secondary_window": {"used_percent": 96, "limit_window_seconds": 604800, "reset_at": 1790500000},
+})
+check([w["label"] for w in _usage["windows"]] == ["ChatGPT 7 Day", "ChatGPT 5 Hour"],
+      "ChatGPT windows are labelled by their length, longest first")
+check(_usage["remaining"] == 4 and _usage["limit"] == 100
+      and datetime.fromisoformat(_usage["reset_time"]).timestamp() == 1790500000,
+      "remaining/reset_time come from the most depleted window, not the first one")
+_usage = _chatgpt_usage({
+    "primary_window": {"used_percent": 10, "limit_window_seconds": 604800, "reset_at": 1790500000},
+    "secondary_window": None,
+})
+check([w["label"] for w in _usage["windows"]] == ["ChatGPT 7 Day"] and _usage["remaining"] == 90,
+      "a lone weekly window reported as primary is still labelled weekly")
+check(_chatgpt_usage(None)["remaining"] is None,
+      "no rate-limit window means unknown quota, never a fabricated figure")
+
 # ═════ Scenario 12: nodes/edges testable in isolation (total=False state) ═════
 print("\n── Scenario 12: isolated node/edge tests with partial state ──")
 r = nodes.node_test({})   # empty state – every field optional
