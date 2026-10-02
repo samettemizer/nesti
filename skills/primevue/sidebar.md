@@ -1432,7 +1432,7 @@ Screen Reader Sidebar is a headless compound component and does not define a spe
 
 | Name |Type |Default |Description |
 | --- | --- | --- | --- |
-| id | string | - | Unique identifier; required when nested in a SidebarLayout to participate in registry. |
+| id | string | - | Unique identifier; required when nested in a SidebarLayout to participate in registry. Rendered on the root element so a SidebarTrigger can reference it with  `aria-controls` . |
 | side | "left" \| "right" | 'left' | Side of the viewport on which the sidebar is anchored. |
 | variant | "sidebar" \| "floating" \| "inset" | 'sidebar' | Visual variant. |
 | collapsible | "none" \| "offcanvas" \| "icon" | 'icon' | Collapse behavior. |
@@ -2181,7 +2181,7 @@ Screen Reader Sidebar is a headless compound component and does not define a spe
 | Name |Type |Default |Description |
 | --- | --- | --- | --- |
 | target | string | - | Target sidebar id to toggle when nested in SidebarLayout with multiple sidebars. |
-| as | string \| object \| Function | - | The element or component to render. Defaults to a sensible HTML element. |
+| as | string \| Component | - | The element or component to render. Defaults to a sensible HTML element. |
 | asChild | boolean | false | When true, renders the slot content as the root element with merged props. |
 | dt | any | - | It generates scoped CSS variables using design tokens for the component. |
 | pt | any | - | Used to pass attributes to DOM elements inside the component. |

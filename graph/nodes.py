@@ -120,16 +120,23 @@ _NO_FILE_BLOCKS_OUTPUT = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _select_catalog_skills(
-    text: str, max_component_docs: int, max_topic_docs: int
+    text: str, max_component_docs: int, max_topic_docs: int, max_practice_docs: int = 0
 ) -> list:
     """
-    Pick vendored Laravel / PrimeVue reference docs matching *text*.
+    Pick vendored PrimeVue / Laravel / practice reference docs matching *text*.
 
     Selection is deterministic and offline (see ``skill_catalog``).  A missing
     or broken corpus must never block a run, so any failure degrades to an
     empty list and the prompt is built without reference documentation.
+
+    Practice docs are cross-cutting engineering guidance, not API reference, so
+    they default to zero: only the plan phase asks for one.  The plan text is
+    part of the code prompt, which is how that guidance reaches the coder
+    without spending the tighter code budget on it a second time.
     """
-    result = tool_skill_catalog_select(text, max_component_docs, max_topic_docs)
+    result = tool_skill_catalog_select(
+        text, max_component_docs, max_topic_docs, max_practice_docs
+    )
     if not result["success"]:
         logger.warning("Skill catalog selection failed: %s", result["error"])
         return []
@@ -478,6 +485,7 @@ def node_plan(state: IssueState) -> dict:
         issue_text,
         max_component_docs=3,
         max_topic_docs=2,
+        max_practice_docs=1,
     )
     repo_context = _repo_inventory(state.get("repo_path", ""))
 

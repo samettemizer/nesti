@@ -2,14 +2,22 @@
 
 Produces (paths relative to the output directory, default ``skills/``)::
 
-    primevue/<slug>.md         one markdown file per PrimeVue component
-    primevue/pages/<slug>.md    the ``installation`` and ``vite`` guide pages
+    primevue/<slug>.md          one markdown file per PrimeVue component
+    primevue/pages/<slug>.md    the official PrimeVue guide pages
     laravel/<topic>.md          one markdown file per Laravel documentation topic
+    practices/<slug>.md         curated cross-cutting engineering practice docs
     registry.json               machine-readable index consumed by ``skill_catalog.py``
 
 The corpus is tracked in git (never ``.gitignore``d). Run once and commit::
 
-    python scripts/fetch_skills.py [--out skills] [--laravel-branch 13.x] [--only primevue|laravel]
+    python scripts/fetch_skills.py [--out skills] [--laravel-branch 13.x]
+                                   [--only primevue|laravel|practices]
+                                   [--practices-src DIR]
+
+``primevue`` and ``laravel`` come over the network. ``practices`` are flattened
+out of a local skill library with ``--practices-src`` and are otherwise
+re-scanned from ``skills/practices/``, so every run rewrites the whole registry
+without ever dropping a section.
 
 Only the standard library and ``requests`` are used — no new dependency.
 """
@@ -44,20 +52,47 @@ _PRIMEVUE_VERSION = "5.0.1"
 PRIMEVUE_INDEX_URL = "https://primevue.dev/components/"
 PRIMEVUE_COMPONENT_PATTERN = "https://primevue.dev/llms/components/{slug}.md"
 PRIMEVUE_PAGE_PATTERN = "https://primevue.dev/llms/pages/{slug}.md"
-PRIMEVUE_PAGES = ["installation", "vite"]
+# Official guide pages, in fetch order. A slug may contain a ``/``
+# (``theming/styled``); the parent directory is created on demand.
+PRIMEVUE_PAGES = [
+    "installation",
+    "vite",
+    "configuration",
+    "plugin",
+    "autoimport",
+    "passthrough",
+    "theming/styled",
+    "theming/unstyled",
+    "tailwind",
+    "icons",
+    "customicons",
+    "guides/accessibility",
+    "guides/animations",
+    "guides/rtl",
+    "migration/v5",
+]
 # Documented but absent from the components index — appended after discovery.
 _EXTRA_SLUGS = ["chart"]
 
-# PrimeVue 3/4 names developers still type in issues -> current v5 slug.
+# PrimeVue 3/4 names developers still type in issues -> current v5 slug, plus
+# every component v5 deprecated (pages/migration/v5.md, "Deprecations") ->
+# its replacement. The deprecated docs are deliberately never vendored: the
+# components index omits them and the coder must not learn a doomed API.
 # Empty lists are dropped, so they contribute nothing.
 EXTRA_ALIASES = {
     "organizationchart": ["orgchart", "org chart"],
-    "select": ["dropdown"],
+    "select": ["dropdown", "multiselect", "multi select"],
     "drawer": ["sidebar panel"],
     "toast": ["notification"],
     "datepicker": ["calendar"],
     "inputpassword": ["password field"],
     "toggleswitch": [],
+    "gallery": ["galleria"],
+    "inputcolor": ["colorpicker", "color picker"],
+    "compare": ["imagecompare", "image compare"],
+    "scrollarea": ["scrollpanel", "scroll panel"],
+    "mask": ["inputmask", "input mask"],
+    "menu": ["panelmenu", "panel menu"],
 }
 
 # ── Laravel ──────────────────────────────────────────────────────────────────
@@ -89,7 +124,118 @@ LARAVEL_TOPICS = [
     ("structure", ["directory structure", "where to put"]),
     ("blade", ["blade", "view template", "layout"]),
     ("database", ["sqlite", "mysql", "transaction", "connection"]),
+    # ── Appended after the original 24 ───────────────────────────────────────
+    # The rest of the official Laravel documentation a Nesti issue can
+    # plausibly need. Position matters only for ties, and a tie always goes to
+    # the older topic above, so appending can never demote a proven selection.
+    ("queries", ["query builder", "db::table", "join", "subquery", "where clause", "aggregate"]),
+    ("pagination", ["paginate", "pagination", "per page", "page size", "cursor paginator"]),
+    ("eloquent-collections", ["eloquent collection", "lazy collection", "collection of models"]),
+    ("eloquent-serialization", ["serialization", "toarray", "tojson", "hidden attribute", "visible attribute"]),
+    ("collections", ["collection pipeline", "higher order message", "collect helper", "map filter reduce"]),
+    ("errors", ["error handling", "exception handler", "custom exception", "report exception", "render exception"]),
+    ("filesystem", ["file storage", "storage disk", "store uploaded file", "public disk", "s3"]),
+    ("cache", ["cache", "cache store", "remember forever", "cache tag"]),
+    ("queues", ["queue", "queued job", "dispatch job", "failed job", "job batch"]),
+    ("events", ["event listener", "event dispatch", "model observer", "event subscriber"]),
+    ("notifications", ["notification", "notifiable", "mail notification", "database notification"]),
+    ("mail", ["mailable", "send email", "markdown mail", "mail template"]),
+    ("localization", ["localization", "translation", "locale", "language file", "i18n"]),
+    ("session", ["session data", "flash message", "session driver"]),
+    ("csrf", ["csrf", "xsrf", "csrf token"]),
+    ("passwords", ["password reset", "forgot password", "reset link"]),
+    ("verification", ["email verification", "verify email", "mustverifyemail"]),
+    ("hashing", ["hashing", "bcrypt", "argon2", "hash password"]),
+    ("encryption", ["encryption", "encrypt", "decrypt", "encrypted cast"]),
+    ("rate-limiting", ["rate limiter", "ratelimiter", "too many requests", "throttle requests"]),
+    ("http-client", ["http client", "external api", "outbound request", "guzzle", "http::fake"]),
+    ("scheduling", ["task scheduling", "cron", "scheduled task", "recurring job"]),
+    ("container", ["service container", "dependency injection", "bind interface", "singleton"]),
+    ("providers", ["service provider", "register binding", "boot method"]),
+    ("facades", ["facade", "real-time facade"]),
+    ("contracts", ["laravel contract", "contract interface"]),
+    ("configuration", ["configuration file", "config value", "environment variable", "app config"]),
+    ("views", ["view composer", "render view", "share view data"]),
+    ("frontend", ["inertia", "livewire", "single page application", "vue integration"]),
+    ("strings", ["string helper", "str::", "slug helper", "pluralize"]),
+    ("helpers", ["helper function", "arr::", "data_get", "value helper"]),
+    ("mocking", ["mocking", "mock", "spy", "bus::fake", "queue::fake", "event::fake"]),
+    ("console-tests", ["console test", "expectsquestion", "artisan test", "command test"]),
+    ("urls", ["url generation", "signed url", "named route url", "asset url"]),
+    ("broadcasting", ["broadcasting", "websocket", "laravel echo", "real-time update", "pusher"]),
+    ("redis", ["redis"]),
+    ("logging", ["logging", "log channel", "log::", "monolog"]),
+    ("scout", ["laravel scout", "full-text search", "searchable model", "meilisearch", "algolia"]),
+    ("socialite", ["socialite", "oauth login", "social login", "google login"]),
+    ("images", ["image manipulation", "resize image", "thumbnail", "image upload"]),
+    ("precognition", ["precognition", "live validation"]),
+    ("ai-sdk", ["laravel ai", "ai sdk", "embedding", "vector store", "reranking", "llm agent"]),
 ]
+
+# ── Practices ────────────────────────────────────────────────────────────────
+# Cross-cutting engineering documents vendored from a local skill library with
+# ``--practices-src``. The list is a whitelist on purpose: only skills that
+# shape the code Nesti writes are allowed in — PHP/Laravel, Vue/PrimeVue and
+# the four test layers. ``files`` are flattened into one document, the first
+# one supplying the ``# `` title and every later one becoming a
+# ``## Reference:`` section.
+PRACTICE_SOURCES = [
+    {
+        "slug": "tdd",
+        "title": "Test-Driven Development",
+        "dir": "tdd",
+        "files": ["SKILL.md", "tests.md", "mocking.md"],
+        "url": "nesti://skills/practices/tdd.md",
+        "triggers": [
+            "tdd", "test driven", "red green refactor", "test first",
+            "regression test", "failing test", "test coverage",
+        ],
+    },
+    {
+        "slug": "senior-security",
+        "title": "Application Security Engineering",
+        "dir": "senior-security",
+        "files": [
+            "SKILL.md",
+            "references/threat-modeling-guide.md",
+            "references/security-architecture-patterns.md",
+            "references/cryptography-implementation.md",
+        ],
+        "url": "https://github.com/alirezarezvani/claude-skills/tree/main/engineering-team/senior-security",
+        "triggers": [
+            "security review", "threat model", "vulnerability", "owasp",
+            "sql injection", "xss", "secure coding", "attack surface",
+            "mass assignment", "sensitive data",
+        ],
+    },
+    {
+        "slug": "frontend-design",
+        "title": "Frontend Visual Design",
+        "dir": "frontend-design",
+        "files": ["SKILL.md"],
+        "url": "nesti://skills/practices/frontend-design.md",
+        "license": "Apache-2.0 (practices/licenses/frontend-design.txt)",
+        "license_file": "LICENSE.txt",
+        "triggers": [
+            "visual design", "ui design", "typography", "color palette",
+            "design system", "look and feel", "redesign", "visual hierarchy",
+        ],
+    },
+    {
+        "slug": "minimalist-ui",
+        "title": "Minimalist UI Direction",
+        "dir": "minimalist-ui",
+        "files": ["SKILL.md"],
+        "url": "nesti://skills/practices/minimalist-ui.md",
+        "triggers": [
+            "minimalist", "minimal ui", "clean interface", "editorial design",
+            "monochrome", "flat design",
+        ],
+    },
+]
+_FRONT_MATTER_FENCE = "---"
+_PRACTICE_LICENSE_DIR = "practices/licenses"
+_MAX_HEADING_LEVEL = 6
 
 
 def camel_split(name: str) -> str:
@@ -201,10 +347,9 @@ def fetch_components(
 
 
 def fetch_pages(session: requests.Session, out_dir: Path) -> tuple[list[dict], list[str]]:
-    """Fetch the ``installation`` and ``vite`` guide pages; return ``(pages, failures)``."""
+    """Fetch every official PrimeVue guide page; return ``(pages, failures)``."""
     pages: list[dict] = []
     failures: list[str] = []
-    (out_dir / "primevue" / "pages").mkdir(parents=True, exist_ok=True)
     for slug in PRIMEVUE_PAGES:
         response = _fetch(session, PRIMEVUE_PAGE_PATTERN.format(slug=slug))
         if response.status_code != 200:
@@ -212,8 +357,13 @@ def fetch_pages(session: requests.Session, out_dir: Path) -> tuple[list[dict], l
             failures.append(f"primevue page {slug} (HTTP {response.status_code})")
             continue
         rel = f"primevue/pages/{slug}.md"
-        (out_dir / rel).write_bytes(response.content)
-        pages.append({"slug": slug, "path": rel, "chars": len(response.content)})
+        destination = out_dir / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(response.content)
+        title = _first_heading(response.text) or slug.replace("/", " ").replace("-", " ").title()
+        pages.append(
+            {"slug": slug, "title": title, "path": rel, "chars": len(response.content)}
+        )
         logger.info("page %-22s -> %s (%d bytes)", slug, rel, len(response.content))
     return pages, failures
 
@@ -255,6 +405,136 @@ def fetch_laravel(
     return topics, failures
 
 
+def _split_front_matter(text: str) -> tuple[dict[str, str], str]:
+    """Split a leading ``---`` block into a flat ``key: value`` map plus the body.
+
+    Deliberately not a YAML parser: continuation lines of an upstream block
+    scalar (``description: >``) are indented and therefore skipped. Only the
+    keys this script writes itself are ever read back.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != _FRONT_MATTER_FENCE:
+        return {}, text
+    for index in range(1, len(lines)):
+        if lines[index].strip() != _FRONT_MATTER_FENCE:
+            continue
+        meta: dict[str, str] = {}
+        for line in lines[1:index]:
+            key, separator, value = line.partition(":")
+            if separator and not key[:1].isspace():
+                meta[key.strip()] = value.strip().strip('"')
+        return meta, "\n".join(lines[index + 1:]).lstrip("\n")
+    return {}, text
+
+
+def _demote_headings(text: str) -> str:
+    """Push every ATX heading one level deeper, leaving fenced code untouched."""
+    out: list[str] = []
+    fenced = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fenced = not fenced
+        elif not fenced and line.startswith("#"):
+            level = len(line) - len(line.lstrip("#"))
+            if level < _MAX_HEADING_LEVEL and line[level:level + 1] in (" ", ""):
+                line = "#" + line
+        out.append(line)
+    return "\n".join(out)
+
+
+def _reference_title(name: str) -> str:
+    """``references/rag_evaluation_framework.md`` -> ``Rag Evaluation Framework``."""
+    return Path(name).stem.replace("_", " ").replace("-", " ").title()
+
+
+def _render_practice(entry: dict, src_dir: Path) -> str:
+    """Flatten one source skill into a single document with Nesti front matter."""
+    root = src_dir / entry["dir"]
+    parts: list[str] = []
+    for position, name in enumerate(entry["files"]):
+        _, body = _split_front_matter((root / name).read_text(encoding="utf-8"))
+        body = body.strip()
+        if not body:
+            continue
+        if position == 0:
+            parts.append(body if body.startswith("# ") else f"# {entry['title']}\n\n{body}")
+            continue
+        # The chunker splits on "\n## ", so every appended file has to open one
+        # section of its own — its demoted title when it has one, a synthesised
+        # "Reference:" heading when it does not.
+        demoted = _demote_headings(body)
+        if demoted.startswith("## "):
+            parts.append(demoted)
+        else:
+            parts.append(f"## Reference: {_reference_title(name)}\n\n{demoted}")
+    front = [
+        _FRONT_MATTER_FENCE,
+        f"title: {entry['title']}",
+        f"slug: {entry['slug']}",
+        f"source: {entry['url']}",
+        f"triggers: {', '.join(entry['triggers'])}",
+    ]
+    if entry.get("license"):
+        front.append(f"license: {entry['license']}")
+    front += ["vendored_by: scripts/fetch_skills.py", _FRONT_MATTER_FENCE, ""]
+    return "\n".join(front) + "\n" + "\n\n---\n\n".join(parts) + "\n"
+
+
+def vendor_practices(src_dir: Path, out_dir: Path) -> list[str]:
+    """Write every ``PRACTICE_SOURCES`` entry into ``practices/``; return failures."""
+    failures: list[str] = []
+    (out_dir / "practices").mkdir(parents=True, exist_ok=True)
+    for entry in PRACTICE_SOURCES:
+        try:
+            document = _render_practice(entry, src_dir)
+            rel = f"practices/{entry['slug']}.md"
+            (out_dir / rel).write_text(document, encoding="utf-8")
+            license_file = entry.get("license_file")
+            if license_file:
+                target = out_dir / _PRACTICE_LICENSE_DIR / f"{entry['slug']}.txt"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    (src_dir / entry["dir"] / license_file).read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+        except OSError as exc:
+            logger.error("practice %s could not be vendored: %s", entry["slug"], exc)
+            failures.append(f"practice {entry['slug']} ({exc})")
+            continue
+        logger.info(
+            "practice %-22s -> %s (%d bytes)", entry["slug"], rel, len(document.encode("utf-8"))
+        )
+    return failures
+
+
+def scan_practices(out_dir: Path) -> list[dict]:
+    """Rebuild the practice registry rows from the documents already on disk."""
+    documents: list[dict] = []
+    for path in sorted((out_dir / "practices").glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning("practice %s is unreadable: %s", path.name, exc)
+            continue
+        meta, _ = _split_front_matter(text)
+        slug = meta.get("slug") or path.stem
+        triggers = _dedupe([part.lower() for part in meta.get("triggers", "").split(",")])
+        if not triggers:
+            logger.warning("practice %s has no triggers and can never be selected", slug)
+        documents.append(
+            {
+                "slug": slug,
+                "title": meta.get("title") or slug.replace("-", " ").title(),
+                "url": meta.get("source", ""),
+                "triggers": triggers,
+                "path": f"practices/{path.name}",
+                "chars": len(text.encode("utf-8")),
+            }
+        )
+    return documents
+
+
 def _load_existing(out_dir: Path) -> dict:
     """Return the current ``registry.json`` (used to preserve the untouched half on ``--only`` runs)."""
     registry_path = out_dir / "registry.json"
@@ -266,15 +546,22 @@ def _load_existing(out_dir: Path) -> dict:
     return {}
 
 
-def _print_summary(primevue_section: dict, laravel_section: dict, skipped: list[dict]) -> None:
+def _print_summary(
+    primevue_section: dict,
+    laravel_section: dict,
+    practices_section: dict,
+    skipped: list[dict],
+) -> None:
     """Print the ``kind`` / ``count`` / ``total KB`` table plus any skipped slugs."""
     components = primevue_section.get("components", [])
     pages = primevue_section.get("pages", [])
     topics = laravel_section.get("topics", [])
+    practices = practices_section.get("documents", [])
     rows = [
         ("primevue components", len(components), sum(c["chars"] for c in components)),
         ("primevue pages", len(pages), sum(p["chars"] for p in pages)),
         ("laravel topics", len(topics), sum(t["chars"] for t in topics)),
+        ("practice documents", len(practices), sum(p["chars"] for p in practices)),
     ]
     width = max(len(row[0]) for row in rows + [("kind", 0, 0), ("total", 0, 0)])
     total_count = sum(row[1] for row in rows)
@@ -299,7 +586,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Vendor the PrimeVue + Laravel skill corpus into skills/.")
     parser.add_argument("--out", default="skills", help="output directory (default: skills)")
     parser.add_argument("--laravel-branch", default="13.x", help="Laravel docs branch (default: 13.x)")
-    parser.add_argument("--only", choices=["primevue", "laravel"], help="fetch only one corpus")
+    parser.add_argument(
+        "--only", choices=["primevue", "laravel", "practices"], help="refresh only one corpus"
+    )
+    parser.add_argument(
+        "--practices-src",
+        help="local skill library to re-vendor practices/ from (offline; omit to keep the "
+             "documents already in skills/practices/)",
+    )
     args = parser.parse_args(argv)
 
     out_dir = Path(args.out)
@@ -350,10 +644,17 @@ def main(argv: list[str] | None = None) -> int:
             },
         )
 
+    if args.practices_src:
+        failures += vendor_practices(Path(args.practices_src), out_dir)
+    # Always rescanned from disk: the section is local, cheap and must survive
+    # every --only run, because the registry is rewritten whole below.
+    practices_section = {"documents": scan_practices(out_dir)}
+
     registry = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "primevue": primevue_section,
         "laravel": laravel_section,
+        "practices": practices_section,
     }
     registry_path = out_dir / "registry.json"
     registry_path.write_text(
@@ -361,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     logger.info("wrote %s", registry_path)
 
-    _print_summary(primevue_section, laravel_section, skipped)
+    _print_summary(primevue_section, laravel_section, practices_section, skipped)
 
     if failures:
         logger.error("%d fetch failure(s):", len(failures))

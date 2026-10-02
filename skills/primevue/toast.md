@@ -342,9 +342,9 @@ Screen Reader Toast component use alert role that implicitly defines aria-live a
 | contrastIcon | string | - | Icon to display in the toast with contrast severity. |
 | closeButtonProps | ButtonHTMLAttributes | - | Used to pass all properties of the HTMLButtonElement to the close button. |
 | message | ToastMessageOptions | - | Used to access message options. |
-| onMouseEnter | Function | - | Used to specify a callback function to be run when the mouseenter event is fired on the message component. |
-| onMouseLeave | Function | - | Used to specify a callback function to be run when the mouseleave event is fired on the message component. |
-| onClick | Function | - | Used to specify a callback function to be run when the click event is fired on the message component. |
+| onMouseEnter | Function | - |  |
+| onMouseLeave | Function | - |  |
+| onClick | Function | - |  |
 | dt | any | - | It generates scoped CSS variables using design tokens for the component. |
 | pt | any | - | Used to pass attributes to DOM elements inside the component. |
 | ptOptions | any | - | Used to configure passthrough(pt) options of the component. |

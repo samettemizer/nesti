@@ -294,7 +294,8 @@ def check_skill_catalog() -> None:
     _ok(
         "Vendored skill corpus",
         f"{status['components']} PrimeVue component doc(s), "
-        f"{status['topics']} Laravel topic(s) "
+        f"{status['topics']} Laravel topic(s), "
+        f"{status['practices']} practice doc(s) "
         f"(PrimeVue {status['primevue_version']} / Laravel {status['laravel_branch']})",
     )
 

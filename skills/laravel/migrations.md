@@ -1192,13 +1192,19 @@ $table->uuid('id');
 The `vector` method creates a `vector` equivalent column:
 
 ```php
-$table->vector('embedding', dimensions: 100);
+$table->vector('embedding', dimensions: 1536);
 ```
 
-When utilizing PostgreSQL, the `pgvector` extension must be loaded before `vector` columns can be created:
+Vector columns are supported on PostgreSQL connections using the `pgvector` extension and MariaDB 11.7 or later. When utilizing PostgreSQL, `pgvector` must be loaded before `vector` columns can be created:
 
 ```php
 Schema::ensureVectorExtensionExists();
+```
+
+To speed up [vector similarity queries](/docs/{{version}}/queries#vector-similarity-clauses), you may add a vector index to the column. Calling the `index` method on a `vector` column creates a vector index using cosine distance:
+
+```php
+$table->vector('embedding', dimensions: 1536)->index();
 ```
 
 <a name="column-method-year"></a>
@@ -1467,6 +1473,7 @@ Laravel's schema builder blueprint class provides methods for creating each type
 | `$table->fullText('body');`                      | Adds a full text index (MariaDB / MySQL / PostgreSQL).         |
 | `$table->fullText('body')->language('english');` | Adds a full text index of the specified language (PostgreSQL). |
 | `$table->spatialIndex('location');`              | Adds a spatial index (except SQLite).                          |
+| `$table->vectorIndex('embedding');`              | Adds a vector index (MariaDB / PostgreSQL).                    |
 
 </div>
 
@@ -1476,10 +1483,28 @@ Laravel's schema builder blueprint class provides methods for creating each type
 By default, creating an index on a large table can lock the table and block reads or writes while the index is being built. When using PostgreSQL or SQL Server, you may chain the `online` method onto an index definition to create the index without locking the table, allowing your application to continue reading and writing data during index creation:
 
 ```php
-$table->string('email')->unique()->online();
+$table->unique('email')->online();
 ```
 
 When using PostgreSQL, this adds the `CONCURRENTLY` option to the index creation statement. When using SQL Server, this adds the `WITH (online = on)` option.
+
+When using MySQL, you may chain the `inplace` modifier onto an index or foreign key definition to specify that the operation should use the `INPLACE` algorithm:
+
+```php
+$table->index('email')->inplace();
+
+$table->foreign('user_id')->references('id')->on('users')->inplace();
+```
+
+The `inplace` modifier may be combined with the `lock` modifier to control table locking during the operation:
+
+```php
+$table->index('email')->inplace()->lock('none');
+```
+
+When using the `inplace` modifier for a foreign key operation, foreign key checks must be disabled.
+
+Refer to [MySQL's documentation](https://dev.mysql.com/doc/refman/8.0/en/innodb-online-ddl-operations.html) to determine which operations support the `INPLACE` algorithm and lock modes.
 
 <a name="renaming-indexes"></a>
 ### Renaming Indexes
@@ -1497,13 +1522,14 @@ To drop an index, you must specify the index's name. By default, Laravel automat
 
 <div class="overflow-auto">
 
-| Command                                                  | Description                                                 |
-| -------------------------------------------------------- | ----------------------------------------------------------- |
-| `$table->dropPrimary('users_id_primary');`               | Drop a primary key from the "users" table.                  |
-| `$table->dropUnique('users_email_unique');`              | Drop a unique index from the "users" table.                 |
-| `$table->dropIndex('geo_state_index');`                  | Drop a basic index from the "geo" table.                    |
-| `$table->dropFullText('posts_body_fulltext');`           | Drop a full text index from the "posts" table.              |
-| `$table->dropSpatialIndex('geo_location_spatialindex');` | Drop a spatial index from the "geo" table  (except SQLite). |
+| Command                                                       | Description                                                 |
+| ------------------------------------------------------------- | ----------------------------------------------------------- |
+| `$table->dropPrimary('users_id_primary');`                    | Drop a primary key from the "users" table.                  |
+| `$table->dropUnique('users_email_unique');`                   | Drop a unique index from the "users" table.                 |
+| `$table->dropIndex('geo_state_index');`                       | Drop a basic index from the "geo" table.                    |
+| `$table->dropFullText('posts_body_fulltext');`                | Drop a full text index from the "posts" table.              |
+| `$table->dropSpatialIndex('geo_location_spatialindex');`      | Drop a spatial index from the "geo" table  (except SQLite). |
+| `$table->dropVectorIndex('documents_embedding_vectorindex');` | Drop a vector index from the "documents" table.             |
 
 </div>
 
@@ -1619,13 +1645,13 @@ Schema::withoutForeignKeyConstraints(function () {
 <a name="events"></a>
 ## Events
 
-For convenience, each migration operation will dispatch an [event](/docs/{{version}}/events). All of the following events extend the base `Illuminate\Database\Events\MigrationEvent` class:
+For convenience, each migration operation will dispatch an [event](/docs/{{version}}/events). With the exception of `SchemaDumped` and `SchemaLoaded`, all of the following events implement the `Illuminate\Contracts\Database\Events\MigrationEvent` interface:
 
 <div class="overflow-auto">
 
 | Class                                            | Description                                      |
 | ------------------------------------------------ | ------------------------------------------------ |
-| `Illuminate\Database\Events\DatabaseRefreshed`   | The `migrate:refresh` command has finished.      |
+| `Illuminate\Database\Events\DatabaseRefreshed`   | The `migrate:fresh` or `migrate:refresh` command has finished. |
 | `Illuminate\Database\Events\MigrationsStarted`   | A batch of migrations is about to be executed.   |
 | `Illuminate\Database\Events\MigrationsEnded`     | A batch of migrations has finished.              |
 | `Illuminate\Database\Events\MigrationStarted`    | A single migration is about to be executed.      |

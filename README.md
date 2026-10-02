@@ -121,20 +121,32 @@ The layer runs only when the attempt touched `routes/api.php`,
 
 The `skills/` directory holds a vendored, offline documentation corpus:
 
-| Category | Count |
-|----------|-------|
-| PrimeVue 5 component docs | 92 |
-| PrimeVue 5 guide pages | 2 |
-| Laravel topic docs | 24 |
+| Category | Count | Source |
+|----------|-------|--------|
+| PrimeVue 5 component docs | 92 | `primevue.dev/llms` |
+| PrimeVue 5 guide pages | 15 | `primevue.dev/llms` |
+| Laravel topic docs | 66 | `laravel/docs` 13.x |
+| Practice docs | 4 | curated, see below |
 
 Generated **only** by `scripts/fetch_skills.py` and committed to the
 repository. Never hand-edit a vendored document.
+
+The practice tier is a hand-picked whitelist (`PRACTICE_SOURCES` in
+`scripts/fetch_skills.py`) of cross-cutting engineering documents that shape
+the code Nesti writes — test-driven development, application security, and
+visual/UI direction. Each entry is flattened into one markdown file with a
+Nesti front matter block and re-vendored offline from a local skill library:
+
+```bash
+python scripts/fetch_skills.py --only practices --practices-src ~/my-skills
+```
 
 `skill_catalog.py` selects docs **deterministically and offline** per issue by
 alias and trigger matching — e.g. "Dropdown" maps to the PrimeVue 5 `Select`
 doc, "OrgChart" maps to `organizationchart`, "migration" maps to the Laravel
 migrations topic. Each document is capped at 7 000 chars before the
-prompt-level budget.
+prompt-level budget. Practice docs rank last and are capped at one per prompt:
+API documentation always outranks general guidance.
 
 The only run-time fetch left is URLs the issue itself contains, handled by
 `skill_loader.py`.
@@ -432,7 +444,7 @@ See `.env.example` for all variables. Key ones:
 **Offline smoke tests** (no Docker, no network):
 ```bash
 python test_graph_smoke.py
-# 303 checks — covers every node, every routing edge, the full state machine
+# 318 checks — covers every node, every routing edge, the full state machine
 ```
 
 **Live integration tests** (needs Docker + network):

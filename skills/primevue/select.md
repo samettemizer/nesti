@@ -846,7 +846,7 @@ const cities = ref([
 
 ## Template
 
-Both the selected option and the options list can be templated to provide customizated representation. Use the #value slot to customize the selected label display and the #option slot to change the content of the options in the select panel. In addition when grouping is enabled, the #optiongroup slot is available to customize the option groups. All slots get the option instance as the default slot props.
+Both the selected option and the options list can be templated to provide customizated representation. Use the #value slot to customize the selected label display and the #option slot to change the content of the options in the select panel. In addition when grouping is enabled, the #optiongroup slot is available to customize the option groups. The #option and #optiongroup slots receive the option instance, whereas the #value slot receives the selected value itself; when optionValue is set this is the resolved value rather than the option object, so look the option up from your options if you need its other fields.
 
 ```vue
 <template>

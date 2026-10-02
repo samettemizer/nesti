@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-16T18:14:49Z",
+  "generated_at": "2026-10-02T17:40:27Z",
   "primevue": {
     "version": "5.0.1",
     "source_pattern": "https://primevue.dev/llms/components/{slug}.md",
@@ -139,7 +139,9 @@
         "name": "Compare",
         "slug": "compare",
         "aliases": [
-          "compare"
+          "compare",
+          "imagecompare",
+          "image compare"
         ],
         "path": "primevue/compare.md",
         "chars": 18698
@@ -314,7 +316,8 @@
         "name": "Gallery",
         "slug": "gallery",
         "aliases": [
-          "gallery"
+          "gallery",
+          "galleria"
         ],
         "path": "primevue/gallery.md",
         "chars": 37417
@@ -353,7 +356,9 @@
         "slug": "inputcolor",
         "aliases": [
           "inputcolor",
-          "input color"
+          "input color",
+          "colorpicker",
+          "color picker"
         ],
         "path": "primevue/inputcolor.md",
         "chars": 37797
@@ -460,7 +465,9 @@
         "name": "Mask",
         "slug": "mask",
         "aliases": [
-          "mask"
+          "mask",
+          "inputmask",
+          "input mask"
         ],
         "path": "primevue/mask.md",
         "chars": 6133
@@ -479,7 +486,9 @@
         "name": "Menu",
         "slug": "menu",
         "aliases": [
-          "menu"
+          "menu",
+          "panelmenu",
+          "panel menu"
         ],
         "path": "primevue/menu.md",
         "chars": 25621
@@ -624,7 +633,9 @@
         "slug": "scrollarea",
         "aliases": [
           "scrollarea",
-          "scroll area"
+          "scroll area",
+          "scrollpanel",
+          "scroll panel"
         ],
         "path": "primevue/scrollarea.md",
         "chars": 28458
@@ -644,10 +655,12 @@
         "slug": "select",
         "aliases": [
           "select",
-          "dropdown"
+          "dropdown",
+          "multiselect",
+          "multi select"
         ],
         "path": "primevue/select.md",
-        "chars": 55863
+        "chars": 56078
       },
       {
         "name": "SelectButton",
@@ -666,7 +679,7 @@
           "sidebar"
         ],
         "path": "primevue/sidebar.md",
-        "chars": 112090
+        "chars": 112171
       },
       {
         "name": "Skeleton",
@@ -797,7 +810,7 @@
           "notification"
         ],
         "path": "primevue/toast.md",
-        "chars": 24141
+        "chars": 23828
       },
       {
         "name": "ToggleButton",
@@ -889,13 +902,93 @@
     "pages": [
       {
         "slug": "installation",
+        "title": "Installation",
         "path": "primevue/pages/installation.md",
         "chars": 94
       },
       {
         "slug": "vite",
+        "title": "Install PrimeVue with Vite",
         "path": "primevue/pages/vite.md",
         "chars": 2150
+      },
+      {
+        "slug": "configuration",
+        "title": "Configuration",
+        "path": "primevue/pages/configuration.md",
+        "chars": 8480
+      },
+      {
+        "slug": "plugin",
+        "title": "PrimeVue Plugin",
+        "path": "primevue/pages/plugin.md",
+        "chars": 5812
+      },
+      {
+        "slug": "autoimport",
+        "title": "Auto Import",
+        "path": "primevue/pages/autoimport.md",
+        "chars": 1092
+      },
+      {
+        "slug": "passthrough",
+        "title": "Pass Through",
+        "path": "primevue/pages/passthrough.md",
+        "chars": 6728
+      },
+      {
+        "slug": "theming/styled",
+        "title": "Styled Mode",
+        "path": "primevue/pages/theming/styled.md",
+        "chars": 19781
+      },
+      {
+        "slug": "theming/unstyled",
+        "title": "Unstyled Mode",
+        "path": "primevue/pages/theming/unstyled.md",
+        "chars": 2683
+      },
+      {
+        "slug": "tailwind",
+        "title": "Tailwind CSS",
+        "path": "primevue/pages/tailwind.md",
+        "chars": 16701
+      },
+      {
+        "slug": "icons",
+        "title": "Icons",
+        "path": "primevue/pages/icons.md",
+        "chars": 3380
+      },
+      {
+        "slug": "customicons",
+        "title": "Custom Icons",
+        "path": "primevue/pages/customicons.md",
+        "chars": 1411
+      },
+      {
+        "slug": "guides/accessibility",
+        "title": "Accessibility",
+        "path": "primevue/pages/guides/accessibility.md",
+        "chars": 4990
+      },
+      {
+        "slug": "guides/animations",
+        "title": "Animations",
+        "path": "primevue/pages/guides/animations.md",
+        "chars": 5293
+      },
+      {
+        "slug": "guides/rtl",
+        "title": "RTL Support",
+        "path": "primevue/pages/guides/rtl.md",
+        "chars": 494
+      },
+      {
+        "slug": "migration/v5",
+        "title": "Migration to v5",
+        "path": "primevue/pages/migration/v5.md",
+        "chars": 6213
       }
     ]
   },
@@ -916,7 +1009,7 @@
           "foreign key"
         ],
         "path": "laravel/migrations.md",
-        "chars": 59551,
+        "chars": 61045,
         "branch": "13.x"
       },
       {
@@ -956,7 +1049,7 @@
           "query scope"
         ],
         "path": "laravel/eloquent.md",
-        "chars": 69293,
+        "chars": 69904,
         "branch": "13.x"
       },
       {
@@ -971,7 +1064,7 @@
           "pivot"
         ],
         "path": "laravel/eloquent-relationships.md",
-        "chars": 98484,
+        "chars": 98483,
         "branch": "13.x"
       },
       {
@@ -984,7 +1077,7 @@
           "transform response"
         ],
         "path": "laravel/eloquent-resources.md",
-        "chars": 42925,
+        "chars": 42921,
         "branch": "13.x"
       },
       {
@@ -997,7 +1090,7 @@
           "appends"
         ],
         "path": "laravel/eloquent-mutators.md",
-        "chars": 36575,
+        "chars": 37350,
         "branch": "13.x"
       },
       {
@@ -1011,7 +1104,7 @@
           "form request"
         ],
         "path": "laravel/validation.md",
-        "chars": 114317,
+        "chars": 114380,
         "branch": "13.x"
       },
       {
@@ -1023,7 +1116,7 @@
           "resource controller"
         ],
         "path": "laravel/controllers.md",
-        "chars": 29934,
+        "chars": 29933,
         "branch": "13.x"
       },
       {
@@ -1036,7 +1129,7 @@
           "route model binding"
         ],
         "path": "laravel/routing.md",
-        "chars": 40414,
+        "chars": 40420,
         "branch": "13.x"
       },
       {
@@ -1048,7 +1141,7 @@
           "uploaded file"
         ],
         "path": "laravel/requests.md",
-        "chars": 33529,
+        "chars": 33511,
         "branch": "13.x"
       },
       {
@@ -1061,7 +1154,7 @@
           "redirect"
         ],
         "path": "laravel/responses.md",
-        "chars": 33207,
+        "chars": 33210,
         "branch": "13.x"
       },
       {
@@ -1073,7 +1166,7 @@
           "rate limit"
         ],
         "path": "laravel/middleware.md",
-        "chars": 20548,
+        "chars": 20603,
         "branch": "13.x"
       },
       {
@@ -1151,7 +1244,7 @@
           "http test"
         ],
         "path": "laravel/http-tests.md",
-        "chars": 61279,
+        "chars": 61280,
         "branch": "13.x"
       },
       {
@@ -1163,7 +1256,7 @@
           "scheduler"
         ],
         "path": "laravel/artisan.md",
-        "chars": 37611,
+        "chars": 37594,
         "branch": "13.x"
       },
       {
@@ -1198,7 +1291,7 @@
           "layout"
         ],
         "path": "laravel/blade.md",
-        "chars": 71219,
+        "chars": 71222,
         "branch": "13.x"
       },
       {
@@ -1211,8 +1304,624 @@
           "connection"
         ],
         "path": "laravel/database.md",
-        "chars": 23432,
+        "chars": 23434,
         "branch": "13.x"
+      },
+      {
+        "topic": "queries",
+        "title": "Database: Query Builder",
+        "triggers": [
+          "query builder",
+          "db::table",
+          "join",
+          "subquery",
+          "where clause",
+          "aggregate"
+        ],
+        "path": "laravel/queries.md",
+        "chars": 58444,
+        "branch": "13.x"
+      },
+      {
+        "topic": "pagination",
+        "title": "Database: Pagination",
+        "triggers": [
+          "paginate",
+          "pagination",
+          "per page",
+          "page size",
+          "cursor paginator"
+        ],
+        "path": "laravel/pagination.md",
+        "chars": 22368,
+        "branch": "13.x"
+      },
+      {
+        "topic": "eloquent-collections",
+        "title": "Eloquent: Collections",
+        "triggers": [
+          "eloquent collection",
+          "lazy collection",
+          "collection of models"
+        ],
+        "path": "laravel/eloquent-collections.md",
+        "chars": 12846,
+        "branch": "13.x"
+      },
+      {
+        "topic": "eloquent-serialization",
+        "title": "Eloquent: Serialization",
+        "triggers": [
+          "serialization",
+          "toarray",
+          "tojson",
+          "hidden attribute",
+          "visible attribute"
+        ],
+        "path": "laravel/eloquent-serialization.md",
+        "chars": 8480,
+        "branch": "13.x"
+      },
+      {
+        "topic": "collections",
+        "title": "Collections",
+        "triggers": [
+          "collection pipeline",
+          "higher order message",
+          "collect helper",
+          "map filter reduce"
+        ],
+        "path": "laravel/collections.md",
+        "chars": 115109,
+        "branch": "13.x"
+      },
+      {
+        "topic": "errors",
+        "title": "Error Handling",
+        "triggers": [
+          "error handling",
+          "exception handler",
+          "custom exception",
+          "report exception",
+          "render exception"
+        ],
+        "path": "laravel/errors.md",
+        "chars": 19684,
+        "branch": "13.x"
+      },
+      {
+        "topic": "filesystem",
+        "title": "File Storage",
+        "triggers": [
+          "file storage",
+          "storage disk",
+          "store uploaded file",
+          "public disk",
+          "s3"
+        ],
+        "path": "laravel/filesystem.md",
+        "chars": 36072,
+        "branch": "13.x"
+      },
+      {
+        "topic": "cache",
+        "title": "Cache",
+        "triggers": [
+          "cache",
+          "cache store",
+          "remember forever",
+          "cache tag"
+        ],
+        "path": "laravel/cache.md",
+        "chars": 33708,
+        "branch": "13.x"
+      },
+      {
+        "topic": "queues",
+        "title": "Queues",
+        "triggers": [
+          "queue",
+          "queued job",
+          "dispatch job",
+          "failed job",
+          "job batch"
+        ],
+        "path": "laravel/queues.md",
+        "chars": 138434,
+        "branch": "13.x"
+      },
+      {
+        "topic": "events",
+        "title": "Events",
+        "triggers": [
+          "event listener",
+          "event dispatch",
+          "model observer",
+          "event subscriber"
+        ],
+        "path": "laravel/events.md",
+        "chars": 44187,
+        "branch": "13.x"
+      },
+      {
+        "topic": "notifications",
+        "title": "Notifications",
+        "triggers": [
+          "notification",
+          "notifiable",
+          "mail notification",
+          "database notification"
+        ],
+        "path": "laravel/notifications.md",
+        "chars": 75561,
+        "branch": "13.x"
+      },
+      {
+        "topic": "mail",
+        "title": "Mail",
+        "triggers": [
+          "mailable",
+          "send email",
+          "markdown mail",
+          "mail template"
+        ],
+        "path": "laravel/mail.md",
+        "chars": 59538,
+        "branch": "13.x"
+      },
+      {
+        "topic": "localization",
+        "title": "Localization",
+        "triggers": [
+          "localization",
+          "translation",
+          "locale",
+          "language file",
+          "i18n"
+        ],
+        "path": "laravel/localization.md",
+        "chars": 12623,
+        "branch": "13.x"
+      },
+      {
+        "topic": "session",
+        "title": "HTTP Session",
+        "triggers": [
+          "session data",
+          "flash message",
+          "session driver"
+        ],
+        "path": "laravel/session.md",
+        "chars": 18111,
+        "branch": "13.x"
+      },
+      {
+        "topic": "csrf",
+        "title": "CSRF Protection",
+        "triggers": [
+          "csrf",
+          "xsrf",
+          "csrf token"
+        ],
+        "path": "laravel/csrf.md",
+        "chars": 8021,
+        "branch": "13.x"
+      },
+      {
+        "topic": "passwords",
+        "title": "Resetting Passwords",
+        "triggers": [
+          "password reset",
+          "forgot password",
+          "reset link"
+        ],
+        "path": "laravel/passwords.md",
+        "chars": 14817,
+        "branch": "13.x"
+      },
+      {
+        "topic": "verification",
+        "title": "Email Verification",
+        "triggers": [
+          "email verification",
+          "verify email",
+          "mustverifyemail"
+        ],
+        "path": "laravel/verification.md",
+        "chars": 9611,
+        "branch": "13.x"
+      },
+      {
+        "topic": "hashing",
+        "title": "Hashing",
+        "triggers": [
+          "hashing",
+          "bcrypt",
+          "argon2",
+          "hash password"
+        ],
+        "path": "laravel/hashing.md",
+        "chars": 5084,
+        "branch": "13.x"
+      },
+      {
+        "topic": "encryption",
+        "title": "Encryption",
+        "triggers": [
+          "encryption",
+          "encrypt",
+          "decrypt",
+          "encrypted cast"
+        ],
+        "path": "laravel/encryption.md",
+        "chars": 4004,
+        "branch": "13.x"
+      },
+      {
+        "topic": "rate-limiting",
+        "title": "Rate Limiting",
+        "triggers": [
+          "rate limiter",
+          "ratelimiter",
+          "too many requests",
+          "throttle requests"
+        ],
+        "path": "laravel/rate-limiting.md",
+        "chars": 5361,
+        "branch": "13.x"
+      },
+      {
+        "topic": "http-client",
+        "title": "HTTP Client",
+        "triggers": [
+          "http client",
+          "external api",
+          "outbound request",
+          "guzzle",
+          "http::fake"
+        ],
+        "path": "laravel/http-client.md",
+        "chars": 36123,
+        "branch": "13.x"
+      },
+      {
+        "topic": "scheduling",
+        "title": "Task Scheduling",
+        "triggers": [
+          "task scheduling",
+          "cron",
+          "scheduled task",
+          "recurring job"
+        ],
+        "path": "laravel/scheduling.md",
+        "chars": 29112,
+        "branch": "13.x"
+      },
+      {
+        "topic": "container",
+        "title": "Service Container",
+        "triggers": [
+          "service container",
+          "dependency injection",
+          "bind interface",
+          "singleton"
+        ],
+        "path": "laravel/container.md",
+        "chars": 29368,
+        "branch": "13.x"
+      },
+      {
+        "topic": "providers",
+        "title": "Service Providers",
+        "triggers": [
+          "service provider",
+          "register binding",
+          "boot method"
+        ],
+        "path": "laravel/providers.md",
+        "chars": 8483,
+        "branch": "13.x"
+      },
+      {
+        "topic": "facades",
+        "title": "Facades",
+        "triggers": [
+          "facade",
+          "real-time facade"
+        ],
+        "path": "laravel/facades.md",
+        "chars": 19886,
+        "branch": "13.x"
+      },
+      {
+        "topic": "contracts",
+        "title": "Contracts",
+        "triggers": [
+          "laravel contract",
+          "contract interface"
+        ],
+        "path": "laravel/contracts.md",
+        "chars": 15123,
+        "branch": "13.x"
+      },
+      {
+        "topic": "configuration",
+        "title": "Configuration",
+        "triggers": [
+          "configuration file",
+          "config value",
+          "environment variable",
+          "app config"
+        ],
+        "path": "laravel/configuration.md",
+        "chars": 20761,
+        "branch": "13.x"
+      },
+      {
+        "topic": "views",
+        "title": "Views",
+        "triggers": [
+          "view composer",
+          "render view",
+          "share view data"
+        ],
+        "path": "laravel/views.md",
+        "chars": 11259,
+        "branch": "13.x"
+      },
+      {
+        "topic": "frontend",
+        "title": "Frontend",
+        "triggers": [
+          "inertia",
+          "livewire",
+          "single page application",
+          "vue integration"
+        ],
+        "path": "laravel/frontend.md",
+        "chars": 11087,
+        "branch": "13.x"
+      },
+      {
+        "topic": "strings",
+        "title": "Strings",
+        "triggers": [
+          "string helper",
+          "str::",
+          "slug helper",
+          "pluralize"
+        ],
+        "path": "laravel/strings.md",
+        "chars": 102520,
+        "branch": "13.x"
+      },
+      {
+        "topic": "helpers",
+        "title": "Helpers",
+        "triggers": [
+          "helper function",
+          "arr::",
+          "data_get",
+          "value helper"
+        ],
+        "path": "laravel/helpers.md",
+        "chars": 100942,
+        "branch": "13.x"
+      },
+      {
+        "topic": "mocking",
+        "title": "Mocking",
+        "triggers": [
+          "mocking",
+          "mock",
+          "spy",
+          "bus::fake",
+          "queue::fake",
+          "event::fake"
+        ],
+        "path": "laravel/mocking.md",
+        "chars": 9265,
+        "branch": "13.x"
+      },
+      {
+        "topic": "console-tests",
+        "title": "Console Tests",
+        "triggers": [
+          "console test",
+          "expectsquestion",
+          "artisan test",
+          "command test"
+        ],
+        "path": "laravel/console-tests.md",
+        "chars": 6755,
+        "branch": "13.x"
+      },
+      {
+        "topic": "urls",
+        "title": "URL Generation",
+        "triggers": [
+          "url generation",
+          "signed url",
+          "named route url",
+          "asset url"
+        ],
+        "path": "laravel/urls.md",
+        "chars": 13038,
+        "branch": "13.x"
+      },
+      {
+        "topic": "broadcasting",
+        "title": "Broadcasting",
+        "triggers": [
+          "broadcasting",
+          "websocket",
+          "laravel echo",
+          "real-time update",
+          "pusher"
+        ],
+        "path": "laravel/broadcasting.md",
+        "chars": 78414,
+        "branch": "13.x"
+      },
+      {
+        "topic": "redis",
+        "title": "Redis",
+        "triggers": [
+          "redis"
+        ],
+        "path": "laravel/redis.md",
+        "chars": 18765,
+        "branch": "13.x"
+      },
+      {
+        "topic": "logging",
+        "title": "Logging",
+        "triggers": [
+          "logging",
+          "log channel",
+          "log::",
+          "monolog"
+        ],
+        "path": "laravel/logging.md",
+        "chars": 23552,
+        "branch": "13.x"
+      },
+      {
+        "topic": "scout",
+        "title": "Laravel Scout",
+        "triggers": [
+          "laravel scout",
+          "full-text search",
+          "searchable model",
+          "meilisearch",
+          "algolia"
+        ],
+        "path": "laravel/scout.md",
+        "chars": 49943,
+        "branch": "13.x"
+      },
+      {
+        "topic": "socialite",
+        "title": "Laravel Socialite",
+        "triggers": [
+          "socialite",
+          "oauth login",
+          "social login",
+          "google login"
+        ],
+        "path": "laravel/socialite.md",
+        "chars": 11454,
+        "branch": "13.x"
+      },
+      {
+        "topic": "images",
+        "title": "Image Manipulation",
+        "triggers": [
+          "image manipulation",
+          "resize image",
+          "thumbnail",
+          "image upload"
+        ],
+        "path": "laravel/images.md",
+        "chars": 15009,
+        "branch": "13.x"
+      },
+      {
+        "topic": "precognition",
+        "title": "Precognition",
+        "triggers": [
+          "precognition",
+          "live validation"
+        ],
+        "path": "laravel/precognition.md",
+        "chars": 24274,
+        "branch": "13.x"
+      },
+      {
+        "topic": "ai-sdk",
+        "title": "Laravel AI SDK",
+        "triggers": [
+          "laravel ai",
+          "ai sdk",
+          "embedding",
+          "vector store",
+          "reranking",
+          "llm agent"
+        ],
+        "path": "laravel/ai-sdk.md",
+        "chars": 123057,
+        "branch": "13.x"
+      }
+    ]
+  },
+  "practices": {
+    "documents": [
+      {
+        "slug": "frontend-design",
+        "title": "Frontend Visual Design",
+        "url": "nesti://skills/practices/frontend-design.md",
+        "triggers": [
+          "visual design",
+          "ui design",
+          "typography",
+          "color palette",
+          "design system",
+          "look and feel",
+          "redesign",
+          "visual hierarchy"
+        ],
+        "path": "practices/frontend-design.md",
+        "chars": 9433
+      },
+      {
+        "slug": "minimalist-ui",
+        "title": "Minimalist UI Direction",
+        "url": "nesti://skills/practices/minimalist-ui.md",
+        "triggers": [
+          "minimalist",
+          "minimal ui",
+          "clean interface",
+          "editorial design",
+          "monochrome",
+          "flat design"
+        ],
+        "path": "practices/minimalist-ui.md",
+        "chars": 7953
+      },
+      {
+        "slug": "senior-security",
+        "title": "Application Security Engineering",
+        "url": "https://github.com/alirezarezvani/claude-skills/tree/main/engineering-team/senior-security",
+        "triggers": [
+          "security review",
+          "threat model",
+          "vulnerability",
+          "owasp",
+          "sql injection",
+          "xss",
+          "secure coding",
+          "attack surface",
+          "mass assignment",
+          "sensitive data"
+        ],
+        "path": "practices/senior-security.md",
+        "chars": 81883
+      },
+      {
+        "slug": "tdd",
+        "title": "Test-Driven Development",
+        "url": "nesti://skills/practices/tdd.md",
+        "triggers": [
+          "tdd",
+          "test driven",
+          "red green refactor",
+          "test first",
+          "regression test",
+          "failing test",
+          "test coverage"
+        ],
+        "path": "practices/tdd.md",
+        "chars": 7311
       }
     ]
   }

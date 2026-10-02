@@ -14,14 +14,20 @@ Selection is keyword-driven and fully deterministic:
   earliest match offset in the issue text.
 * Laravel topics are matched by counting distinct triggers and ranked by hit
   count (descending).
+* Practice documents — the curated cross-cutting corpus under
+  ``skills/practices/`` — are matched the same way as Laravel topics and appended
+  last, capped at one document, because API documentation always outranks
+  general engineering guidance in the prompt budget.
 
-Both kinds are returned as :class:`skill_loader.Skill` instances so the existing
-``skill_loader.format_skills_for_prompt`` helper consumes them unchanged.
+All three kinds are returned as :class:`skill_loader.Skill` instances so the
+existing ``skill_loader.format_skills_for_prompt`` helper consumes them
+unchanged.
 """
 
 import json
 import logging
 import re
+import string
 from pathlib import Path
 
 from skill_loader import Skill
@@ -38,6 +44,8 @@ _TRUNCATION_MARKER = "\n\n[\u2026 document truncated by Nesti skill catalog \u20
 _REGISTRY_CACHE: dict | None = None
 # Word-boundary matchers compiled once per alias/trigger and shared across calls.
 _ALIAS_RE_CACHE: dict[str, re.Pattern[str]] = {}
+# The characters the haystack treats as part of a word (it is lowercased first).
+_BOUNDARY_CHARS = frozenset(string.ascii_lowercase + string.digits)
 
 
 def load_registry() -> dict:
@@ -66,24 +74,36 @@ def catalog_status() -> dict:
     registry = load_registry()
     primevue = registry.get("primevue") if isinstance(registry, dict) else None
     laravel = registry.get("laravel") if isinstance(registry, dict) else None
+    practices = registry.get("practices") if isinstance(registry, dict) else None
     primevue = primevue if isinstance(primevue, dict) else {}
     laravel = laravel if isinstance(laravel, dict) else {}
+    practices = practices if isinstance(practices, dict) else {}
     components = primevue.get("components")
     topics = laravel.get("topics")
+    documents = practices.get("documents")
     return {
         "available": bool(registry),
         "components": len(components) if isinstance(components, list) else 0,
         "topics": len(topics) if isinstance(topics, list) else 0,
+        "practices": len(documents) if isinstance(documents, list) else 0,
         "primevue_version": str(primevue.get("version", "")),
         "laravel_branch": str(laravel.get("branch", "")),
     }
 
 
 def _alias_pattern(alias: str) -> re.Pattern[str]:
-    """Return a cached word-boundary matcher for ``alias`` (compiled once)."""
+    """Return a cached word-boundary matcher for ``alias`` (compiled once).
+
+    A boundary is asserted only on an edge that is itself alphanumeric, the way
+    ``\\b`` behaves: ``"select"`` must not match inside ``multiselect``, while
+    ``"str::"`` has to match inside ``str::slug(`` — an unconditional trailing
+    boundary would demand a non-identifier after the colons and never fire.
+    """
     pattern = _ALIAS_RE_CACHE.get(alias)
     if pattern is None:
-        pattern = re.compile(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])")
+        head = r"(?<![a-z0-9])" if alias[:1] in _BOUNDARY_CHARS else ""
+        tail = r"(?![a-z0-9])" if alias[-1:] in _BOUNDARY_CHARS else ""
+        pattern = re.compile(head + re.escape(alias) + tail)
         _ALIAS_RE_CACHE[alias] = pattern
     return pattern
 
@@ -128,6 +148,23 @@ def _build_url(pattern: str, **kwargs: str) -> str:
         return pattern
 
 
+def _strip_front_matter(content: str) -> str:
+    """Drop a leading ``---`` metadata block so it never reaches the prompt.
+
+    Only practice documents carry one; no fetched PrimeVue or Laravel document
+    starts with ``---``, so this is a no-op for the official corpus.
+    """
+    if not content.startswith("---"):
+        return content
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return content
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[index + 1:]).lstrip("\n")
+    return content
+
+
 def _load_document(path: object) -> str | None:
     """Read a corpus document and trim it to the per-document cap.
 
@@ -139,7 +176,7 @@ def _load_document(path: object) -> str | None:
         return None
     file_path = CATALOG_DIR / path
     try:
-        content = file_path.read_text(encoding="utf-8")
+        content = _strip_front_matter(file_path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.warning("Skill catalog document unreadable (%s): %s", file_path, exc)
         return None
@@ -154,13 +191,16 @@ def select_skills(
     text: str,
     max_component_docs: int = 3,
     max_topic_docs: int = 2,
+    max_practice_docs: int = 1,
 ) -> list[Skill]:
     """Select vendored skill docs relevant to ``text`` (deterministic, offline).
 
     Component docs (PrimeVue) come first, ranked by earliest alias match offset;
-    topic docs (Laravel) follow, ranked by distinct-trigger hit count. Never
-    raises: an empty text, an unavailable registry, or a missing document logs a
-    warning where appropriate and yields fewer skills (possibly ``[]``).
+    topic docs (Laravel) follow, ranked by distinct-trigger hit count; practice
+    docs close the list, ranked the same way and capped hard because they are
+    long and generic. Never raises: an empty text, an unavailable registry, or a
+    missing document logs a warning where appropriate and yields fewer skills
+    (possibly ``[]``).
     """
     try:
         if not text or not text.strip():
@@ -172,13 +212,16 @@ def select_skills(
 
         primevue = registry.get("primevue")
         laravel = registry.get("laravel")
+        practices = registry.get("practices")
         primevue = primevue if isinstance(primevue, dict) else {}
         laravel = laravel if isinstance(laravel, dict) else {}
+        practices = practices if isinstance(practices, dict) else {}
 
         component_pattern = primevue.get("source_pattern", "")
         topic_pattern = laravel.get("source_pattern", "")
         components = primevue.get("components") or []
         topics = laravel.get("topics") or []
+        documents = practices.get("documents") or []
 
         # ── Components: earliest alias offset ascending, then registry order ──
         component_hits: list[tuple[int, int, dict]] = []
@@ -200,6 +243,16 @@ def select_skills(
                 topic_hits.append((hits, order, topic))
         topic_hits.sort(key=lambda hit: (-hit[0], hit[1]))
 
+        # ── Practices: same ranking, own cap, always last ────────────────────
+        practice_hits: list[tuple[int, int, dict]] = []
+        for order, document in enumerate(documents):
+            if not isinstance(document, dict):
+                continue
+            hits = _distinct_trigger_hits(document.get("triggers"), haystack)
+            if hits >= 1:
+                practice_hits.append((hits, order, document))
+        practice_hits.sort(key=lambda hit: (-hit[0], hit[1]))
+
         skills: list[Skill] = []
         for _, _, component in component_hits[:max_component_docs]:
             content = _load_document(component.get("path"))
@@ -218,6 +271,18 @@ def select_skills(
                 topic=str(topic.get("topic", "")),
             )
             skills.append(Skill(url=url, title=str(topic.get("title", "")), content=content))
+
+        for _, _, document in practice_hits[:max_practice_docs]:
+            content = _load_document(document.get("path"))
+            if content is None:
+                continue
+            skills.append(
+                Skill(
+                    url=str(document.get("url", "")),
+                    title=str(document.get("title", "")),
+                    content=content,
+                )
+            )
 
         return skills
     except Exception as exc:

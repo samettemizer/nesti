@@ -182,9 +182,9 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     nodes.tool_skill_fetch = lambda issue: {"success": True, "result": []}
     # Keep prompt building offline: the real catalog is unit-tested separately.
     nodes.tool_skill_catalog_select = (
-        lambda text, mc=3, mt=2: {"success": True, "result": []})
+        lambda text, mc=3, mt=2, mp=0: {"success": True, "result": []})
     nodes.tool_skill_catalog_status = lambda: {"success": True, "result": {
-        "available": True, "components": 92, "topics": 24,
+        "available": True, "components": 92, "topics": 66, "practices": 4,
         "primevue_version": "5.0.1", "laravel_branch": "13.x"}}
 
     def _layered(key, outcomes, pass_out, fail_out):
@@ -520,7 +520,18 @@ else:
     check(status["available"] is True, "catalog reports available")
     check(status["components"] >= 85,
           f"catalog has {status['components']} PrimeVue component docs (>= 85)")
-    check(status["topics"] == 24, "catalog has all 24 Laravel topics")
+    check(status["topics"] >= 60,
+          f"catalog has {status['topics']} Laravel topic docs (>= 60)")
+    check(status["practices"] >= 4,
+          f"catalog has {status['practices']} practice docs (>= 4)")
+
+    _registry = skill_catalog.load_registry()
+    _rows = (_registry["primevue"]["components"] + _registry["primevue"]["pages"]
+             + _registry["laravel"]["topics"] + _registry["practices"]["documents"])
+    _missing = [row["path"] for row in _rows
+                if not (skill_catalog.CATALOG_DIR / row["path"]).is_file()]
+    check(not _missing,
+          f"every registry row has a vendored file (missing {_missing[:3]})")
 
     titles = [s.title for s in skill_catalog.select_skills("use the PrimeVue DataTable")]
     check(titles[:1] == ["DataTable"], "DataTable selected first for a DataTable issue")
@@ -528,6 +539,14 @@ else:
     picked = skill_catalog.select_skills("Replace the grid with a Dropdown")
     check(any(s.url.endswith("/select.md") for s in picked),
           "legacy name 'Dropdown' resolves to the PrimeVue 5 Select doc")
+    picked = skill_catalog.select_skills("Pick the tags with a MultiSelect")
+    check(any(s.url.endswith("/select.md") for s in picked),
+          "v5-deprecated 'MultiSelect' resolves to its replacement, the Select doc")
+    _titles = lambda text: [s.title for s in skill_catalog.select_skills(text)]  # noqa: E731
+    check("Strings" in _titles("Normalise every SKU with Str::upper() before saving"),
+          "a facade trigger ending in '::' fires on real code (Str::upper)")
+    check("Select" not in _titles("Use a SelectButton for plans and a TreeSelect for categories"),
+          "alphanumeric word boundaries still hold on both sides (SelectButton/TreeSelect ≠ Select)")
     picked = skill_catalog.select_skills("render an OrgChart of the team")
     check(any(s.url.endswith("/organizationchart.md") for s in picked),
           "'OrgChart' resolves to organizationchart.md (slug anomaly handled)")
@@ -548,8 +567,21 @@ else:
               for s in docs),
           "trimmed docs carry the truncation marker")
     check(len(skill_catalog.select_skills(
-              "DataTable Dialog Select Calendar Button", max_component_docs=2)) <= 2 + 2,
+              "DataTable Dialog Select Calendar Button", max_component_docs=2)) <= 2 + 2 + 1,
           "max_component_docs is honoured")
+
+    _security = "Mask sensitive data in the JSON response of the audit log API"
+    picked = skill_catalog.select_skills(_security)
+    check(len(picked) >= 2 and picked[-1].title == "Application Security Engineering",
+          "a security issue selects the security practice doc, after the API docs")
+    check(all(not s.content.lstrip().startswith("---") for s in picked),
+          "practice front matter never reaches the prompt")
+    check("Application Security Engineering" not in [
+              s.title for s in skill_catalog.select_skills(_security, max_practice_docs=0)],
+          "max_practice_docs=0 suppresses the practice lane entirely")
+    picked = skill_catalog.select_skills("write a failing test first, then red green refactor")
+    check(any(s.title == "Test-Driven Development" for s in picked),
+          "TDD wording selects the test-driven-development practice doc")
 
 # ═════ Scenario 14: Laravel API issue → phpunit → openapi → commit ═════
 print("\n── Scenario 14: Laravel API issue → PHPUnit → OpenAPI → commit ──")
@@ -801,6 +833,44 @@ check([h["doc_title"] for h in _vs._interleave([_vue, _php], 4)]
       "cannot crowd the Laravel docs out of a backend issue's prompt")
 check(_vs._interleave([[], _vue], 2) == _vue[:2] and _vs._interleave([[], []], 3) == [],
       "interleaving tolerates an empty stack")
+
+
+class _LaneProbe(_vs.DocumentMemory):
+    """DocumentMemory.search over a canned Qdrant: doc lanes score 0.60 and below."""
+
+    def __init__(self, practice_scores):  # pylint: disable=super-init-not-called
+        self._practice_scores = practice_scores
+        self._url = "probe"
+        self._collection_known = True
+
+    @property
+    def available(self):
+        return True
+
+    def _query(self, vector, stack, limit):
+        scores = (self._practice_scores if stack == _vs.PRACTICE_STACK
+                  else [0.60 - i / 100 for i in range(limit)])
+        return [{"stack": stack, "score": s, "doc_title": f"{stack}{i}"}
+                for i, s in enumerate(scores[:limit])]
+
+
+_real_get_embedder = _vs.get_embedder
+_vs.get_embedder = lambda: type("_Embedder", (), {"embed_query": staticmethod(lambda t: [0.1])})()
+try:
+    _hits = _LaneProbe([0.95] * 10).search("issue", stack="php", limit=8)
+    check(len(_hits) == 8
+          and sum(h["stack"] == _vs.PRACTICE_STACK for h in _hits) == 2
+          and {h["stack"] for h in _hits} == {"php", _vs.PRACTICE_STACK},
+          "practice passages that outscore every doc still get at most a quarter of the "
+          "slots, and a stack-narrowed search stays on its stack")
+    _hits = _LaneProbe([0.95, _vs._PRACTICE_MIN_SCORE - 0.01]).search("issue", limit=8)
+    check([h["doc_title"] for h in _hits if h["stack"] == _vs.PRACTICE_STACK] == ["practice0"],
+          "a practice passage below the relevance floor never reaches the prompt")
+    check(not any(h["stack"] == _vs.PRACTICE_STACK
+                  for h in _LaneProbe([0.95] * 10).search("issue", limit=3)),
+          "below four slots the practice lane is dropped entirely")
+finally:
+    _vs.get_embedder = _real_get_embedder
 
 # ═════ Scenario 22: coder chain escalation and per-issue reset ═════
 print("\n── Scenario 22: coder escalation + per-issue reset ──")
@@ -1294,7 +1364,19 @@ if os.path.isfile(_registry_path):
     registry = json.load(open(_registry_path))
     check(len(registry["primevue"]["components"]) >= 85,
           f"registry ships {len(registry['primevue']['components'])} component docs (>= 85)")
-    check(len(registry["laravel"]["topics"]) == 24, "registry ships 24 Laravel topics")
+    check(len(registry["laravel"]["topics"]) >= 60,
+          f"registry ships {len(registry['laravel']['topics'])} Laravel topics (>= 60)")
+    topics = {t["topic"] for t in registry["laravel"]["topics"]}
+    check({"migrations", "eloquent", "validation", "controllers", "routing",
+           "http-tests", "queries", "pagination", "errors"} <= topics,
+          "the backend topics the live issues need are vendored")
+    practices = {d["slug"] for d in registry["practices"]["documents"]}
+    check({"tdd", "senior-security", "frontend-design", "minimalist-ui"} == practices,
+          f"the curated practice corpus is exactly the whitelist (got {sorted(practices)})")
+    check({"multiselect", "galleria", "image", "colorpicker", "imagecompare", "scrollpanel",
+           "password", "inputmask", "panelmenu", "editor"}.isdisjoint(
+              c["slug"] for c in registry["primevue"]["components"]),
+          "no component PrimeVue 5 deprecated is vendored — the coder never learns a doomed API")
     slugs = {c["slug"] for c in registry["primevue"]["components"]}
     check({"datatable", "select", "organizationchart", "dialog", "inputtext",
            "datepicker", "button", "message", "chart"} <= slugs,

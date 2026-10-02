@@ -36,7 +36,7 @@ from dotenv import load_dotenv  # noqa: E402
 # unit test must not pull the operator's .env into the caller's process.
 import skill_catalog  # noqa: E402
 from embedding import get_embedder  # noqa: E402
-from vector_store import get_document_memory  # noqa: E402
+from vector_store import PRACTICE_STACK, get_document_memory  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +173,18 @@ def iter_sources(only: str | None = None) -> list[dict]:
                 "stack": "php",
                 "version": str(entry.get("branch") or laravel.get("branch", "")),
             })
+
+    practices = registry.get("practices") or {}
+    if only in (None, "practices") and isinstance(practices, dict):
+        for entry in practices.get("documents") or []:
+            sources.append({
+                "doc_path": entry["path"],
+                "doc_title": entry["title"],
+                "doc_url": str(entry.get("url", "")),
+                "source": "practice",
+                "stack": PRACTICE_STACK,
+                "version": "",
+            })
     return sources
 
 
@@ -188,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="re-embed every document, ignoring content hashes")
     parser.add_argument("--recreate", action="store_true",
                         help="drop and recreate the collection first")
-    parser.add_argument("--only", choices=["primevue", "laravel"],
+    parser.add_argument("--only", choices=["primevue", "laravel", "practices"],
                         help="index only one corpus")
     args = parser.parse_args(argv)
     load_dotenv()  # before the singletons below read QDRANT_URL & co.
@@ -230,7 +242,9 @@ def main(argv: list[str] | None = None) -> int:
             skipped += 1
             continue
 
-        chunks = chunk_document(raw, source["doc_title"], doc_path)
+        chunks = chunk_document(
+            skill_catalog._strip_front_matter(raw), source["doc_title"], doc_path
+        )
         if not chunks:
             failures.append(f"{doc_path}: empty document")
             continue

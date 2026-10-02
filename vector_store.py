@@ -5,7 +5,10 @@ The whole vendored ``skills/`` corpus is chunked and embedded once by
 ``scripts/index_skills.py`` into one Qdrant collection (default
 ``nesti_docs``).  At plan and code time ``DocumentMemory.search`` retrieves the
 passages most similar to the issue, optionally narrowed by a ``stack`` payload
-filter (``php`` → Laravel topics, ``vue`` → PrimeVue components).
+filter (``php`` → Laravel topics, ``vue`` → PrimeVue components).  The curated
+practice corpus carries a third ``stack`` value (``practice``) and rides along
+in every search on a hard-capped lane of its own, so cross-cutting guidance can
+never displace the API documentation an issue actually needs.
 
 This complements ``skill_catalog``: the catalog injects whole documents whose
 alias/trigger appears literally in the issue text and truncates each at 7 000
@@ -33,6 +36,12 @@ _CLIENT_TIMEOUT: int = 10          # seconds
 _SCROLL_PAGE: int = 512
 _UPSERT_BATCH: int = 128
 _FILTERABLE_STACKS: tuple[str, ...] = ("php", "vue")
+PRACTICE_STACK: str = "practice"
+# At most ``limit // _PRACTICE_SHARE`` practice chunks per search: the official
+# documentation keeps three quarters of every result set.  The floor is what
+# keeps the lane honest — below it the slots simply go unused.
+_PRACTICE_SHARE: int = 4
+_PRACTICE_MIN_SCORE: float = 0.70
 _PAYLOAD_INDEX_FIELDS: tuple[str, ...] = ("stack", "source", "doc_path")
 
 
@@ -128,14 +137,22 @@ class DocumentMemory:
 
     def search(self, text: str, stack: str = "", limit: int = 6) -> list[dict]:
         """
-        Return the chunks most similar to *text* (best first within each stack).
+        Return the chunks most similar to *text* (best first within each lane).
 
-        ``stack`` ``"php"`` or ``"vue"`` narrows the search with a payload
-        filter.  Any other value (``""``, ``"fullstack"``, ``"unknown"``)
+        ``stack`` ``"php"`` or ``"vue"`` narrows the documentation search with a
+        payload filter.  Any other value (``""``, ``"fullstack"``, ``"unknown"``)
         searches BOTH stacks and interleaves their results, so neither side
         can crowd the other out: PrimeVue makes up ~85 % of the corpus, and an
         unbalanced search for a backend issue that merely says "toggle"
         returns twenty ToggleSwitch passages and no Laravel ones.
+
+        The ``practice`` corpus is cross-cutting, so it is never selected by
+        ``stack`` — it rides along as an extra lane holding at most
+        ``limit // _PRACTICE_SHARE`` slots, and drops out entirely below that
+        threshold.  That lane is also the only one with a relevance floor: the
+        stack lanes are already narrowed to documentation the issue's stack
+        needs, whereas some practice passage is weakly similar to *every* issue
+        and would otherwise spend its slots on noise.
         """
         if not text or not text.strip() or limit <= 0:
             return []
@@ -147,9 +164,16 @@ class DocumentMemory:
         limit = min(limit, _SEARCH_LIMIT_CAP)
         try:
             if stack in _FILTERABLE_STACKS:
-                return self._query(vector, stack, limit)
-            per_stack = [self._query(vector, name, limit) for name in _FILTERABLE_STACKS]
-            return _interleave(per_stack, limit)
+                lanes = [self._query(vector, stack, limit)]
+            else:
+                lanes = [self._query(vector, name, limit) for name in _FILTERABLE_STACKS]
+            practice_slots = limit // _PRACTICE_SHARE
+            if practice_slots:
+                lanes.append([
+                    hit for hit in self._query(vector, PRACTICE_STACK, practice_slots)
+                    if hit["score"] >= _PRACTICE_MIN_SCORE
+                ])
+            return _interleave(lanes, limit)
         except Exception as exc:  # pylint: disable=broad-except
             self._collection_known = False
             logger.warning("Qdrant search failed (%s): %s", self._url, exc)

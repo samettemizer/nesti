@@ -35,7 +35,8 @@ layer_output.py              condenses sandbox output to its meaningful tail
 telegram_notifier.py         fire-and-forget alerts
 scripts/                     oauth.py (`nesti` CLI), fetch_skills.py, index_skills.py,
                              preflight.py, seed_live_issues.py
-skills/, templates/laravel/  vendored doc corpus, bootstrap templates
+skills/, templates/laravel/  vendored doc corpus (primevue/laravel/practices),
+                             bootstrap templates
 test_graph_smoke.py          offline regression net (.venv/bin/python test_graph_smoke.py)
 test_live_laravel.py         opt-in real-container proof (Docker + network)
 ```
@@ -126,8 +127,11 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 25. **`skills/` is generated only by `scripts/fetch_skills.py`** and is
     committed. Never hand-edit a vendored document and never fetch
     documentation at run time: `skill_catalog.select_skills` is deterministic
-    and offline. The only run-time fetch left is the issue's own URL skills via
-    `skill_loader`.
+    and offline. `skills/practices/` is a whitelist (`PRACTICE_SOURCES`) of
+    cross-cutting docs that shape the code Nesti writes — PHP/Laravel,
+    Vue/PrimeVue or the four test layers; nothing else earns a place there,
+    and it is re-vendored offline with `--practices-src`. The only run-time fetch
+    left is the issue's own URL skills via `skill_loader`.
 26. **Never report a guessed `remaining`/`limit` from
     `ConsumerProvider.get_usage()`** — `None` is the correct answer when a
     provider has no quota API, and `node_on_layer_failure`'s quota check

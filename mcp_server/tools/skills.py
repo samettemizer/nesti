@@ -49,12 +49,16 @@ def skill_fetch_url(url: str) -> dict:
 
 @app.tool()
 def skill_catalog_select(
-    text: str, max_component_docs: int = 3, max_topic_docs: int = 2
+    text: str,
+    max_component_docs: int = 3,
+    max_topic_docs: int = 2,
+    max_practice_docs: int = 1,
 ) -> dict:
     """
-    Select vendored PrimeVue / Laravel docs matching text from the offline
-    corpus. Picks up to max_component_docs component docs and max_topic_docs
-    topic docs by alias/trigger matching.
+    Select vendored PrimeVue / Laravel / practice docs matching text from the
+    offline corpus. Picks up to max_component_docs component docs,
+    max_topic_docs topic docs and max_practice_docs practice docs by
+    alias/trigger matching.
     Returns count: int, docs: [{title, url, chars}], and formatted: str
     (prompt-ready). Skill dataclasses never cross the transport boundary.
     """
@@ -62,6 +66,7 @@ def skill_catalog_select(
         text,
         max_component_docs=max_component_docs,
         max_topic_docs=max_topic_docs,
+        max_practice_docs=max_practice_docs,
     )
     if not result.get("success"):
         return result
@@ -83,7 +88,7 @@ def skill_catalog_select(
 def skill_catalog_status() -> dict:
     """
     Report whether the vendored skill corpus is present and how large it is.
-    Returns available: bool, components: int, topics: int, primevue_version:
-    str, and laravel_branch: str.
+    Returns available: bool, components: int, topics: int, practices: int,
+    primevue_version: str, and laravel_branch: str.
     """
     return tool_skill_catalog_status()

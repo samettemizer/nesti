@@ -860,10 +860,13 @@ def tool_skill_fetch(issue: dict) -> dict:
 
 
 def tool_skill_catalog_select(
-    text: str, max_component_docs: int = 3, max_topic_docs: int = 2
+    text: str,
+    max_component_docs: int = 3,
+    max_topic_docs: int = 2,
+    max_practice_docs: int = 1,
 ) -> dict:
     """
-    Select vendored Laravel / PrimeVue docs matching *text*.
+    Select vendored PrimeVue / Laravel / practice docs matching *text*.
     result: list of Skill objects (same in-process dataclass exception as
     tool_skill_fetch — the MCP wrapper serialises them).
 
@@ -877,6 +880,7 @@ def tool_skill_catalog_select(
                 text,
                 max_component_docs=max_component_docs,
                 max_topic_docs=max_topic_docs,
+                max_practice_docs=max_practice_docs,
             )
         )
     except Exception as exc:  # pylint: disable=broad-except
@@ -888,7 +892,7 @@ def tool_skill_catalog_status() -> dict:
     """
     Report whether the vendored skill corpus is present and how large it is.
     result: {"available": bool, "components": int, "topics": int,
-             "primevue_version": str, "laravel_branch": str}.
+             "practices": int, "primevue_version": str, "laravel_branch": str}.
     """
     try:
         return _ok(catalog_status())
