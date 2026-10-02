@@ -128,17 +128,19 @@ The `skills/` directory holds a vendored, offline documentation corpus:
 | Laravel topic docs | 66 | `laravel/docs` 13.x |
 | Practice docs | 4 | curated, see below |
 
-Generated **only** by `scripts/fetch_skills.py` and committed to the
-repository. Never hand-edit a vendored document.
+`primevue/`, `laravel/` and `registry.json` are generated **only** by
+`scripts/fetch_skills.py` and committed to the repository. Never hand-edit a
+vendored document.
 
-The practice tier is a hand-picked whitelist (`PRACTICE_SOURCES` in
-`scripts/fetch_skills.py`) of cross-cutting engineering documents that shape
-the code Nesti writes — test-driven development, application security, and
-visual/UI direction. Each entry is flattened into one markdown file with a
-Nesti front matter block and re-vendored offline from a local skill library:
+The practice tier (`skills/practices/`) is the exception: Nesti-maintained
+adaptations of upstream engineering skills that shape the code Nesti writes —
+test-driven development for the PHPUnit / Vitest / Playwright gates, Laravel +
+Vue application security, and visual/UI direction on PrimeVue 5. Each carries
+its provenance and licence in its front matter (licence texts in
+`skills/practices/licenses/`). After editing one, re-index it offline:
 
 ```bash
-python scripts/fetch_skills.py --only practices --practices-src ~/my-skills
+python scripts/fetch_skills.py --only practices
 ```
 
 `skill_catalog.py` selects docs **deterministically and offline** per issue by
@@ -444,7 +446,7 @@ See `.env.example` for all variables. Key ones:
 **Offline smoke tests** (no Docker, no network):
 ```bash
 python test_graph_smoke.py
-# 318 checks — covers every node, every routing edge, the full state machine
+# 319 checks — covers every node, every routing edge, the full state machine
 ```
 
 **Live integration tests** (needs Docker + network):

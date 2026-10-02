@@ -20,6 +20,7 @@ Run:  python test_graph_smoke.py
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 
@@ -1373,6 +1374,25 @@ if os.path.isfile(_registry_path):
     practices = {d["slug"] for d in registry["practices"]["documents"]}
     check({"tdd", "senior-security", "frontend-design", "minimalist-ui"} == practices,
           f"the curated practice corpus is exactly the whitelist (got {sorted(practices)})")
+    # Practice docs are edited by hand, so guard what the tooling cannot: a doc
+    # without triggers is never selected, a "## " line inside a code fence
+    # splits a Qdrant chunk mid-code, and a cited licence file must ship.
+    _practice_faults = []
+    for _doc in registry["practices"]["documents"]:
+        _text = (skill_catalog.CATALOG_DIR / _doc["path"]).read_text(encoding="utf-8")
+        if not _doc["triggers"]:
+            _practice_faults.append(f"{_doc['slug']}: no triggers")
+        _fenced = False
+        for _line in _text.splitlines():
+            if _line.lstrip().startswith(("```", "~~~")):
+                _fenced = not _fenced
+            elif _fenced and _line.startswith("## "):
+                _practice_faults.append(f"{_doc['slug']}: '## ' inside a code fence")
+        for _licence in re.findall(r"^license: .*\((practices/licenses/[^)]+)\)", _text, re.M):
+            if not (skill_catalog.CATALOG_DIR / _licence).is_file():
+                _practice_faults.append(f"{_doc['slug']}: missing {_licence}")
+    check(not _practice_faults,
+          f"every practice doc is selectable, chunk-safe and ships its licence ({_practice_faults})")
     check({"multiselect", "galleria", "image", "colorpicker", "imagecompare", "scrollpanel",
            "password", "inputmask", "panelmenu", "editor"}.isdisjoint(
               c["slug"] for c in registry["primevue"]["components"]),

@@ -124,14 +124,17 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     and never touches `vite.config.js`, `resources/js/app.js`,
     `resources/views/**` or `routes/**`. A `composer.json` without `artisan` is
     refused outright — scaffolding over a foreign PHP app would destroy it.
-25. **`skills/` is generated only by `scripts/fetch_skills.py`** and is
-    committed. Never hand-edit a vendored document and never fetch
-    documentation at run time: `skill_catalog.select_skills` is deterministic
-    and offline. `skills/practices/` is a whitelist (`PRACTICE_SOURCES`) of
-    cross-cutting docs that shape the code Nesti writes — PHP/Laravel,
-    Vue/PrimeVue or the four test layers; nothing else earns a place there,
-    and it is re-vendored offline with `--practices-src`. The only run-time fetch
-    left is the issue's own URL skills via `skill_loader`.
+25. **`skills/primevue/`, `skills/laravel/` and `skills/registry.json` are
+    generated only by `scripts/fetch_skills.py`** and are committed. Never
+    hand-edit a vendored document and never fetch documentation at run time:
+    `skill_catalog.select_skills` is deterministic and offline.
+    `skills/practices/` is the one hand-maintained tier: Nesti adaptations of
+    upstream engineering skills (provenance and licence in each front matter,
+    licence texts in `skills/practices/licenses/`) that shape the code Nesti
+    writes — PHP/Laravel, Vue/PrimeVue or the four test layers; nothing else
+    earns a place there. After editing one, re-index it with
+    `scripts/fetch_skills.py --only practices`. The only run-time fetch left
+    is the issue's own URL skills via `skill_loader`.
 26. **Never report a guessed `remaining`/`limit` from
     `ConsumerProvider.get_usage()`** — `None` is the correct answer when a
     provider has no quota API, and `node_on_layer_failure`'s quota check

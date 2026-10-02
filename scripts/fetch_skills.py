@@ -5,19 +5,20 @@ Produces (paths relative to the output directory, default ``skills/``)::
     primevue/<slug>.md          one markdown file per PrimeVue component
     primevue/pages/<slug>.md    the official PrimeVue guide pages
     laravel/<topic>.md          one markdown file per Laravel documentation topic
-    practices/<slug>.md         curated cross-cutting engineering practice docs
     registry.json               machine-readable index consumed by ``skill_catalog.py``
+
+and indexes, without ever writing them, the hand-maintained
+``practices/<slug>.md`` documents.
 
 The corpus is tracked in git (never ``.gitignore``d). Run once and commit::
 
     python scripts/fetch_skills.py [--out skills] [--laravel-branch 13.x]
                                    [--only primevue|laravel|practices]
-                                   [--practices-src DIR]
 
-``primevue`` and ``laravel`` come over the network. ``practices`` are flattened
-out of a local skill library with ``--practices-src`` and are otherwise
-re-scanned from ``skills/practices/``, so every run rewrites the whole registry
-without ever dropping a section.
+``primevue`` and ``laravel`` come over the network. ``practices`` are re-scanned
+from ``skills/practices/`` on every run, so the registry is rewritten whole
+without ever dropping a section; ``--only practices`` is the offline refresh
+after a practice document was edited.
 
 Only the standard library and ``requests`` are used — no new dependency.
 """
@@ -173,69 +174,12 @@ LARAVEL_TOPICS = [
 ]
 
 # ── Practices ────────────────────────────────────────────────────────────────
-# Cross-cutting engineering documents vendored from a local skill library with
-# ``--practices-src``. The list is a whitelist on purpose: only skills that
-# shape the code Nesti writes are allowed in — PHP/Laravel, Vue/PrimeVue and
-# the four test layers. ``files`` are flattened into one document, the first
-# one supplying the ``# `` title and every later one becoming a
-# ``## Reference:`` section.
-PRACTICE_SOURCES = [
-    {
-        "slug": "tdd",
-        "title": "Test-Driven Development",
-        "dir": "tdd",
-        "files": ["SKILL.md", "tests.md", "mocking.md"],
-        "url": "nesti://skills/practices/tdd.md",
-        "triggers": [
-            "tdd", "test driven", "red green refactor", "test first",
-            "regression test", "failing test", "test coverage",
-        ],
-    },
-    {
-        "slug": "senior-security",
-        "title": "Application Security Engineering",
-        "dir": "senior-security",
-        "files": [
-            "SKILL.md",
-            "references/threat-modeling-guide.md",
-            "references/security-architecture-patterns.md",
-            "references/cryptography-implementation.md",
-        ],
-        "url": "https://github.com/alirezarezvani/claude-skills/tree/main/engineering-team/senior-security",
-        "triggers": [
-            "security review", "threat model", "vulnerability", "owasp",
-            "sql injection", "xss", "secure coding", "attack surface",
-            "mass assignment", "sensitive data",
-        ],
-    },
-    {
-        "slug": "frontend-design",
-        "title": "Frontend Visual Design",
-        "dir": "frontend-design",
-        "files": ["SKILL.md"],
-        "url": "nesti://skills/practices/frontend-design.md",
-        "license": "Apache-2.0 (practices/licenses/frontend-design.txt)",
-        "license_file": "LICENSE.txt",
-        "triggers": [
-            "visual design", "ui design", "typography", "color palette",
-            "design system", "look and feel", "redesign", "visual hierarchy",
-        ],
-    },
-    {
-        "slug": "minimalist-ui",
-        "title": "Minimalist UI Direction",
-        "dir": "minimalist-ui",
-        "files": ["SKILL.md"],
-        "url": "nesti://skills/practices/minimalist-ui.md",
-        "triggers": [
-            "minimalist", "minimal ui", "clean interface", "editorial design",
-            "monochrome", "flat design",
-        ],
-    },
-]
+# ``practices/*.md`` are Nesti-maintained adaptations of upstream engineering
+# skills, edited by hand (CLAUDE.md rule 25) and restricted to what shapes the
+# code Nesti writes: PHP/Laravel, Vue/PrimeVue and the four test layers. This
+# script never writes them; it only indexes their front matter (title, slug,
+# source, triggers) into the registry.
 _FRONT_MATTER_FENCE = "---"
-_PRACTICE_LICENSE_DIR = "practices/licenses"
-_MAX_HEADING_LEVEL = 6
 
 
 def camel_split(name: str) -> str:
@@ -408,9 +352,8 @@ def fetch_laravel(
 def _split_front_matter(text: str) -> tuple[dict[str, str], str]:
     """Split a leading ``---`` block into a flat ``key: value`` map plus the body.
 
-    Deliberately not a YAML parser: continuation lines of an upstream block
-    scalar (``description: >``) are indented and therefore skipped. Only the
-    keys this script writes itself are ever read back.
+    Deliberately not a YAML parser: practice front matter is one ``key: value``
+    per line, and indented continuation lines are skipped rather than misread.
     """
     lines = text.splitlines()
     if not lines or lines[0].strip() != _FRONT_MATTER_FENCE:
@@ -425,87 +368,6 @@ def _split_front_matter(text: str) -> tuple[dict[str, str], str]:
                 meta[key.strip()] = value.strip().strip('"')
         return meta, "\n".join(lines[index + 1:]).lstrip("\n")
     return {}, text
-
-
-def _demote_headings(text: str) -> str:
-    """Push every ATX heading one level deeper, leaving fenced code untouched."""
-    out: list[str] = []
-    fenced = False
-    for line in text.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            fenced = not fenced
-        elif not fenced and line.startswith("#"):
-            level = len(line) - len(line.lstrip("#"))
-            if level < _MAX_HEADING_LEVEL and line[level:level + 1] in (" ", ""):
-                line = "#" + line
-        out.append(line)
-    return "\n".join(out)
-
-
-def _reference_title(name: str) -> str:
-    """``references/rag_evaluation_framework.md`` -> ``Rag Evaluation Framework``."""
-    return Path(name).stem.replace("_", " ").replace("-", " ").title()
-
-
-def _render_practice(entry: dict, src_dir: Path) -> str:
-    """Flatten one source skill into a single document with Nesti front matter."""
-    root = src_dir / entry["dir"]
-    parts: list[str] = []
-    for position, name in enumerate(entry["files"]):
-        _, body = _split_front_matter((root / name).read_text(encoding="utf-8"))
-        body = body.strip()
-        if not body:
-            continue
-        if position == 0:
-            parts.append(body if body.startswith("# ") else f"# {entry['title']}\n\n{body}")
-            continue
-        # The chunker splits on "\n## ", so every appended file has to open one
-        # section of its own — its demoted title when it has one, a synthesised
-        # "Reference:" heading when it does not.
-        demoted = _demote_headings(body)
-        if demoted.startswith("## "):
-            parts.append(demoted)
-        else:
-            parts.append(f"## Reference: {_reference_title(name)}\n\n{demoted}")
-    front = [
-        _FRONT_MATTER_FENCE,
-        f"title: {entry['title']}",
-        f"slug: {entry['slug']}",
-        f"source: {entry['url']}",
-        f"triggers: {', '.join(entry['triggers'])}",
-    ]
-    if entry.get("license"):
-        front.append(f"license: {entry['license']}")
-    front += ["vendored_by: scripts/fetch_skills.py", _FRONT_MATTER_FENCE, ""]
-    return "\n".join(front) + "\n" + "\n\n---\n\n".join(parts) + "\n"
-
-
-def vendor_practices(src_dir: Path, out_dir: Path) -> list[str]:
-    """Write every ``PRACTICE_SOURCES`` entry into ``practices/``; return failures."""
-    failures: list[str] = []
-    (out_dir / "practices").mkdir(parents=True, exist_ok=True)
-    for entry in PRACTICE_SOURCES:
-        try:
-            document = _render_practice(entry, src_dir)
-            rel = f"practices/{entry['slug']}.md"
-            (out_dir / rel).write_text(document, encoding="utf-8")
-            license_file = entry.get("license_file")
-            if license_file:
-                target = out_dir / _PRACTICE_LICENSE_DIR / f"{entry['slug']}.txt"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(
-                    (src_dir / entry["dir"] / license_file).read_text(encoding="utf-8"),
-                    encoding="utf-8",
-                )
-        except OSError as exc:
-            logger.error("practice %s could not be vendored: %s", entry["slug"], exc)
-            failures.append(f"practice {entry['slug']} ({exc})")
-            continue
-        logger.info(
-            "practice %-22s -> %s (%d bytes)", entry["slug"], rel, len(document.encode("utf-8"))
-        )
-    return failures
 
 
 def scan_practices(out_dir: Path) -> list[dict]:
@@ -587,12 +449,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="skills", help="output directory (default: skills)")
     parser.add_argument("--laravel-branch", default="13.x", help="Laravel docs branch (default: 13.x)")
     parser.add_argument(
-        "--only", choices=["primevue", "laravel", "practices"], help="refresh only one corpus"
-    )
-    parser.add_argument(
-        "--practices-src",
-        help="local skill library to re-vendor practices/ from (offline; omit to keep the "
-             "documents already in skills/practices/)",
+        "--only",
+        choices=["primevue", "laravel", "practices"],
+        help="refresh only one corpus (practices: offline re-index of the hand-maintained docs)",
     )
     args = parser.parse_args(argv)
 
@@ -644,8 +503,6 @@ def main(argv: list[str] | None = None) -> int:
             },
         )
 
-    if args.practices_src:
-        failures += vendor_practices(Path(args.practices_src), out_dir)
     # Always rescanned from disk: the section is local, cheap and must survive
     # every --only run, because the registry is rewritten whole below.
     practices_section = {"documents": scan_practices(out_dir)}

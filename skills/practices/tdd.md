@@ -2,182 +2,200 @@
 title: Test-Driven Development
 slug: tdd
 source: nesti://skills/practices/tdd.md
+adapted_from: "local skill library: tdd (origin unrecorded)"
 triggers: tdd, test driven, red green refactor, test first, regression test, failing test, test coverage
-vendored_by: scripts/fetch_skills.py
 ---
 
 # Test-Driven Development
 
-TDD is the red → green loop. This skill is the reference that makes that loop produce tests worth keeping: what a good test is, where tests go, the anti-patterns, and the rules of the loop. Every section applies on every cycle: consult them before and during the loop, not after.
+*How to pair every Nesti change with tests that prove the issue's behaviour across PHPUnit, Vitest and Playwright. Adapted for Nesti from a local skill library (tdd, origin unrecorded).*
 
-When exploring the codebase, read `CONTEXT.md` (if it exists) so test names and interface vocabulary match the project's domain language, and respect ADRs in the area you're touching.
+## The loop in a Nesti change
 
-## What a good test is
+Nesti writes implementation and tests in one response; the sandbox gates (PHPUnit → OpenAPI → Vitest → Playwright) run afterwards. Red → green therefore becomes:
 
-Tests verify behavior through public interfaces, not implementation details. Code can change entirely; tests shouldn't. A good test reads like a specification: "user can checkout with valid cart" tells you exactly what capability exists, and it survives refactors because it doesn't care about internal structure.
+1. Derive the acceptance criteria from the issue text. Each criterion is one observable behaviour.
+2. For each criterion, write the test that would fail against the current repository.
+3. Write the minimal implementation that makes that test pass. No speculative features, no behaviour the issue does not name.
+4. On a gate failure (its output is fed back), fix the code, not the test, unless the test asserts something the issue never asked for. Never weaken, skip or delete an assertion to get green.
 
-See [tests.md](tests.md) for examples and [mocking.md](mocking.md) for mocking guidelines.
+Work in vertical slices inside the single response: one criterion → its test → its code, then the next criterion. Do not write a block of generic tests for imagined behaviour.
 
-## Seams: where tests go
+A bug issue starts with a regression test named after the broken behaviour (`test_completed_tasks_are_excluded_from_overdue_list`), asserting the correct outcome, then the fix.
 
-A **seam** is the public boundary you test at: the interface where you observe behavior without reaching inside. Tests live at seams, never against internals.
+Expected values come from the issue or a worked example, never from the implementation. Refactoring beyond what the criterion needs is out of scope.
 
-**Test only at pre-agreed seams.** Before writing any test, write down the seams under test and confirm them with the user. No test is written at an unconfirmed seam. You can't test everything, so agreeing the seams up front is how testing effort lands on the critical paths and complex logic instead of every edge case.
+## Seams per layer
 
-Ask: "What's the public interface, and which seams should we test?"
+A seam is the public boundary where behaviour is observed without reaching inside. The plan's per-layer test cases are the agreed seams: the planner names them, the coder implements exactly those.
 
-When the shape of that interface is itself in question (how deep the module is, where the seam belongs, what the interface should expose), call the Skill tool with "codebase-design" for the vocabulary. It is the shared source of the module, interface, depth, seam, adapter, leverage and locality terms, and it is a reference to consult, not a session to run.
+- **PHPUnit Feature** (`tests/Feature`): the HTTP seam. `use RefreshDatabase;`, data from model factories, `actingAs($user)` where the route needs auth, `getJson` / `postJson` / `putJson` / `deleteJson`, then `assertStatus`, `assertOk`, `assertCreated`, `assertNotFound`, `assertUnprocessable`, `assertJsonPath`, `assertJsonValidationErrors`.
+- **PHPUnit Unit** (`tests/Unit`): a service or model method called directly with plain inputs.
+- **Vitest** (`resources/js/components/__tests__/<Name>.test.js`): component props in, rendered text and emitted events out.
+- **Playwright** (`e2e/<feature>.spec.js`): one user-visible flow in the real app, against DatabaseSeeder data or data created inside the spec.
 
-## Anti-patterns
+Which layers a change needs:
 
-- **Implementation-coupled**: mocks internal collaborators, tests private methods, or verifies through a side channel (querying the database instead of using the interface). The tell: the test breaks when you refactor but behavior hasn't changed.
-- **Tautological**: the assertion recomputes the expected value the way the code does (`expect(add(a, b)).toBe(a + b)`, a snapshot derived by hand the same way, a constant asserted equal to itself), so it passes by construction and can never disagree with the code. Expected values must come from an independent source of truth: a known-good literal, a worked example, the spec.
-- **Horizontal slicing**: writing all tests first, then all implementation. Bulk tests verify _imagined_ behavior: you test the _shape_ of things rather than user-facing behavior, the tests go insensitive to real changes, and you commit to test structure before understanding the implementation. Work in **vertical slices** instead: one test → one implementation → repeat, each test a **tracer bullet** that responds to what the last cycle taught you.
+- Backend-only: PHPUnit (Feature for routes, Unit for services). No `.vue`, no Vitest, no Playwright.
+- Frontend-only: Vitest + Playwright. No new PHP code, no PHPUnit test.
+- Both: every layer the change touches gets its test.
 
-## Rules of the loop
+The OpenAPI layer is a gate, not a test you write: make `/api` routes inferable (typed FormRequest rules, JsonResource, a one-line PHPDoc per controller method). Never write a PHPUnit test that inspects the OpenAPI document.
 
-- **Red before green.** Write the failing test first, then only enough code to pass it. Don't anticipate future tests or add speculative features.
-- **One slice at a time.** One seam, one test, one minimal implementation per cycle.
-- **Refactoring is not part of the loop.** It belongs to the review stage (see the `code-review` skill), not the red → green implementation cycle.
+## Good and bad tests: PHPUnit
 
----
+Good: behaviour through the public interface, response contract first.
 
-## Good and Bad Tests
+```php
+<?php
 
-### Good Tests
+namespace Tests\Feature;
 
-**Integration-style**: Test through real interfaces, not mocks of internal parts.
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
 
-```typescript
-// GOOD: Tests observable behavior
-test("user can checkout with valid cart", async () => {
-  const cart = createCart();
-  cart.add(product);
-  const result = await checkout(cart, paymentMethod);
-  expect(result.status).toBe("confirmed");
-});
-```
+class TaskStoreTest extends TestCase
+{
+    use RefreshDatabase;
 
-Characteristics:
+    public function test_user_can_create_a_task(): void
+    {
+        $user = User::factory()->create();
 
-- Tests behavior users/callers care about
-- Uses public API only
-- Survives internal refactors
-- Describes WHAT, not HOW
-- One logical assertion per test
+        $this->actingAs($user)
+            ->postJson('/api/tasks', ['title' => 'Write report'])
+            ->assertCreated()
+            ->assertJsonPath('data.title', 'Write report');
 
-### Bad Tests
+        $this->assertDatabaseHas('tasks', ['title' => 'Write report']);
+    }
 
-**Implementation-detail tests**: Coupled to internal structure.
-
-```typescript
-// BAD: Tests implementation details
-test("checkout calls paymentService.process", async () => {
-  const mockPayment = jest.mock(paymentService);
-  await checkout(cart, payment);
-  expect(mockPayment.process).toHaveBeenCalledWith(cart.total);
-});
-```
-
-Red flags:
-
-- Mocking internal collaborators
-- Testing private methods
-- Asserting on call counts/order
-- Test breaks when refactoring without behavior change
-- Test name describes HOW not WHAT
-- Verifying through external means instead of interface
-
-```typescript
-// BAD: Bypasses interface to verify
-test("createUser saves to database", async () => {
-  await createUser({ name: "Alice" });
-  const row = await db.query("SELECT * FROM users WHERE name = ?", ["Alice"]);
-  expect(row).toBeDefined();
-});
-
-// GOOD: Verifies through interface
-test("createUser makes user retrievable", async () => {
-  const user = await createUser({ name: "Alice" });
-  const retrieved = await getUser(user.id);
-  expect(retrieved.name).toBe("Alice");
-});
-```
-
-**Tautological tests**: Expected value restates the implementation, so the test passes by construction.
-
-```typescript
-// BAD: Expected value is recomputed the way the code computes it
-test("calculateTotal sums line items", () => {
-  const items = [{ price: 10 }, { price: 5 }];
-  const expected = items.reduce((sum, i) => sum + i.price, 0);
-  expect(calculateTotal(items)).toBe(expected);
-});
-
-// GOOD: Expected value is an independent, known literal
-test("calculateTotal sums line items", () => {
-  expect(calculateTotal([{ price: 10 }, { price: 5 }])).toBe(15);
-});
-```
-
----
-
-## When to Mock
-
-Mock at **system boundaries** only:
-
-- External APIs (payment, email, etc.)
-- Databases (sometimes - prefer test DB)
-- Time/randomness
-- File system (sometimes)
-
-Don't mock:
-
-- Your own classes/modules
-- Internal collaborators
-- Anything you control
-
-### Designing for Mockability
-
-At system boundaries, design interfaces that are easy to mock:
-
-**1. Use dependency injection**
-
-Pass external dependencies in rather than creating them internally:
-
-```typescript
-// Easy to mock
-function processPayment(order, paymentClient) {
-  return paymentClient.charge(order.total);
-}
-
-// Hard to mock
-function processPayment(order) {
-  const client = new StripeClient(process.env.STRIPE_KEY);
-  return client.charge(order.total);
+    public function test_title_is_required(): void
+    {
+        $this->actingAs(User::factory()->create())
+            ->postJson('/api/tasks', [])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['title']);
+    }
 }
 ```
 
-**2. Prefer SDK-style interfaces over generic fetchers**
+`assertDatabaseHas` is fine as a supplementary persistence check. The anti-pattern is asserting only the database while ignoring the response, or querying tables by hand instead of using the route.
 
-Create specific functions for each external operation instead of one generic function with conditional logic:
+Bad: tautological expected value, recomputed the way the code computes it.
 
-```typescript
-// GOOD: Each function is independently mockable
-const api = {
-  getUser: (id) => fetch(`/users/${id}`),
-  getOrders: (userId) => fetch(`/users/${userId}/orders`),
-  createOrder: (data) => fetch('/orders', { method: 'POST', body: data }),
-};
+```php
+// BAD: passes by construction
+$items = [10, 5];
+$this->assertSame(array_sum($items), $service->total($items));
 
-// BAD: Mocking requires conditional logic inside the mock
-const api = {
-  fetch: (endpoint, options) => fetch(endpoint, options),
-};
+// GOOD: independent literal from the issue or a worked example
+$this->assertSame(15, $service->total([10, 5]));
 ```
 
-The SDK approach means:
-- Each mock returns one specific shape
-- No conditional logic in test setup
-- Easier to see which endpoints a test exercises
-- Type safety per endpoint
+Red flags: mocking your own classes, testing private methods, asserting call counts or order, names that describe how instead of what, a test that breaks on a refactor with unchanged behaviour.
+
+## Good and bad tests: Vitest
+
+Mount with the PrimeVue plugin and assert on text, props and emitted events.
+
+```js
+import { mount } from '@vue/test-utils';
+import Aura from '@primeuix/themes/aura';
+import PrimeVue from 'primevue/config';
+import { describe, expect, it } from 'vitest';
+import TaskTable from '../TaskTable.vue';
+
+const global = { plugins: [[PrimeVue, { theme: { preset: Aura } }]] };
+
+describe('TaskTable', () => {
+    it('lists the given tasks', () => {
+        const wrapper = mount(TaskTable, { props: { tasks: [{ id: 1, title: 'Alpha task' }] }, global });
+        expect(wrapper.text()).toContain('Alpha task');
+    });
+
+    it('emits remove with the task id', async () => {
+        const wrapper = mount(TaskTable, { props: { tasks: [{ id: 1, title: 'Alpha task' }] }, global });
+        await wrapper.find('[data-testid="remove-1"]').trigger('click');
+        expect(wrapper.emitted('remove')).toEqual([[1]]);
+    });
+});
+```
+
+Bad: asserting PrimeVue's internal DOM shape (`.p-datatable-tbody tr` counts, `p-*` classes). A DataTable with zero rows still renders an empty-message row, so row counts lie. Add your own `data-testid` on elements you render and assert on text instead. Keep specs to behaviour the issue names.
+
+## Mock only at system boundaries
+
+The real SQLite test database via `RefreshDatabase` is the default, not a mock. Never mock Eloquent models or your own services. Fake only what leaves the process:
+
+- Outgoing HTTP: `Http::fake(['api.example.com/*' => Http::response(['ok' => true], 200)])`, then `Http::assertSent(fn ($request) => ...)` or `Http::assertNothingSent()`.
+- Mail: `Mail::fake()` → `Mail::assertSent(OrderShipped::class)`, `Mail::assertNotSent(...)`.
+- Notifications: `Notification::fake()` → `Notification::assertSentTo($user, OrderShipped::class)`.
+- Jobs: `Queue::fake()` → `Queue::assertPushed(ShipOrder::class)`.
+- Events: `Event::fake()` → `Event::assertDispatched(OrderShipped::class)`.
+- Files: `Storage::fake('avatars')` → `Storage::disk('avatars')->assertExists($path)`.
+- Time: `$this->travel(5)->days()`, `$this->travelTo(...)`, `$this->travelBack()`, `$this->freezeTime()`.
+
+Assert the HTTP response first, then the faked side effect.
+
+In Vitest, a component that calls `fetch` gets a stub, never a live request:
+
+```js
+import { vi } from 'vitest';
+
+vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ data: [{ id: 1, title: 'Alpha task' }] }),
+}));
+```
+
+Await the component's update (`await flushPromises()` from `@vue/test-utils`) before asserting rendered text.
+
+## Designing for testability
+
+Pass external dependencies in; let Laravel's container resolve them through constructor injection.
+
+```php
+// Testable: the client is injected and configured from config/
+class InvoiceSender
+{
+    public function __construct(private readonly BillingClient $billing)
+    {
+    }
+
+    public function send(Invoice $invoice): bool
+    {
+        return $this->billing->createCharge($invoice->total);
+    }
+}
+
+// Hard to test: builds its own client inside the method
+public function send(Invoice $invoice): bool
+{
+    return (new BillingClient(config('services.billing.key')))->createCharge($invoice->total);
+}
+```
+
+- Give the boundary class one method per external operation (`createCharge`, `refundCharge`) rather than one generic `request($method, $url)`; each test then fakes one shape with no conditional setup.
+- Build boundary clients on Laravel's `Http` facade so `Http::fake()` covers them without a hand-written mock.
+- Read credentials via `config()`, never `env()` outside config files.
+- Keep controllers thin: validation in a FormRequest, logic in `app/Services` or model methods, so Unit tests reach the logic without HTTP.
+
+## Playwright specifics
+
+```js
+import { expect, test } from '@playwright/test';
+
+test('user adds a task', async ({ page }) => {
+    await page.goto('/');
+    await page.getByLabel('Title').fill('Buy milk');
+    await page.getByRole('button', { name: 'Add task' }).click();
+    await expect(page.getByText('Buy milk', { exact: true })).toBeVisible();
+});
+```
+
+- The sandbox runs `php artisan migrate --force --seed`, builds assets and serves `http://127.0.0.1:8000`. The database holds exactly what `DatabaseSeeder` creates: never assume rows exist. Seed in `DatabaseSeeder::run()` with factories, or create the data through the UI or API inside the spec.
+- Use precise locators: `getByRole` with a name, `getByTestId`, `getByText(..., { exact: true })`. Avoid CSS selectors on PrimeVue internals.
+- Rely on `expect(...).toBeVisible()` auto-waiting; never fixed sleeps.
+- One flow per test, named after the user-visible outcome.

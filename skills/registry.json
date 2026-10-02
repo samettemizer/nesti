@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-02T17:40:27Z",
+  "generated_at": "2026-10-02T18:02:03Z",
   "primevue": {
     "version": "5.0.1",
     "source_pattern": "https://primevue.dev/llms/components/{slug}.md",
@@ -1871,7 +1871,7 @@
           "visual hierarchy"
         ],
         "path": "practices/frontend-design.md",
-        "chars": 9433
+        "chars": 10068
       },
       {
         "slug": "minimalist-ui",
@@ -1886,12 +1886,12 @@
           "flat design"
         ],
         "path": "practices/minimalist-ui.md",
-        "chars": 7953
+        "chars": 9982
       },
       {
         "slug": "senior-security",
         "title": "Application Security Engineering",
-        "url": "https://github.com/alirezarezvani/claude-skills/tree/main/engineering-team/senior-security",
+        "url": "nesti://skills/practices/senior-security.md",
         "triggers": [
           "security review",
           "threat model",
@@ -1905,7 +1905,7 @@
           "sensitive data"
         ],
         "path": "practices/senior-security.md",
-        "chars": 81883
+        "chars": 25786
       },
       {
         "slug": "tdd",
@@ -1921,7 +1921,7 @@
           "test coverage"
         ],
         "path": "practices/tdd.md",
-        "chars": 7311
+        "chars": 9409
       }
     ]
   }
