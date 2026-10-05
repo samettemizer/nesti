@@ -92,22 +92,22 @@ def reset_calls(issue_id: int) -> None:
         "openapi": 0, "vitest": 0, "playwright": 0,
         "bootstrap": [], "layers": [],
         "pushes": [], "mrs": [], "history_at_commit": None, "workspaces": [],
-        "plan_prompts": [], "code_prompts": [],
+        "plan_prompts": [], "plan_systems": [], "code_prompts": [], "code_systems": [],
         "memory_search": [], "memory_similar": [], "memory_remember_solution": [],
         "memory_remember_failure": [], "memory_forget": [], "memory_recall": [],
     })
 
 
-def initial(issue_id: int) -> dict:
+def initial(issue_id: int, subject: str = "", description: str = "Implement the thing.") -> dict:
+    subject = subject or f"Test issue {issue_id}"
     return {
-        "issue": {"id": issue_id, "subject": f"Test issue {issue_id}",
-                  "description": "Implement the thing."},
-        "issue_id": issue_id, "subject": f"Test issue {issue_id}",
-        "skills": [], "plan": "", "code_response": "", "repo_path": "",
+        "issue": {"id": issue_id, "subject": subject, "description": description},
+        "issue_id": issue_id, "subject": subject,
+        "skills": [], "plan": "", "scope": "fullstack", "code_response": "", "repo_path": "",
         "branch_name": "", "workspace": "", "messages": [],
         "attempt": 0, "max_attempts": 3,
         "files_written": False, "written_files": [],
-        "has_vue_files": False, "stack": "php", "run_phpunit": True,
+        "has_vue_files": False, "stack": "php", "run_phpunit": True, "run_frontend": False,
         "is_laravel": False, "bootstrapped": False,
         "has_api_routes": False, "run_openapi": False,
         "test_output": "", "test_passed": False,
@@ -123,6 +123,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
                 openapi_outcomes=(True,),
                 vitest_outcomes=(True,), playwright_outcomes=(True,),
                 laravel_repo: bool = False, bootstrap_created: bool = False,
+                vue_repo: bool = False, plan_text: str = "",
                 doc_chunks=(), similar_solutions=(), recalled=(),
                 memory_error: str = ""):
     """
@@ -137,6 +138,11 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     not ask for memory runs against a degraded (empty) memory layer — the
     regression net for graceful degradation.  ``memory_error`` makes every
     memory tool report a genuine failure instead.
+
+    ``vue_repo`` puts an existing component into the clone, so a scenario can
+    prove that a backend change in a repository WITH .vue files still skips
+    the frontend layers.  ``plan_text`` replaces the fake planner's answer
+    (e.g. to declare a scope on line 1).
     """
 
     def fake_set_status(issue_id, status, note=""):
@@ -151,6 +157,10 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             # Real markers, so detection is not faked — only the repo is.
             open(os.path.join(target_path, "artisan"), "w").close()
             open(os.path.join(target_path, "composer.json"), "w").close()
+        if vue_repo:
+            os.makedirs(os.path.join(target_path, "resources", "js", "components"))
+            open(os.path.join(target_path, "resources", "js", "components",
+                              "Existing.vue"), "w").close()
         return {"success": True, "result": {"repo_path": target_path}}
     nodes.tool_gitlab_clone = fake_clone
 
@@ -256,13 +266,15 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     else:
         def fake_plan(sp, up, messages=None):
             calls["plan_prompts"].append(up)
-            return "1. Objective: implement Hello\n2. Files: src/Hello.php"
+            calls["plan_systems"].append(sp)
+            return plan_text or "1. Objective: implement Hello\n2. Files: src/Hello.php"
         nodes._llm.generate_plan = fake_plan
 
     seq = list(code_responses)
 
     def fake_code(system_prompt, user_prompt, messages=None):
         calls["code_prompts"].append(user_prompt)
+        calls["code_systems"].append(system_prompt)
         if code_exc_first:
             raise RuntimeError("All coding providers exhausted.")
         return seq.pop(0) if len(seq) > 1 else seq[0]
@@ -270,10 +282,11 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     nodes._llm.escalate_coder = lambda: calls.__setitem__("escalate", calls["escalate"] + 1)
 
 
-def run(issue_id, **kw):
+def run(issue_id, subject="", description="Implement the thing.", **kw):
     reset_calls(issue_id)
     patch_tools(**kw)
-    final = compiled.invoke(initial(issue_id), config={"recursion_limit": 60})
+    final = compiled.invoke(initial(issue_id, subject, description),
+                            config={"recursion_limit": 60})
     return final
 
 
@@ -659,6 +672,230 @@ check(calls["docker"] == 0, "no coding or testing attempted after the refusal")
 check(not os.path.exists(calls["workspaces"][0]),
       "node_bootstrap removed its workspace before raising (no tempdir leak)")
 
+# ═════ Scenario 24: issue scope — classification, declaration, documentation ═════
+print("\n── Scenario 24: issue_scope ──")
+from issue_scope import (  # noqa: E402
+    SCOPES, classify_issue, declared_scope, documentation_request, widen,
+)
+
+# ISSUE_GUIDELINE.md examples 1–4 (abridged to the lines that carry the signal).
+_GUIDELINE_EXAMPLES = (
+    ("Add a paginated /api/tasks endpoint backed by a tasks table",
+     "- New migration creating a `tasks` table.\n- `GET /api/tasks` paginated 10 per page, "
+     "returning a `TaskResource` collection.\n- Feature tests for both routes.", "backend"),
+    ("Show the task list with a PrimeVue DataTable component",
+     "- `resources/js/components/TaskTable.vue` fetching `GET /api/tasks`.\n"
+     "- PrimeVue `DataTable` + `Column` for `title`, `due_date` and `is_done`.", "frontend"),
+    ("Add a PrimeVue Dialog form that creates a task",
+     "- `resources/js/components/TaskCreateDialog.vue` using PrimeVue `Dialog`.\n"
+     "- Posts to `POST /api/tasks`.", "frontend"),
+    ("Fix incorrect total price calculation when a discount coupon is applied",
+     "- Fix the rounding logic in app/Services/CartService.php.\n"
+     "- Do NOT change the database schema.\n- Add a PHPUnit Feature test.", "backend"),
+)
+for _subject, _description, _expected in _GUIDELINE_EXAMPLES:
+    _decision = classify_issue(_subject, _description)
+    check(_decision.scope == _expected,
+          f"{_subject[:44]!r} → {_expected} (got {_decision.scope}: {_decision.evidence()})")
+check(classify_issue("Change the green button colour to orange", "").scope == "frontend",
+      "a button colour change is frontend work")
+check(classify_issue("Add a /api/ping endpoint for uptime checks", "").scope == "backend",
+      "a trial endpoint is backend work")
+check(classify_issue("Add a /api/tasks/{id}/complete endpoint and a Complete button", "").scope
+      == "fullstack", "an endpoint plus the button that calls it is fullstack")
+check(classify_issue("Implement the thing", "").scope == "fullstack",
+      "no signal → fullstack, the prompt every issue received before scopes")
+check(classify_issue("Polish the totals", "Do NOT change the database schema.").scope
+      == "fullstack", "a negated mention is not a signal")
+check(classify_issue("Show the Save button", "Scope: backend").scope == "backend",
+      "an explicit 'Scope:' line wins over the signals")
+check(classify_issue("Speed up the task list", "No frontend changes.").scope == "backend",
+      "'no frontend changes' selects the backend")
+
+check(declared_scope("**SCOPE:** Frontend\n\n1. Objective") == "frontend",
+      "a markdown-wrapped SCOPE line on line 1 is read")
+check(declared_scope("# Plan\n\nScope: full-stack\n1. Objective") == "fullstack",
+      "the declaration may follow a heading")
+check(declared_scope("1. Objective\n2. a\n3. b\n4. c\n5. d\nSCOPE: backend") is None,
+      "a SCOPE line deep inside the plan is prose, not the declaration")
+check(declared_scope("1. Objective: implement Hello") is None, "no declaration → None")
+check(widen("backend", "frontend") == "fullstack" and widen("frontend", "frontend") == "frontend"
+      and widen("fullstack", "backend") == "fullstack" and widen("backend", "") == "backend",
+      "widen covers both sides and never narrows")
+
+check(documentation_request("Add a /api/ping endpoint", "Return ok.") == "",
+      "a new endpoint is not a documentation request")
+check(documentation_request("Add /api/ping and describe it in the README", "") == "readme",
+      "naming the README is a documentation request")
+check(documentation_request("Add /api/ping", "Do not touch the README.") == "",
+      "a negated README mention is not a request")
+check(documentation_request("Show tasks", "https://primevue.dev/llms/components/datatable.md")
+      == "", "a skill URL ending in .md is not a documentation request")
+check(documentation_request("Add /api/tasks", "The OpenAPI documentation must list it.") == "",
+      "OpenAPI documentation is Scramble's job, not a documentation file")
+
+import prompt_builder as _scoped  # noqa: E402
+_button = {"id": 5, "subject": "Change the green button colour to orange", "description": ""}
+_plan_sys = {s: _scoped.build_plan_prompt(_button, scope=s)[0] for s in SCOPES}
+_plan_user = {s: _scoped.build_plan_prompt(_button, scope=s)[1] for s in SCOPES}
+_code_sys = {s: _scoped.build_code_prompt(_button, "plan", scope=s)[0] for s in SCOPES}
+check(all(f"TASK SCOPE: {s}" in _plan_sys[s] and f"TASK SCOPE: {s}" in _code_sys[s]
+          for s in SCOPES), "both system prompts carry the TASK SCOPE block of their scope")
+check(not any(section in _code_sys["frontend"] or section in _plan_sys["frontend"]
+              for section in ("DATABASE POLICY", "LARAVEL BACKEND", "API DOCUMENTATION")),
+      "a frontend issue gets no database policy and no Laravel/Scramble standards")
+check(not any(section in _code_sys["backend"]
+              for section in ("PRIMEVUE FRONTEND", "@playwright/test", "getByRole")),
+      "a backend issue gets no PrimeVue standards and no Playwright instructions")
+check(all(section in _code_sys["fullstack"]
+          for section in ("DATABASE POLICY", "LARAVEL BACKEND", "PRIMEVUE FRONTEND")),
+      "fullstack keeps both standards")
+check("Database changes" not in _plan_user["frontend"] and "Frontend files" in _plan_user["frontend"]
+      and "Frontend files" not in _plan_user["backend"] and "Database changes" in _plan_user["backend"],
+      "the plan structure only asks for the sections of its scope")
+check(all(f"Line 1 of the plan, alone: SCOPE: {s}" in _plan_user[s] for s in SCOPES),
+      "the planner is asked to declare the scope on line 1")
+check(all("Documentation is out of scope" in p and "README.md" in p
+          for p in list(_plan_sys.values()) + list(_code_sys.values())),
+      "every prompt keeps README.md out of an issue that does not ask for it")
+_docs_sys = _scoped.build_code_prompt(
+    {"id": 6, "subject": "Add /api/ping and describe it in the README", "description": ""},
+    "plan", scope="backend")[0]
+check("Documentation is out of scope" not in _docs_sys
+      and 'asks for documentation ("readme")' in _docs_sys,
+      "an issue that names the README gets it back in scope, limited to what it asks")
+
+# ═════ Scenario 25: the layers follow the change, not the repository ═════
+print("\n── Scenario 25: change-aware layer gates ──")
+_gate_repo = tempfile.mkdtemp(prefix="nesti-gates-")
+try:
+    os.makedirs(os.path.join(_gate_repo, "resources", "js", "components"))
+    open(os.path.join(_gate_repo, "artisan"), "w").close()
+    open(os.path.join(_gate_repo, "composer.json"), "w").close()
+    _existing_vue = os.path.join(_gate_repo, "resources", "js", "components", "TaskTable.vue")
+    open(_existing_vue, "w").close()
+
+    def _gates(written):
+        r = tool_detect_stack(_gate_repo, written)["result"]
+        return r["run_phpunit"], r["run_frontend"]
+
+    check(_gates(["app/Http/Controllers/PingController.php", "routes/api.php",
+                  "tests/Feature/PingTest.php"]) == (True, False),
+          "a backend change in a repository WITH .vue files skips Vitest and Playwright")
+    check(_gates(["resources/js/components/TaskTable.vue",
+                  "resources/js/components/__tests__/TaskTable.test.js",
+                  "e2e/tasks.spec.js"]) == (False, True),
+          "a frontend-only change skips PHPUnit")
+    check(_gates(["resources/views/app.blade.php"]) == (True, True),
+          "a Blade view is PHP that serves a page: both sides run")
+    check(_gates(["app/Models/Task.php", "resources/js/components/TaskTable.vue"]) == (True, True),
+          "a change on both sides runs every layer")
+    check(_gates(["README.md"]) == (True, False),
+          "a change on neither side still runs PHPUnit — never commits untested")
+    check(_gates(None) == (True, True), "written_files=None → every layer (MCP callers)")
+    os.remove(_existing_vue)
+    check(_gates(["resources/js/app.js"]) == (True, False),
+          "a JavaScript change in a repository without Vue falls back to PHPUnit")
+finally:
+    shutil.rmtree(_gate_repo, ignore_errors=True)
+
+# ═════ Scenario 26: scope end-to-end — SCOPE line, prompts, layers, widening ═════
+print("\n── Scenario 26: scope through the graph ──")
+BUTTON_CODE = (
+    "### FILE: resources/js/components/SaveButton.vue\n"
+    "```vue\n<template><Button severity=\"warn\" label=\"Save\"/></template>\n```\n\n"
+    "### FILE: resources/js/components/__tests__/SaveButton.test.js\n```js\n// vitest\n```\n\n"
+    "### FILE: e2e/save-button.spec.js\n```js\n// playwright\n```\n"
+)
+BLADE_BUTTON_CODE = (
+    "### FILE: resources/views/app.blade.php\n```blade\n<div id=\"app\"><save-button/></div>\n```\n\n"
+    + BUTTON_CODE
+)
+
+
+class _ScopeLines(logging.Handler):
+    """Collects the graph.nodes SCOPE lines whatever LOG_LEVEL the run uses."""
+
+    def __init__(self):
+        super().__init__(logging.INFO)
+        self.lines = []
+
+    def emit(self, record):
+        if record.getMessage().startswith("SCOPE:"):
+            self.lines.append(record.getMessage())
+
+
+def run_logged(issue_id, **kw):
+    """run() with the SCOPE lines of that run captured."""
+    handler, node_logger = _ScopeLines(), logging.getLogger("graph.nodes")
+    previous_level = node_logger.level
+    node_logger.addHandler(handler)
+    node_logger.setLevel(logging.DEBUG if previous_level == logging.DEBUG else logging.INFO)
+    try:
+        return run(issue_id, **kw), handler.lines
+    finally:
+        node_logger.removeHandler(handler)
+        node_logger.setLevel(previous_level)
+
+
+f, scope_lines = run_logged(
+    2601, subject="Add a /api/ping endpoint for uptime checks", description="Return ok.",
+    docker_outcomes=[True], code_responses=[LARAVEL_CODE], laravel_repo=True, vue_repo=True)
+check(len(scope_lines) == 1 and scope_lines[0].startswith("SCOPE: backend · GitLab issue #2601 · "),
+      f"exactly one SCOPE line per run, final scope and issue number first ({scope_lines})")
+check(calls["layers"] == ["docker", "openapi"],
+      f"backend issue in a Vue repository: PHPUnit → OpenAPI only (got {calls['layers']})")
+check(f["scope"] == "backend" and not any("PRIMEVUE FRONTEND" in p for p in
+                                          calls["plan_systems"] + calls["code_systems"]),
+      "a backend issue's plan and code prompts carry no PrimeVue standards")
+check("scope: backend" in calls["mrs"][0], "the MR body reports the scope")
+
+f, scope_lines = run_logged(
+    2602, subject="Change the green button colour to orange", description="",
+    docker_outcomes=[True], code_responses=[BUTTON_CODE], laravel_repo=True, vue_repo=True)
+check(f["scope"] == "frontend" and calls["layers"] == ["vitest", "playwright"],
+      f"button colour change: frontend scope, Vitest → Playwright, no PHPUnit (got {calls['layers']})")
+check(not any("DATABASE POLICY" in p for p in calls["plan_systems"] + calls["code_systems"]),
+      "a frontend issue's prompts carry no database policy")
+check(f["mr_url"] == "https://gitlab.example/mr/2602", "frontend-only change reaches its MR")
+
+f, scope_lines = run_logged(
+    2603, subject="Change the green button colour to orange", description="",
+    plan_text="**SCOPE:** fullstack\n1. Objective: orange button",
+    docker_outcomes=[True], code_responses=[BUTTON_CODE], laravel_repo=True, vue_repo=True)
+check(f["scope"] == "fullstack" and "LARAVEL BACKEND" in calls["code_systems"][0],
+      "the coder follows the scope the planner declared")
+check(len(scope_lines) == 1 and scope_lines[0].startswith("SCOPE: fullstack · GitLab issue #2603")
+      and "issue text: frontend" in scope_lines[0] and scope_lines[0].endswith("planner: fullstack"),
+      f"the SCOPE line shows the final scope and both sources ({scope_lines})")
+
+f, _ = run_logged(
+    2604, subject="Change the green button colour to orange", description="",
+    plan_text="SCOPE: frontend\n1. Objective: orange button",
+    docker_outcomes=[False, True], code_responses=[BLADE_BUTTON_CODE],
+    laravel_repo=True, vue_repo=True)
+check(calls["layers"] == ["docker", "docker", "vitest", "playwright"],
+      f"a Blade view puts PHPUnit in front of the frontend layers (got {calls['layers']})")
+check("LARAVEL BACKEND" not in calls["code_systems"][0]
+      and "LARAVEL BACKEND" in calls["code_systems"][1] and f["scope"] == "fullstack",
+      "a red PHPUnit layer widens a frontend scope to fullstack for the retry")
+check(f["mr_url"] == "https://gitlab.example/mr/2604", "the widened retry reaches its MR")
+
+# The layer set changes between attempts (Vitest on attempt 1, PHPUnit on
+# attempt 2): attempt 2's red PHPUnit must be fed back as PHPUnit — not as the
+# stale Vitest output of attempt 1 — and attempt 1's Vitest output must not
+# reach the MR body of code it never ran on.
+f = run(2605, subject="Change the green button colour to orange", description="",
+        docker_outcomes=[False, True], vitest_outcomes=[False],
+        code_responses=[BUTTON_CODE, LARAVEL_CODE, LARAVEL_CODE],
+        laravel_repo=True, vue_repo=True)
+check([(e["attempt"], e["layer"]) for e in calls["memory_remember_failure"]]
+      == [(1, "Vitest (component tests)"), (2, "PHPUnit")],
+      "each attempt's failure is reported as its own layer, never a stale earlier one")
+check(f["scope"] == "fullstack", "the PHPUnit failure widened the frontend scope")
+check(f["mr_url"] and "### Vitest" not in calls["mrs"][0],
+      "the MR body lists only the layers that ran on the merged code")
+
 # ═════ Scenario 19: Phase 8 hierarchical memory end-to-end ═════
 print("\n── Scenario 19: Phase 8 hierarchical memory end-to-end ──")
 _CHUNKS = [
@@ -993,29 +1230,32 @@ check(r == {"test_passed": False,
             "test_output": nodes._NO_FILE_BLOCKS_OUTPUT}, "node_test runs on empty state")
 check(nodes.node_detect_stack({}) ==
       {"has_vue_files": False, "stack": "unknown",
-       "run_phpunit": True, "run_openapi": False},
+       "run_phpunit": True, "run_frontend": False, "run_openapi": False},
       "node_detect_stack defers to the files_written guard on empty state")
 check(route_after_detect_stack({"run_phpunit": True}) == "phpunit_test",
       "edge: php-bearing stack → phpunit_test")
 check(route_after_detect_stack({"run_phpunit": False, "stack": "vue"}) == "vitest_test",
       "edge: vue stack → vitest_test (PHPUnit bypassed)")
 check(route_after_detect_stack({}) == "phpunit_test", "edge: default → phpunit_test")
-check(route_after_phpunit({"test_passed": True}) == "commit", "edge: pass, no vue → commit")
+check(route_after_phpunit({"test_passed": True}) == "commit",
+      "edge: pass, frontend untouched → commit")
 check(route_after_phpunit({"test_passed": True, "run_openapi": True}) == "openapi_test",
       "edge: pass + API touched → openapi_test")
 check(route_after_phpunit({"test_passed": True, "run_openapi": True,
-                           "has_vue_files": True}) == "openapi_test",
+                           "run_frontend": True}) == "openapi_test",
       "edge: OpenAPI precedes the frontend layers")
-check(route_after_phpunit({"test_passed": True, "has_vue_files": True}) == "vitest_test",
-      "edge: pass + vue → vitest_test")
+check(route_after_phpunit({"test_passed": True, "run_frontend": True}) == "vitest_test",
+      "edge: pass + frontend touched → vitest_test")
+check(route_after_phpunit({"test_passed": True, "has_vue_files": True}) == "commit",
+      "edge: .vue files in the repo alone never start the frontend layers")
 check(route_after_phpunit({"test_passed": False, "attempt": 1, "max_attempts": 3})
       == "on_layer_failure", "edge: fail + retries → on_layer_failure")
 check(route_after_phpunit({"test_passed": False, "attempt": 3, "max_attempts": 3})
       == "failure", "edge: fail + exhausted → failure")
 check(route_after_openapi({"openapi_passed": True}) == "commit",
-      "edge: openapi pass, no vue → commit")
-check(route_after_openapi({"openapi_passed": True, "has_vue_files": True}) == "vitest_test",
-      "edge: openapi pass + vue → vitest_test")
+      "edge: openapi pass, frontend untouched → commit")
+check(route_after_openapi({"openapi_passed": True, "run_frontend": True}) == "vitest_test",
+      "edge: openapi pass + frontend touched → vitest_test")
 check(route_after_openapi({"openapi_passed": False, "attempt": 1, "max_attempts": 3})
       == "on_layer_failure", "edge: openapi fail + retries → on_layer_failure")
 check(route_after_openapi({"openapi_passed": False, "attempt": 3, "max_attempts": 3})
@@ -1084,6 +1324,31 @@ try:
           "first attempt prunes nothing")
 finally:
     shutil.rmtree(prune_root, ignore_errors=True)
+
+# A file the clone has committed is restored, never deleted: an unrequested
+# README edit dropped on a retry must not come back as a deleted README.
+import git as _git  # noqa: E402
+git_root = tempfile.mkdtemp(prefix="nesti-prune-git-")
+try:
+    _repo = _git.Repo.init(git_root)
+    with open(os.path.join(git_root, "README.md"), "w") as fh:
+        fh.write("# Project\n")
+    _repo.index.add(["README.md"])
+    _repo.index.commit("init", author=_git.Actor("t", "t@example.com"),
+                       committer=_git.Actor("t", "t@example.com"))
+    _repo.close()
+    with open(os.path.join(git_root, "README.md"), "w") as fh:
+        fh.write("# Project\n\n## GET /api/ping\n")
+    os.makedirs(os.path.join(git_root, "app"))
+    open(os.path.join(git_root, "app", "Ping.php"), "w").close()
+    reverted = nodes._prune_stale_files(["README.md", "app/Ping.php"], [], git_root)
+    check(sorted(reverted) == ["README.md", "app/Ping.php"], "both stale files are reverted")
+    check(open(os.path.join(git_root, "README.md")).read() == "# Project\n",
+          "a committed README edited by an earlier attempt gets its content back, not deleted")
+    check(not os.path.exists(os.path.join(git_root, "app")),
+          "a file the attempt created is deleted, with its emptied directory")
+finally:
+    shutil.rmtree(git_root, ignore_errors=True)
 
 store_msg = nodes._store.append_test_failure(999, "boom", layer="OpenAPI documentation")[-1]
 check("OpenAPI documentation layer FAILED" in store_msg["content"],
@@ -1410,16 +1675,17 @@ for dockerfile in ("Dockerfile.sandbox", "Dockerfile.sandbox.e2e"):
 
 # ── Phase 5: role, pins and the vendored corpus ──────────────────────────────
 import prompt_builder                              # noqa: E402
-coding = prompt_builder.CODING_SYSTEM_PROMPT
-for needle in ("@playwright/test", "1.50.0", "primevue/", "@primeuix/themes",
-               "scramble:export", "routes/api.php"):
-    check(needle in coding, f"CODING_SYSTEM_PROMPT mentions {needle!r}")
-check("You MUST NOT create new database tables" not in coding,
-      "the retired no-database rule is gone from the coding prompt")
-check("DATABASE POLICY" in prompt_builder._RULES,
-      "the six-point database policy replaced the no-schema rules")
-check("{{" not in coding and "}}" not in coding,
-      "no doubled f-string braces leaked into the rendered coding prompt")
+coding = {scope: prompt_builder.build_code_prompt(
+              {"id": 1, "subject": "s", "description": "d"}, "plan", scope=scope)[0]
+          for scope in ("backend", "frontend", "fullstack")}
+for needle in ("@playwright/test", "1.50.0", "primevue/", "@primeuix/themes"):
+    check(needle in coding["frontend"] and needle in coding["fullstack"],
+          f"frontend and fullstack coding prompts carry {needle!r}")
+for needle in ("scramble:export", "routes/api.php", "DATABASE POLICY"):
+    check(needle in coding["backend"] and needle in coding["fullstack"],
+          f"backend and fullstack coding prompts carry {needle!r}")
+check(all("{{" not in p and "}}" not in p for p in coding.values()),
+      "no doubled f-string braces leaked into any rendered coding prompt")
 
 if os.path.isfile(_registry_path):
     registry = json.load(open(_registry_path))

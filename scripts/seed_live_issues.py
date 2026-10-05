@@ -6,7 +6,8 @@ The issues drive one full pass of the Laravel + PrimeVue pipeline:
 
     1. backend + database + /api  → PHPUnit + OpenAPI layers
     2. PrimeVue DataTable         → Vitest + Playwright layers
-    3. PrimeVue Dialog form       → all four layers, posting to issue 1's API
+    3. PrimeVue Dialog form       → Vitest + Playwright layers (PHPUnit only if
+                                    a seeder is registered), posting to issue 1's API
 
 Idempotent: an issue whose title already exists as an OPEN issue carrying the
 opt-in label is skipped, so re-running after a partial seed never duplicates

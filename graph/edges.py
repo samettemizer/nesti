@@ -11,12 +11,13 @@ Test layering (Phase 4 + 5)
     detect_stack ─→ phpunit_test ─→ openapi_test ─→ vitest_test
                                                  ─→ playwright_test ─→ commit
 
-Each router skips forward over the layers that do not apply to the detected
-stack, so a PHP-only change never starts a Node container, a frontend-only
-change never starts a PHP one, and a change that did not touch the API surface
-never pays for a Scramble export.  Every layer shares the same retry budget:
-``attempt`` is incremented once per node_code run, not once per layer, and
-every red gate routes to the same escalation node.
+Each router skips forward over the layers that do not apply to *this change*
+(the ``run_*`` gates node_detect_stack derives from the files the coder wrote):
+a backend change never starts a Node container even in a repository full of
+.vue files, a frontend-only change never starts a PHP one, and a change that
+did not touch the API surface never pays for a Scramble export.  Every layer
+shares the same retry budget: ``attempt`` is incremented once per node_code
+run, not once per layer, and every red gate routes to the same escalation node.
 """
 
 import logging
@@ -54,14 +55,14 @@ def route_after_plan(state: IssueState) -> str:
 def route_after_detect_stack(state: IssueState) -> str:
     """
     After node_detect_stack:
-      - stack includes PHP (php / fullstack / unknown) → "phpunit_test"
-      - frontend-only stack (vue)                      → "vitest_test"
+      - run_phpunit (the change touched PHP, or nothing else applies) → "phpunit_test"
+      - frontend-only change, or a "vue" stack                          → "vitest_test"
 
     The "vue" branch is the whole point of stack detection: a repository with
     no composer.json cannot run PHPUnit, and forcing it through that layer
-    burned every retry and drove the issue to permanent failure.  "unknown"
-    keeps the PHP layer so an unclassified change is still tested rather than
-    waved through to commit.
+    burned every retry and drove the issue to permanent failure.  run_phpunit
+    is True whenever the frontend layers do not run, so an unclassified change
+    is still tested rather than waved through to commit.
 
     node_detect_stack pins run_phpunit=True when no files were written, which
     routes here to node_test's short-circuit guard — the attempt then fails
@@ -78,7 +79,7 @@ def route_after_phpunit(state: IssueState) -> str:
     """
     After node_test (PHPUnit):
       - passed + API surface touched → "openapi_test"
-      - passed + .vue files present  → "vitest_test"
+      - passed + frontend touched    → "vitest_test"
       - passed + backend only        → "commit"
       - failed + retries remain      → "on_layer_failure"
       - failed + no retries          → "failure"
@@ -87,7 +88,7 @@ def route_after_phpunit(state: IssueState) -> str:
         if state.get("run_openapi", False):
             logger.debug("route_after_phpunit → openapi_test")
             return "openapi_test"
-        if state.get("has_vue_files", False):
+        if state.get("run_frontend", False):
             logger.debug("route_after_phpunit → vitest_test")
             return "vitest_test"
         logger.debug("route_after_phpunit → commit")
@@ -100,7 +101,7 @@ def route_after_phpunit(state: IssueState) -> str:
 def route_after_openapi(state: IssueState) -> str:
     """
     After node_openapi_test:
-      - passed + .vue files present → "vitest_test"
+      - passed + frontend touched   → "vitest_test"
       - passed + backend only       → "commit"
       - failed + retries remain     → "on_layer_failure"
       - failed + no retries         → "failure"
@@ -110,7 +111,7 @@ def route_after_openapi(state: IssueState) -> str:
     consumes a retry exactly like a failing assertion.
     """
     if state.get("openapi_passed", False):
-        if state.get("has_vue_files", False):
+        if state.get("run_frontend", False):
             logger.debug("route_after_openapi → vitest_test")
             return "vitest_test"
         logger.debug("route_after_openapi → commit")

@@ -15,9 +15,10 @@ a human writing a single line of code.
 GitLab issue (labelled, opt-in)
   → bootstrap             scaffold or top-up the Laravel app
   → load skills            vendored corpus + URLs from the issue
+  → decide scope           [backend | frontend | fullstack]  issue text, confirmed by the planner
   → generate plan          [Local LLM → DeepSeek → Claude Sonnet]
   → generate code          [Local LLM → DeepSeek → Claude Sonnet]
-  → detect stack           [php | vue | fullstack]
+  → detect layers          from the files the change touched
   → run the applicable test layers, sequential gates:
         PHPUnit → OpenAPI → Vitest → Playwright
   → all green: commit + push + GitLab MR (body: Closes #<iid>) + close issue
@@ -25,15 +26,45 @@ GitLab issue (labelled, opt-in)
   → all retries exhausted: remove lock label, comment failure, return to pending
 ```
 
-Stack detection is automatic — the issue never declares it. A backend change
-runs PHPUnit and the OpenAPI gate; a **frontend-only change skips PHPUnit
-entirely** and runs Vitest and Playwright; a change touching both runs all four.
+Test layers follow the files the attempt wrote — not the repository, not the
+scope. A PHP-only change runs PHPUnit (→ OpenAPI when it touches the `/api`
+surface); a **frontend-only change skips PHPUnit** and runs Vitest →
+Playwright, also in a Laravel repository; a change touching both sides
+(a Blade view or `routes/web.php` counts as both) runs all four; a change
+touching neither side (a README only) runs PHPUnit, so nothing reaches commit
+untested. A repository with no PHP at all always runs Vitest → Playwright.
 Vue-only issues are ordinary work.
+
+The **scope** (`backend`, `frontend`, `fullstack`) is decided offline from the
+issue text, then confirmed or corrected by the planner on line 1 of its plan.
+It narrows the prompts and reference documents to the side the issue is about;
+it never gates a test layer. When a layer outside the scope fails, the retry
+widens the scope to `fullstack`. Uncertain issues land on `fullstack`, the
+prompt every issue received before scopes existed. An issue can pin its scope
+with a `Scope: frontend` line. Every run logs one line:
+
+```
+SCOPE: frontend · GitLab issue #42 · issue text: frontend (frontend signals: button, colour) · planner: frontend
+```
+
+```bash
+docker-compose logs -f nesti-orchestrator | grep 'SCOPE:'
+```
+
+### Documentation files
+
+`README.md`, `CHANGELOG.md` and anything under `docs/` change only when the
+issue asks for it — name the file. Otherwise the prompt forbids touching them,
+even when a plan or a past solution lists them; the `/api` contract is
+documented by Scramble from the code. The scaffold bootstrap no longer copies
+Laravel's skeleton `README.md` over the project's, and a retry that drops a
+committed file restores its original content instead of deleting it.
 
 Conversation history is stored in Redis per issue. When tests fail and the
 pipeline retries, the model sees its previous attempt and the failure output.
-Retries prune stale files: a file the previous attempt wrote and the new
-attempt does not re-emit is deleted, so a renamed migration cannot leave two
+Retries prune stale files: a file the previous attempt created and the new
+attempt does not re-emit is deleted, and a committed file it edited is
+restored from `HEAD`, so a renamed migration cannot leave two
 `create_<table>_table` migrations behind.
 
 ---
@@ -163,7 +194,7 @@ the CPU — offline, no API cost, weights baked into the images):
 
 | Tier | Store | Contents | Written by | Read by |
 |------|-------|----------|------------|---------|
-| Long-term docs | Qdrant (`nesti-qdrant`, collection `nesti_docs`) | the `skills/` corpus, chunked and embedded | `scripts/index_skills.py` | `plan`, `code` (filtered by detected stack) |
+| Long-term docs | Qdrant (`nesti-qdrant`, collection `nesti_docs`) | the `skills/` corpus, chunked and embedded | `scripts/index_skills.py` | `plan`, `code` (filtered by the issue's scope) |
 | Solution cache | Redis 8 query engine (`nesti_solution_idx`) | subject, stack, MR URL and plan of every merged issue; TTL 90 days | `commit` | `plan` |
 | Episodic memory | Redis 8 query engine (`nesti_episode_idx`) | condensed output of each failed attempt of the issue in flight | `on_layer_failure` | `code` (older attempts only) |
 
@@ -189,7 +220,8 @@ The seven `memory_*` MCP tools expose the same stores.
 
 ## Frontend Testing
 
-When generated code contains `.vue` files, two extra layers run automatically:
+When the change touches the frontend in a repository with Vue, two extra layers
+run (rules in [How it works](#how-it-works)):
 
 | Layer | Image | Base | What it covers |
 |-------|-------|------|----------------|
@@ -250,7 +282,8 @@ mcp_server/
   Dockerfile               <- standalone nesti-mcp container
 conversation_store.py      <- Redis-backed per-issue message history
 llm_client.py              <- provider cascade with multi-turn support
-prompt_builder.py          <- system + user prompt construction (Laravel 13 + PrimeVue 5 role)
+issue_scope.py             <- backend/frontend/fullstack scope of an issue + documentation-request check
+prompt_builder.py          <- scope-composed system + user prompts with a TASK SCOPE block
 skill_loader.py            <- URL extraction + markdown fetching from issue text
 skill_catalog.py           <- deterministic offline skill selection from vendored corpus
 embedding.py               <- shared fastembed embedder for both memory tiers

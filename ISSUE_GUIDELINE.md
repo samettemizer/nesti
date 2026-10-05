@@ -199,21 +199,37 @@ to the correct v5 documentation** — but prefer the v5 name in new issues:
 | `Calendar` | `DatePicker` | Both resolve to the DatePicker doc |
 | `OrgChart` | `OrganizationChart` | Import path: `primevue/organizationchart` |
 
-### Stack detection
+### Scope and test layers
 
-Detection is automatic. If the generated code contains `.vue` files, the
-frontend test layers run. No declaration is needed in the issue.
+Nesti decides a **scope** — `backend`, `frontend` or `fullstack` — from the
+issue text before planning, and the planner confirms or corrects it. The scope
+narrows the prompts and reference documents to the side the issue is about;
+an uncertain issue lands on `fullstack`. To state it explicitly, add a line
+`Scope: backend`, `Scope: frontend` or `Scope: fullstack`, or write
+"frontend-only change" / "no backend changes". A negated mention
+("Do NOT change the database schema") is not read as a signal.
 
-| Your issue produces | Layers that run |
-|---------------------|-----------------|
-| PHP only | PHPUnit → OpenAPI (if API routes touched) |
-| Vue only (no PHP) | Vitest → Playwright |
-| Both (fullstack) | PHPUnit → OpenAPI → Vitest → Playwright |
+The scope never gates a test. The layers follow the files the change touched:
+
+| The change touches | Layers that run |
+|--------------------|-----------------|
+| PHP only | PHPUnit → OpenAPI (if `/api` routes, controllers, resources or requests touched) |
+| Frontend only (`.vue`, JS/CSS, `resources/js/`, `e2e/`, `package.json`), repository has Vue | Vitest → Playwright — PHPUnit skipped |
+| Both sides (a Blade view or `routes/web.php` counts as both) | PHPUnit → OpenAPI (if API touched) → Vitest → Playwright |
+| Neither side (e.g. README only; JS in a repository without Vue) | PHPUnit |
+| Repository with no PHP at all | Vitest → Playwright, always |
 
 **Frontend-only issues are fully supported.** Not every website change has a
 backend part. Do **not** add backend requirements to a purely visual or
 client-side issue just to give PHPUnit something to run — that only widens the
 change and makes failures harder to read.
+
+### Documentation files
+
+If `README.md`, `CHANGELOG.md` or anything under `docs/` should change, the
+issue must say so and name the file. Otherwise Nesti leaves them untouched —
+adding an endpoint is not such a request; the `/api` contract is documented by
+Scramble from the code itself.
 
 ---
 
@@ -425,10 +441,12 @@ Acceptance Criteria:
 
 ---
 
-### 3. Frontend Form (all four layers)
+### 3. Frontend Form (Vitest + Playwright layers)
 
-> PrimeVue Dialog posting to an existing API. Touches both frontend and
-> backend (Playwright drives the full app, seeder data matters).
+> PrimeVue Dialog posting to an existing API. A frontend-scoped issue: the
+> change runs Vitest → Playwright (Playwright drives the full app, seeder data
+> matters). PHPUnit joins only if the change touches PHP — e.g. registers a
+> seeder for E2E data; OpenAPI does not run, the `/api` surface is unchanged.
 
 **Title:**
 ```
@@ -509,6 +527,7 @@ Acceptance Criteria:
 | Skill URL unreachable or behind auth | Fetch fails, Telegram warning fires | Verify the URL is publicly accessible before submitting |
 | Skill document too large (>12,000 chars) | Content is truncated at 12,000 chars | Link only the relevant component page |
 | Multiple unrelated features in one issue | Planning and code quality degrade | Open a separate issue per feature |
+| Expecting the README to describe the new feature without asking | Documentation files are out of scope unless the issue requests them | Name the file: "Update README.md with …" |
 | Frontend criteria that assume database rows exist | The E2E sandbox contains only what `DatabaseSeeder` creates | Ask for a seeder or create data through the UI/API in the spec |
 | Frontend criteria written as implementation details | Cannot be converted into Playwright assertions | Describe observable user behaviour instead |
 | Asking for changes to an existing migration | Nesti refuses to edit existing migrations | Ask for a NEW migration that alters the table |

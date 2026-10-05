@@ -24,7 +24,8 @@ graph/nodes.py               nodes; each returns a partial IssueState
 graph/edges.py, builder.py   one router per test layer; compiled `graph`
 mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,skills,memory,oauth}.py
 llm_client.py                provider cascade — the only module that calls LLMs
-prompt_builder.py            plan + code prompts, FILE-block output format
+prompt_builder.py            plan + code prompts composed per task scope, FILE-block output format
+issue_scope.py               backend/frontend/fullstack task scope + documentation-request check
 conversation_store.py        Redis per-issue history (ai-dev:issue:{id}:messages)
 docker_runner.py             PHP sandbox, OpenAPI export, bootstrap, FILE-block writer
 frontend_runner.py           Vitest + Playwright sandboxes
@@ -87,9 +88,10 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     `ai-dev-redis`, and `hello-world-sandbox` must never be reintroduced (the
     `ai-dev:issue:` Redis key prefix is the one deliberate exception).
 17. **Never force PHPUnit on a stack that cannot run it.** `run_phpunit` is the
-    single gate; a `"vue"` stack skips the PHP layer. Hard-wiring
-    `detect_stack → phpunit_test` sends every frontend-only issue to permanent
-    failure.
+    single gate and is change-aware: False for a `"vue"` stack and for a
+    frontend-only change while the frontend layers run; True whenever the
+    frontend layers do not run. Hard-wiring `detect_stack → phpunit_test`
+    sends every frontend-only issue to permanent failure.
 18. **Never scan the workspace without pruning** `node_modules` and `vendor`
     (see `rule://frontend-testing`) — a bare `rglob("*.vue")` misdetects installed
     dependencies as project source from the second attempt onward.
@@ -151,6 +153,15 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     login state at construction strands `nesti /provider login|logout` behind
     a container restart, because `graph/nodes.py` holds one module-level
     `LLMClient`.
+29. **The task scope shapes prompts only — never a test gate.** Layers follow
+    the files the change touched (`run_phpunit` / `run_openapi` /
+    `run_frontend`), not the repository and not the scope. An uncertain scope
+    is `fullstack`; a narrow scope is widened to `fullstack` when a layer
+    outside it fails. `node_plan` emits exactly one `SCOPE:` log line per run.
+30. **README.md, CHANGELOG.md and `docs/` stay out of a change** unless
+    `issue_scope.documentation_request` finds the issue asking for them.
+    `_prune_stale_files` restores committed files (`git checkout HEAD --`),
+    never deletes them, and the scaffold never copies the skeleton README.
 
 ---
 
@@ -161,6 +172,8 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `task_engine.py` | `graph.builder.graph` | `graph.invoke(initial_state)` → final `IssueState` dict |
 | `graph/nodes.py` | `graph/tools.py` | Returns `{"success": bool, ...}` — always |
 | `graph/nodes.py` | `llm_client.py` | `generate_plan/code(system, user, messages=None)` → `str` |
+| `graph/nodes.py` | `issue_scope.py` | `classify_issue()` / `declared_scope()` never raise; scope ∈ `backend`\|`frontend`\|`fullstack` |
+| `graph/nodes.py` | `prompt_builder.py` | `build_plan_prompt(..., scope, scope_evidence)` / `build_code_prompt(..., scope)` → `(system, user)` |
 | `graph/nodes.py` | `conversation_store.py` | `append()` → updated `list[dict]` |
 | `graph/nodes.py` | `docker_runner.py` | `write_files()` → `(bool, list[str])` |
 | `graph/nodes.py` | `docker_runner.py` | `run_tests()` → `(bool, str)` |

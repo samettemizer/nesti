@@ -13,8 +13,10 @@ All flow control now lives in graph/builder.py:
                                 commit               failure
                                     └──→ cleanup ←──────┘
 
-bootstrap guarantees the clone is a Laravel application; detect_stack selects
-the applicable layers, so a PHP-only change never starts a Node container, a
+bootstrap guarantees the clone is a Laravel application; plan decides the
+issue's scope (backend / frontend / fullstack) that narrows the prompts and logs
+it as one ``SCOPE:`` line; detect_stack selects the layers from the files the
+change touched, so a backend change never starts a Node container, a
 frontend-only change never runs PHPUnit, and a change that did not touch the
 API surface never pays for a Scramble export.
 
@@ -75,6 +77,7 @@ class TaskEngine:
             "subject":        subject,
             "skills":         [],
             "plan":           "",
+            "scope":          "fullstack",
             "code_response":  "",
             "repo_path":      "",
             "branch_name":    "",
@@ -87,6 +90,7 @@ class TaskEngine:
             "has_vue_files":  False,
             "stack":          "php",
             "run_phpunit":    True,
+            "run_frontend":   False,
             "is_laravel":        False,
             "bootstrapped":      False,
             "has_api_routes":    False,

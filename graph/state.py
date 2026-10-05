@@ -24,19 +24,30 @@ Design notes
   no-FILE-blocks retry-with-feedback behaviour.
 
 • ``run_phpunit`` (Phase 4) is stored next to the descriptive ``stack`` label
-  because the two answer different questions.  ``stack`` says what the code
-  *is*; ``run_phpunit`` says whether the backend layer can be executed at all.
-  A frontend-only repository has no composer.json, so forcing the PHP layer on
-  it would fail every attempt and end in permanent failure — keeping the flag
-  explicit is what makes Vue-only issues reachable.
+  because the two answer different questions.  ``stack`` says what the
+  repository *is*; ``run_phpunit`` says whether the backend layer runs for
+  this change.  A frontend-only repository has no composer.json, so forcing
+  the PHP layer on it would fail every attempt and end in permanent failure —
+  keeping the flag explicit is what makes Vue-only issues reachable.
+  ``run_frontend`` is its counterpart for Vitest → Playwright: it follows
+  the files the change touched, not the mere presence of .vue files, so a
+  backend change in a Vue repository never pays for two Node containers.
 
 • The Phase 5 flags follow the same "descriptive label vs. routing gate"
   split.  ``is_laravel`` says what the repository *is*; ``run_openapi`` says
   whether the OpenAPI layer applies to *this attempt* — it needs a Laravel
   app, a routes/api.php, and a code change that actually touched the API
-  surface.  ``written_files`` exists to answer that last question: without the
-  repo-relative paths from the previous node_code run, every attempt would
-  re-export the document even for a pure CSS change.
+  surface.  ``written_files`` exists to answer that last question (and the
+  two gates above): without the repo-relative paths from the previous
+  node_code run, every attempt would re-export the document even for a pure
+  CSS change.
+
+• ``scope`` (backend | frontend | fullstack) shapes the PROMPTS only: which
+  rules, standards, plan sections, reference docs and retrieved chunks the
+  planner and coder receive.  It never gates a test layer — the files do —
+  so a misjudged scope cannot skip a test.  node_plan sets it (issue text,
+  then the planner's ``SCOPE:`` line); node_on_layer_failure widens it when
+  a layer outside it fails.
 """
 
 from typing import TypedDict
@@ -51,6 +62,7 @@ class IssueState(TypedDict, total=False):
     # ── Derived in nodes ───────────────────────────────────────────────────
     skills: list                       # Skill objects from skill_loader
     plan: str                          # planner output
+    scope: str                         # "backend" | "frontend" | "fullstack" — prompts only
     code_response: str                 # latest coder output
     repo_path: str                     # local clone path
     branch_name: str                   # git branch
@@ -62,7 +74,8 @@ class IssueState(TypedDict, total=False):
     # ── Stack detection (Phase 4) ──────────────────────────────────────────
     has_vue_files: bool                # True if the workspace contains .vue files
     stack: str                         # "php" | "vue" | "fullstack" | "unknown"
-    run_phpunit: bool                  # False only for the "vue" stack
+    run_phpunit: bool                  # PHP layer applies to this change (never for "vue")
+    run_frontend: bool                 # Vitest + Playwright apply to this change
 
     # ── Laravel detection / bootstrap (Phase 5) ────────────────────────────
     is_laravel: bool                   # repository contains artisan

@@ -33,12 +33,13 @@ Test layering (Phase 4 + 5)
 ───────────────────────────
 node_bootstrap runs right after node_setup and guarantees the clone is a
 Laravel application; node_detect_stack then runs between node_code and the
-test layers and decides which of them apply:
+test layers and decides which of them apply to the files the attempt wrote:
 
-    php        → phpunit [→ openapi]
-    vue        → vitest → playwright        (phpunit skipped entirely)
-    fullstack  → phpunit [→ openapi] → vitest → playwright
-    unknown    → phpunit                    (legacy default; never no-tests)
+    PHP touched            → phpunit [→ openapi]
+    frontend touched       → vitest → playwright     (needs Vue in the repo)
+    both touched           → phpunit [→ openapi] → vitest → playwright
+    neither applies        → phpunit                 (never no-tests)
+    "vue" stack            → vitest → playwright     (phpunit skipped entirely)
 
 The optional openapi layer runs when the attempt touched routes/api.php or an
 app/Http/{Controllers,Resources,Requests} file in a Laravel repo that has an
@@ -47,6 +48,13 @@ API surface.
 Every layer failure funnels into one escalate-and-retry node
 (node_on_layer_failure), so the retry budget (max_attempts) is shared across
 all four layers rather than per layer.
+
+Task scope
+──────────
+node_plan decides whether the issue is backend, frontend or fullstack work
+(issue text first, then the planner's ``SCOPE:`` line) and logs it as the run's
+one ``SCOPE:`` line.  The scope narrows the prompts, the reference docs and the
+retrieved chunks; it never gates a test layer.
 """
 
 import logging
@@ -54,6 +62,8 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+
+import git
 
 from graph.state import IssueState
 from graph.tools import (
@@ -66,6 +76,7 @@ from graph.tools import (
     tool_memory_remember_failure, tool_memory_recall_failures,
     tool_memory_forget_episodes,
 )
+from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
 from conversation_store import ConversationStore
 from prompt_builder import build_plan_prompt, build_code_prompt, drop_injected_chunks
@@ -114,10 +125,41 @@ _NO_FILE_BLOCKS_OUTPUT = (
     "full using the FILE format."
 )
 
+# Reference-doc lanes per scope: (PrimeVue component docs, Laravel topic docs).
+# A backend issue spends no catalog budget on PrimeVue pages and a frontend
+# issue none on Laravel topics.  The code prompt keeps one topic doc instead of
+# two to leave room for the plan itself.
+_PLAN_CATALOG_LIMITS = {"backend": (0, 2), "frontend": (3, 0), "fullstack": (3, 2)}
+_CODE_CATALOG_LIMITS = {"backend": (0, 1), "frontend": (3, 0), "fullstack": (3, 1)}
+
+# Qdrant payload filter per scope.  A fullstack scope searches both stacks.
+_SCOPE_DOC_STACK = {"backend": "php", "frontend": "vue"}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _cleared_layer_outputs() -> dict:
+    """
+    Empty results for every test layer, merged into node_code's return.
+
+    The layers follow the files each attempt writes, so one attempt can run
+    Vitest and the next only PHPUnit.  A red output left over from an earlier
+    attempt would then be fed back as this attempt's failure
+    (``_last_failure_output`` picks the newest red layer with any output),
+    widen the scope on the wrong side, and reach the MR body as a layer that
+    never ran on the merged code.  Clearing them in node_code's *return* keeps
+    its own episodic-recall query on the failure that led to it.
+    """
+    return {
+        "test_output": "",
+        "openapi_output": "",
+        "openapi_paths": [],
+        "vitest_output": "",
+        "playwright_output": "",
+    }
+
 
 def _select_catalog_skills(
     text: str, max_component_docs: int, max_topic_docs: int, max_practice_docs: int = 0
@@ -175,11 +217,29 @@ def _retrieve_chunks(
     return chunks
 
 
+def _committed_paths(root: str, relatives: list[str]) -> set[str]:
+    """
+    The subset of *relatives* (normalised, repo-relative) committed in the
+    clone's HEAD.  Empty outside a git repository or before its first commit.
+    """
+    if not relatives:
+        return set()
+    try:
+        with git.Repo(root) as repo:
+            if not repo.head.is_valid():
+                return set()
+            listed = repo.git.ls_tree("-r", "-z", "--name-only", "HEAD", "--", *relatives)
+    except (git.InvalidGitRepositoryError, git.NoSuchPathError, git.GitCommandError) as exc:
+        logger.debug("No committed baseline for the stale files: %s", exc)
+        return set()
+    return {path for path in listed.split("\0") if path}
+
+
 def _prune_stale_files(
     previous: list[str], current: list[str], repo_path: str
 ) -> list[str]:
     """
-    Delete files the previous attempt wrote that this attempt did not re-emit.
+    Revert files the previous attempt wrote that this attempt did not re-emit.
 
     The workspace persists across retries, so without this an attempt that
     renames a file leaves both versions behind.  For Laravel that is fatal
@@ -189,21 +249,49 @@ def _prune_stale_files(
 
     Retries are asked for the complete set of affected files (see
     ``ConversationStore.append_test_failure``), so anything the new response
-    omits is genuinely obsolete.  Directories left empty are removed too, so a
-    renamed package does not leave a stray tree in the Merge Request.
+    omits is no longer part of the change.  "Reverted" depends on the file:
+
+    * committed in the clone (README.md, routes/api.php, …) → restored to its
+      committed content.  Deleting it would put a deletion no issue asked for
+      into the Merge Request — an unrequested README edit dropped on a retry
+      would otherwise come back as a deleted README;
+    * anything else → deleted, and directories left empty go with it, so a
+      renamed package does not leave a stray tree in the Merge Request.
     """
-    stale = [path for path in previous if path not in set(current)]
-    removed: list[str] = []
     root = os.path.abspath(repo_path)
 
-    for relative in stale:
-        target = os.path.abspath(os.path.join(root, relative))
+    def _normalised(relative: str) -> str:
+        return os.path.relpath(os.path.abspath(os.path.join(root, relative)), root)
+
+    # Compared after normalisation: "./README.md" and "README.md" are one file,
+    # and reverting the spelling the current attempt did not use would undo
+    # the file it just wrote.
+    current_paths = {_normalised(relative) for relative in current}
+    stale: dict[str, str] = {}
+    for relative in previous:
+        normalised = _normalised(relative)
         # Never step outside the clone, whatever the model emitted as a path.
-        if not target.startswith(root + os.sep) or not os.path.isfile(target):
+        outside = normalised == os.pardir or normalised.startswith(os.pardir + os.sep)
+        if normalised not in current_paths and not outside:
+            stale[relative] = normalised
+    committed = _committed_paths(root, sorted(set(stale.values())))
+    reverted: list[str] = []
+
+    for relative, normalised in stale.items():
+        target = os.path.join(root, normalised)
+        if normalised in committed:
+            try:
+                with git.Repo(root) as repo:
+                    repo.git.checkout("HEAD", "--", normalised)
+                reverted.append(relative)
+            except git.GitCommandError as exc:
+                logger.warning("Could not restore stale file %s: %s", relative, exc)
+            continue
+        if not os.path.isfile(target):
             continue
         try:
             os.remove(target)
-            removed.append(relative)
+            reverted.append(relative)
         except OSError as exc:
             logger.warning("Could not remove stale file %s: %s", relative, exc)
             continue
@@ -216,7 +304,7 @@ def _prune_stale_files(
                 break
             parent = os.path.dirname(parent)
 
-    return removed
+    return reverted
 
 
 # Directories whose contents the coder needs to know about, with the cap on how
@@ -471,20 +559,42 @@ def node_load_skills(state: IssueState) -> dict:
     return {"skills": skills}
 
 
+def _log_scope(issue_id: int, scope: str, decision: ScopeDecision, planner: str) -> None:
+    """
+    Emit the run's one SCOPE line: the scope the coder works in first, then its
+    two sources — the issue-text classification and the planner's declaration
+    ("no declaration" / "failed" when there is none).
+    """
+    logger.info(
+        "SCOPE: %s · GitLab issue #%s · issue text: %s (%s) · planner: %s",
+        scope, issue_id, decision.scope, decision.evidence(), planner,
+    )
+
+
 def node_plan(state: IssueState) -> dict:
     """
     Generate implementation plan via LLM planner chain.
     Appends plan turns to the shared conversation history.
+
+    The issue is classified first (issue_scope, offline), so the plan prompt,
+    its reference docs and its retrieved chunks are narrowed to the side of the
+    application the issue changes.  The planner confirms or corrects that
+    scope on line 1 of its plan; the result is the scope the coder works in,
+    logged as the run's one ``SCOPE:`` line.
     """
     logger.debug("→ node_plan")
     issue_id = state["issue_id"]
     logger.info("Phase 1 – Generating plan for issue #%s …", issue_id)
 
-    issue_text = f"{state.get('subject', '')}\n{state['issue'].get('description', '') or ''}"
+    subject = state.get("subject", "")
+    description = state["issue"].get("description", "") or ""
+    issue_text = f"{subject}\n{description}"
+    decision = classify_issue(subject, description)
+    components, topics = _PLAN_CATALOG_LIMITS[decision.scope]
     catalog_skills = _select_catalog_skills(
         issue_text,
-        max_component_docs=3,
-        max_topic_docs=2,
+        max_component_docs=components,
+        max_topic_docs=topics,
         max_practice_docs=1,
     )
     repo_context = _repo_inventory(state.get("repo_path", ""))
@@ -495,7 +605,9 @@ def node_plan(state: IssueState) -> dict:
     if not past["success"]:
         logger.warning("Solution cache lookup failed: %s", past["error"])
     past_solutions = past["result"] if past["success"] else []
-    retrieved = _retrieve_chunks(issue_text, catalog_skills)
+    retrieved = _retrieve_chunks(
+        issue_text, catalog_skills, stack=_SCOPE_DOC_STACK.get(decision.scope, "")
+    )
     if past_solutions or retrieved:
         logger.info(
             "Memory: %d past solution(s), %d doc chunk(s) injected into the plan prompt.",
@@ -514,6 +626,8 @@ def node_plan(state: IssueState) -> dict:
         repo_context=repo_context,
         retrieved_chunks=retrieved,
         past_solutions=past_solutions,
+        scope=decision.scope,
+        scope_evidence=decision.evidence(),
     )
     prior = _store.load(issue_id)
     if prior:
@@ -530,54 +644,65 @@ def node_plan(state: IssueState) -> dict:
     except RuntimeError as exc:
         # All planners failed – route_after_plan will send us to node_failure.
         logger.error("All planners failed for issue #%s: %s", issue_id, exc)
+        _log_scope(issue_id, decision.scope, decision, "failed")
         logger.debug("← node_plan (failed)")
-        return {"plan": "", "error": str(exc), "messages": messages, **memory_counts}
+        return {
+            "plan": "", "scope": decision.scope, "error": str(exc),
+            "messages": messages, **memory_counts,
+        }
 
     logger.debug("Plan:\n%s", plan)
+    declared = declared_scope(plan)
+    scope = declared or decision.scope
+    _log_scope(issue_id, scope, decision, declared or "no declaration")
     messages = _store.append(issue_id, "assistant", plan)
     logger.debug("← node_plan")
-    return {"plan": plan, "messages": messages, **memory_counts}
+    return {"plan": plan, "scope": scope, "messages": messages, **memory_counts}
 
 
 def node_code(state: IssueState) -> dict:
     """
     Generate code via LLM coder chain.
     Writes FILE blocks into the repo. Appends code turns to the history.
+    The prompt, its reference docs and its retrieved chunks follow ``scope``.
     """
     logger.debug("→ node_code")
     issue_id = state["issue_id"]
     attempt = state.get("attempt", 0) + 1
     max_attempts = state.get("max_attempts", _ENV_MAX_ATTEMPTS)
+    scope = state.get("scope", "fullstack")
     logger.info(
-        "Phase 2 – Generating code (attempt %d/%d, provider: %s) …",
+        "Phase 2 – Generating code (attempt %d/%d, scope: %s, provider: %s) …",
         attempt,
         max_attempts,
+        scope,
         _llm.current_coder_name,
     )
 
     # The plan is part of the haystack here: it names the PrimeVue components
-    # and Laravel artefacts the issue text may only have implied.  One topic
-    # doc instead of two keeps room for the plan itself in the coder context.
+    # and Laravel artefacts the issue text may only have implied.
     haystack = (
         f"{state.get('subject', '')}\n"
         f"{state['issue'].get('description', '') or ''}\n"
         f"{state.get('plan', '')}"
     )
+    components, topics = _CODE_CATALOG_LIMITS.get(scope, _CODE_CATALOG_LIMITS["fullstack"])
     catalog_skills = _select_catalog_skills(
         haystack,
-        max_component_docs=3,
-        max_topic_docs=1,
+        max_component_docs=components,
+        max_topic_docs=topics,
     )
     # Rebuilt every attempt: the previous attempt's own files are part of the
     # repository now, and a retry must see them rather than re-inventing them.
     repo_context = _repo_inventory(state.get("repo_path", ""))
 
-    # Phase 8 memory.  The stack payload filter engages only from attempt 2:
-    # before node_detect_stack has run, ``stack`` is merely the seeded default
-    # ("php"), and filtering on it would hide every PrimeVue doc from a Vue
-    # issue's first attempt.
+    # Phase 8 memory.  A narrow scope filters the doc search from the first
+    # attempt.  A fullstack scope falls back to the detected stack, and only
+    # from attempt 2: before node_detect_stack has run, ``stack`` is merely the
+    # seeded default ("php"), and filtering on it would hide every PrimeVue doc
+    # from a Vue issue's first attempt.
     detected = state.get("stack", "") if attempt > 1 else ""
-    stack_filter = detected if detected in ("php", "vue") else ""
+    stack_filter = _SCOPE_DOC_STACK.get(scope) or (detected if detected in ("php", "vue") else "")
     retrieved = _retrieve_chunks(haystack, catalog_skills, stack=stack_filter)
     # Attempt N-1 just failed and is verbatim in the history already, so
     # episodic recall has something older to offer only from attempt 3 on.
@@ -611,6 +736,7 @@ def node_code(state: IssueState) -> dict:
         repo_context=repo_context,
         retrieved_chunks=retrieved,
         recalled_failures=recalled,
+        scope=scope,
     )
     messages = _store.append(issue_id, "user", user_prompt)
 
@@ -634,6 +760,7 @@ def node_code(state: IssueState) -> dict:
             "files_written": False,
             "attempt": max_attempts,
             "error": str(exc),
+            **_cleared_layer_outputs(),
             **memory_counts,
         }
 
@@ -658,7 +785,7 @@ def node_code(state: IssueState) -> dict:
         )
         if pruned:
             logger.info(
-                "Removed %d stale file(s) from the previous attempt: %s",
+                "Reverted %d stale file(s) from the previous attempt: %s",
                 len(pruned), ", ".join(pruned),
             )
 
@@ -672,16 +799,20 @@ def node_code(state: IssueState) -> dict:
         "coder_provider": attribution["provider"],
         "coder_model": attribution["model"],
         "coder_billing": attribution["billing"],
+        **_cleared_layer_outputs(),
         **memory_counts,
     }
 
 
 def node_detect_stack(state: IssueState) -> dict:
     """
-    Decide which test layers apply to the current workspace.
+    Decide which test layers apply to the files the last attempt wrote.
 
     Runs between node_code and the test layers.  Detection is automatic — the
-    developer never declares the stack in the issue.
+    developer never declares the stack in the issue, and the issue's scope
+    never decides a layer: a backend change skips Vitest and Playwright even
+    in a repository full of .vue files, a frontend-only change skips PHPUnit,
+    and a change on neither side still runs PHPUnit.
     """
     logger.debug("→ node_detect_stack")
 
@@ -694,6 +825,7 @@ def node_detect_stack(state: IssueState) -> dict:
             "has_vue_files": False,
             "stack": "unknown",
             "run_phpunit": True,
+            "run_frontend": False,
             "run_openapi": False,
         }
 
@@ -707,6 +839,7 @@ def node_detect_stack(state: IssueState) -> dict:
             "has_vue_files": False,
             "stack": "php",
             "run_phpunit": True,
+            "run_frontend": False,
             "run_openapi": False,
         }
 
@@ -714,6 +847,7 @@ def node_detect_stack(state: IssueState) -> dict:
     stack = detected["stack"]
     has_vue = detected["has_vue"]
     run_phpunit = detected["run_phpunit"]
+    run_frontend = detected["run_frontend"]
     run_openapi = detected["run_openapi"]
 
     logger.info(
@@ -722,7 +856,7 @@ def node_detect_stack(state: IssueState) -> dict:
         detected["source"],
         "yes" if run_phpunit else "skipped",
         "yes" if run_openapi else "skipped",
-        "yes" if has_vue else "skipped",
+        "yes" if run_frontend else "skipped",
         f" [{len(detected['vue_files'])} .vue file(s)]" if has_vue else "",
     )
     logger.debug("← node_detect_stack (stack=%s)", stack)
@@ -730,6 +864,7 @@ def node_detect_stack(state: IssueState) -> dict:
         "has_vue_files": has_vue,
         "stack": stack,
         "run_phpunit": run_phpunit,
+        "run_frontend": run_frontend,
         "is_laravel": detected["is_laravel"],
         "has_api_routes": detected["has_api_routes"],
         "run_openapi": run_openapi,
@@ -896,6 +1031,12 @@ def node_on_layer_failure(state: IssueState) -> dict:
 
     Every layer flag is reset so the next attempt is judged on its own results
     rather than inheriting a stale pass from the previous round.
+
+    The retry prompt must carry the standards of the layer that failed, so a
+    red layer outside the scope widens it: a frontend scope whose change broke
+    PHPUnit becomes fullstack.  An attempt that wrote no FILE blocks reports
+    through the PHPUnit label but says nothing about the backend; it never
+    widens.
     """
     logger.debug("→ node_on_layer_failure")
 
@@ -919,11 +1060,17 @@ def node_on_layer_failure(state: IssueState) -> dict:
         logger.warning("Failed to check provider usage quota: %s", quota["error"])
 
     layer, failure_output = _last_failure_output(state)
+    scope = state.get("scope", "fullstack")
+    widened = scope
+    if state.get("files_written", False):
+        side = "frontend" if layer.startswith(("Vitest", "Playwright")) else "backend"
+        widened = widen(scope, side)
     logger.info(
-        "Retry %d/%d – %s failed, escalating coder tier …",
+        "Retry %d/%d – %s failed, escalating coder tier%s …",
         state.get("attempt", 0),
         state.get("max_attempts", _ENV_MAX_ATTEMPTS) - 1,
         layer,
+        f"; scope widened {scope} → {widened}" if widened != scope else "",
     )
     messages = _store.append_test_failure(
         state["issue_id"], failure_output, layer=layer
@@ -939,6 +1086,7 @@ def node_on_layer_failure(state: IssueState) -> dict:
     logger.debug("← node_on_layer_failure (%s)", layer)
     return {
         "messages": messages,
+        "scope": widened,
         "test_passed": False,
         "openapi_passed": False,
         "vitest_passed": False,
@@ -997,6 +1145,7 @@ def node_commit(state: IssueState) -> dict:
             f"## Summary\n{provider_line}\n\n{state.get('plan', '')}\n\n"
             f"## Test output\n"
             f"_Stack: {state.get('stack', 'php')} · "
+            f"scope: {state.get('scope', 'fullstack')} · "
             f"Laravel: {state.get('is_laravel', False)} · "
             f"bootstrapped: {state.get('bootstrapped', False)} · "
             f"memory: {state.get('retrieved_chunks', 0)} doc chunk(s), "

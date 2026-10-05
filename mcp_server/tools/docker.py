@@ -26,11 +26,14 @@ def detect_stack(workspace_path: str, written_files: list[str] | None = None) ->
     """
     Detect which test layers apply to the code at workspace_path.
     Returns stack ("php" | "vue" | "fullstack" | "unknown"), has_vue, has_php,
-    run_phpunit, the list of .vue files found, and the Laravel / OpenAPI markers
-    is_laravel, has_api_routes, and run_openapi.
-    Pass written_files (the paths the coder just wrote) so run_openapi is True
-    only when the change actually touched the /api surface; omitting written_files
-    yields the conservative answer that assumes the surface was touched.
+    the list of .vue files found, the Laravel markers is_laravel and
+    has_api_routes, and three gates for the change: run_phpunit,
+    run_openapi and run_frontend (Vitest → Playwright).
+    Pass written_files (the paths the coder just wrote) so the gates follow
+    the change: a backend change skips the frontend layers, a frontend-only
+    change skips PHPUnit, and only an /api change runs OpenAPI. Omitting
+    written_files yields the conservative answer: every layer the repository
+    supports runs.
     Call this first to decide which of the run tools below to use.
     """
     return tool_detect_stack(workspace_path, written_files)

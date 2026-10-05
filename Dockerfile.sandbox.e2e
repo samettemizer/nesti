@@ -8,7 +8,8 @@
 #
 # Version contract: the browsers baked into this image are the ones shipped
 # with Playwright 1.50, so the generated package.json pins "@playwright/test"
-# to exactly "1.50.0" (enforced by CODING_SYSTEM_PROMPT).  The pin is exact,
+# to exactly "1.50.0" (enforced by the frontend coding prompt in
+# prompt_builder.py).  The pin is exact,
 # not "^1.50.0": a caret lets npm resolve a newer minor whose browser builds
 # this image does not carry, and Playwright then refuses to launch with
 # "Executable doesn't exist at /ms-playwright/…". That is not hypothetical —
