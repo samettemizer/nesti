@@ -5,6 +5,22 @@ The orchestrator now drives a Laravel 13 + PrimeVue 5 codebase: backend code is
 Laravel, frontend code is Vue 3 with PrimeVue components mounted through Laravel
 Vite.
 
+Task scope
+──────────
+  Both system prompts and the plan structure are composed for the issue's scope
+  (issue_scope.py): ``backend``, ``frontend`` or ``fullstack``.  A frontend
+  issue gets no database policy, no Laravel/Scramble rules and no PHPUnit
+  instructions; a backend issue gets no PrimeVue rules and no Vitest/Playwright
+  instructions; fullstack carries both — what every issue received before
+  scopes existed, and still the answer whenever the scope is uncertain.
+
+  Each system prompt carries a TASK SCOPE block right after its role: the side
+  of the application the change stays on, and documentation files (README.md,
+  CHANGELOG.md, docs/) out of the change unless the issue asks for them
+  (issue_scope.documentation_request).  The planner declares the scope of its
+  plan on line 1 (``SCOPE: …``); node_plan parses it, and the coding prompt
+  follows the plan.
+
 Context budget strategy
 ───────────────────────
   Planning phase  : DeepSeek API — generous budget, 15 000 chars of issue-URL
@@ -42,6 +58,7 @@ Context budget strategy
 
 import os
 
+from issue_scope import SCOPES, documentation_request
 from skill_loader import Skill, format_skills_for_prompt
 
 # ── Context budgets ────────────────────────────────────────────────────────────
@@ -67,9 +84,13 @@ _PRIMEVUE_MAJOR: str = "5"
 _GITLAB_PROJECT: str = os.environ.get("GITLAB_PROJECT_PATH", "the project")
 _DEFAULT_BRANCH: str = os.environ.get("GITLAB_DEFAULT_BRANCH", "main")
 
-# ── Shared rules block ─────────────────────────────────────────────────────────
-# Plain (non-f) string: no interpolation, no braces — nothing to escape.
-_RULES = """\
+# ── Prompt blocks ──────────────────────────────────────────────────────────────
+# Every system prompt is composed from these blocks for the issue's scope
+# (issue_scope.SCOPES): backend-only blocks never reach a frontend issue and vice
+# versa; fullstack carries both.  Plain (non-f) strings need no brace escaping;
+# the f-strings double the braces of literal JavaScript objects.
+
+_DATABASE_POLICY = """\
 DATABASE POLICY — schema work is allowed, and these rules are absolute:
 1. Schema changes go into NEW migrations under database/migrations. Never edit, rename, or
    delete a migration that already exists in the repository.
@@ -83,51 +104,165 @@ DATABASE POLICY — schema work is allowed, and these rules are absolute:
 6. Keep models in sync with the schema: $fillable, $casts, relationships, HasFactory.\
 """
 
-# ── System prompts ─────────────────────────────────────────────────────────────
+# ── TASK SCOPE ─────────────────────────────────────────────────────────────────
+_SCOPE_SUMMARY = {
+    "backend": "backend — the issue changes the Laravel backend only.",
+    "frontend": "frontend — the issue changes the user interface only.",
+    "fullstack": "fullstack — the issue may change both the Laravel backend and the Vue frontend.",
+}
 
-PLANNING_SYSTEM_PROMPT = f"""\
+# What a narrow scope keeps out of the change.  The plumbing a new screen needs
+# (a Blade view, a routes/web.php entry) counts as frontend work.
+_SCOPE_BOUNDARY = {
+    "backend": """\
+- No frontend files: no .vue component, JavaScript, CSS, page view, package.json change,
+  Vitest spec or Playwright spec. Those layers do not run for a backend change, so nothing
+  would verify such a file.""",
+    "frontend": """\
+- No backend files: no migration, model, controller, FormRequest, API Resource, service,
+  routes/api.php entry or PHPUnit test. The backend the UI needs is listed under Existing
+  Repository State; use it as it is. Page plumbing is frontend work: a Blade view or a
+  routes/web.php entry that serves the page is allowed.""",
+    "fullstack": "",
+}
+
+ # Models document their work by habit: without this rule nearly every new
+# endpoint also rewrote README.md, which no issue had asked for.
+_DOCUMENTATION_OUT_OF_SCOPE = """\
+- Documentation is out of scope: the issue does not ask for it. Do not create, modify or
+  delete README.md, CHANGELOG.md or any file under docs/ — not to describe what you add,
+  and not when a plan, a reference document or a past solution lists them."""
+
+_SCRAMBLE_DOCUMENTS_THE_API = """\
+- The /api contract is documented by Scramble from the code itself (FormRequest rules,
+  JsonResource shapes, PHPDoc): that is the only API documentation to write."""
+
+# ── Roles ──────────────────────────────────────────────────────────────────────
+_PLANNING_ROLE = {
+    "backend": f"""\
+You are a senior Laravel {_LARAVEL_MAJOR} architect working on the "{_GITLAB_PROJECT}" project.
+The repository IS a Laravel application; this issue concerns its backend.""",
+    "frontend": f"""\
+You are a senior PrimeVue {_PRIMEVUE_MAJOR} frontend architect working on the "{_GITLAB_PROJECT}" project.
+The repository IS a Laravel application whose frontend is Vue 3 with PrimeVue components
+mounted through Laravel Vite; this issue concerns that frontend.""",
+    "fullstack": f"""\
 You are a senior Laravel {_LARAVEL_MAJOR} architect and PrimeVue {_PRIMEVUE_MAJOR} frontend architect working on the
 "{_GITLAB_PROJECT}" project. The repository IS a Laravel application: backend code is Laravel,
-frontend code is Vue 3 with PrimeVue components mounted through Laravel Vite.
+frontend code is Vue 3 with PrimeVue components mounted through Laravel Vite.""",
+}
 
-Your task in this phase is to produce a detailed IMPLEMENTATION PLAN — no code yet.
+_CODING_ROLE = {
+    "backend": f"""\
+You are a senior Laravel {_LARAVEL_MAJOR} backend developer working on the "{_GITLAB_PROJECT}" project
+on the "{_DEFAULT_BRANCH}" branch.""",
+    "frontend": f"""\
+You are a senior Vue 3 + PrimeVue {_PRIMEVUE_MAJOR} frontend developer working on the "{_GITLAB_PROJECT}"
+project on the "{_DEFAULT_BRANCH}" branch. The repository is a Laravel application; its
+frontend is mounted through Laravel Vite.""",
+    "fullstack": f"""\
+You are a senior Laravel {_LARAVEL_MAJOR} + PrimeVue {_PRIMEVUE_MAJOR} developer working on the "{_GITLAB_PROJECT}" project
+on the "{_DEFAULT_BRANCH}" branch.""",
+}
 
-{_RULES}
-
-PLANNING STANDARDS:
-- Identify every file that needs to be created or modified, with a clear reason.
-- List all application layers involved (routes, controllers, services,
-  repositories, models, views, tests).
+# ── Planning ───────────────────────────────────────────────────────────────────
+_PLAN_COMMON_STANDARDS = """\
+- Identify only the files that need to be created or modified, each with a clear reason.
 - Flag any ambiguities or risks explicitly.
-- Define the test cases the implementation must satisfy, in the layers the
-  task actually touches: PHPUnit for PHP, Vitest (component) and Playwright
-  (E2E) for Vue.js. A frontend-only task defines no PHPUnit cases; a
-  backend-only task defines no Vitest or Playwright cases.
-- If skill documentation is supplied in the prompt, incorporate its guidance
-  into the plan and reference the source URL where relevant.
-- Name the Laravel artefacts explicitly: migration, model, factory, seeder, FormRequest, controller, API Resource, route entry, Blade view, Vue component.
-- For API work, state which `/api` routes are added or changed and what the OpenAPI document must contain after the change (Scramble derives it from FormRequest rules, JsonResource shapes, and PHPDoc).
-- For UI work, name the **PrimeVue components** to be used (by their PrimeVue {_PRIMEVUE_MAJOR} names) instead of describing raw HTML.
-- Test cases grouped by layer: PHPUnit (Feature/Unit) → OpenAPI → Vitest → Playwright; omit layers the task does not touch.
+- If skill documentation is supplied in the prompt, incorporate its guidance into the plan and
+  reference the source URL where relevant."""
 
+_PLAN_BACKEND_STANDARDS = """\
+- Name the Laravel artefacts explicitly: migration, model, factory, seeder, FormRequest,
+  controller, API Resource, route entry.
+- For API work, state which `/api` routes are added or changed and what the OpenAPI document
+  must contain after the change (Scramble derives it from FormRequest rules, JsonResource
+  shapes, and PHPDoc)."""
+
+_PLAN_FRONTEND_STANDARDS = f"""\
+- For UI work, name the **PrimeVue components** to be used (by their PrimeVue {_PRIMEVUE_MAJOR} names)
+  instead of describing raw HTML, and the Vue component files under resources/js/components/.
+- Name the existing routes and response shapes the UI relies on, as listed under Existing
+  Repository State."""
+
+_PLAN_TEST_STANDARDS = {
+    "backend": """\
+- Define the PHPUnit test cases (Feature/Unit) the implementation must satisfy, and the /api
+  routes the OpenAPI gate must find documented. A backend task defines no Vitest or
+  Playwright cases.""",
+    "frontend": """\
+- Define the Vitest (component) and Playwright (E2E) test cases the implementation must
+  satisfy, and where the E2E data comes from: the E2E database holds only what
+  DatabaseSeeder creates. A frontend task defines no PHPUnit cases.""",
+    "fullstack": """\
+- Define the test cases the implementation must satisfy, in the layers the task actually
+  touches, grouped by layer: PHPUnit (Feature/Unit) → OpenAPI → Vitest → Playwright. A
+  frontend-only task defines no PHPUnit cases; a backend-only task defines no Vitest or
+  Playwright cases.""",
+}
+
+_PLANNING_OUTPUT_FORMAT = """\
 OUTPUT FORMAT:
-- Plain markdown, numbered or bulleted lists where appropriate.
+- Line 1, alone: the scope of this plan — SCOPE: backend, SCOPE: frontend or SCOPE: fullstack.
+- Then plain markdown, numbered or bulleted lists where appropriate.
 - Do NOT write any code in this step.
-- Do NOT include pleasantries or meta-commentary.\
-"""
+- Do NOT include pleasantries or meta-commentary."""
 
-CODING_SYSTEM_PROMPT = f"""\
-You are a senior developer working on the "{_GITLAB_PROJECT}" project
-on the "{_DEFAULT_BRANCH}" branch.
+# The user-prompt plan structure: a backend plan has no frontend section to fill
+# with "none", and a frontend plan no database or API-surface section.
+_PLAN_STRUCTURE = {
+    "backend": (
+        "Objective – one sentence",
+        'Database changes – migrations (table/columns/indexes), factories, seeders; "none" if not needed',
+        "Backend files to create/modify – path + purpose (model, FormRequest, controller, resource, route)",
+        'API surface – each /api route: method, URI, request shape, response shape; "none" if not needed',
+        "Implementation steps per file (method names, logic, data flow)",
+        "Test cases that must pass (PHPUnit; OpenAPI when /api routes change) – file + test names",
+        "Risks or ambiguities",
+    ),
+    "frontend": (
+        "Objective – one sentence",
+        "Frontend files to create/modify – path + which PrimeVue components are used",
+        'Backend used as it is – the existing routes and response shapes the UI calls; "none" if not needed',
+        "Implementation steps per file (props, events, state, data flow)",
+        "Test cases that must pass (Vitest / Playwright) – file + test names, and where the E2E data comes from",
+        "Risks or ambiguities",
+    ),
+    "fullstack": (
+        "Objective – one sentence",
+        'Database changes – migrations (table/columns/indexes), factories, seeders; "none" if not needed',
+        "Backend files to create/modify – path + purpose (model, FormRequest, controller, resource, route)",
+        'API surface – each /api route: method, URI, request shape, response shape; "none" if not needed',
+        "Frontend files to create/modify – path + which PrimeVue components are used",
+        "Implementation steps per file (method names, logic, data flow)",
+        "Test cases per layer that must pass (PHPUnit / OpenAPI / Vitest / Playwright) – file + test names",
+        "Risks or ambiguities",
+    ),
+}
 
-{_RULES}
+_SCOPE_DECLARATION = {
+    "backend": (
+        "SCOPE: backend — or SCOPE: fullstack when the issue cannot be solved without frontend "
+        "changes (say why under Risks)"
+    ),
+    "frontend": (
+        "SCOPE: frontend — or SCOPE: fullstack when the issue cannot be solved without backend "
+        "changes, e.g. the endpoint the UI calls does not exist yet (say why under Risks)"
+    ),
+    "fullstack": (
+        "SCOPE: fullstack — or SCOPE: backend / SCOPE: frontend when the plan changes only that side"
+    ),
+}
 
+# ── Coding ─────────────────────────────────────────────────────────────────────
+_CODING_STANDARDS = """\
 CODING STANDARDS:
 - Match the existing code style of the project.
 - Do not create unnecessary files.
 - Every change ships with tests in its own layer (see TESTING below).
-- If unsure about something, state your assumptions explicitly instead of guessing.
+- If unsure about something, state your assumptions explicitly instead of guessing."""
 
+_BACKEND_STANDARDS = """\
 LARAVEL BACKEND (PHP):
 - PSR-12. Controllers in app/Http/Controllers stay thin; business logic goes to app/Services
   or model methods.
@@ -153,8 +288,9 @@ API DOCUMENTATION (Scramble, dedoc/scramble is already installed):
 - Do NOT write a PHPUnit test that inspects the generated OpenAPI document. Verifying it is
   the pipeline's own job, and the document's path keys are relative to the server URL, so an
   assertion like assertArrayHasKey('/api/tasks', $doc['paths']) fails even when the route is
-  correctly documented. tests/Feature/OpenApiDocumentationTest.php already covers the wiring.
+  correctly documented. tests/Feature/OpenApiDocumentationTest.php already covers the wiring."""
 
+_FRONTEND_STANDARDS = f"""\
 PRIMEVUE FRONTEND (Vue 3):
 - Vue 3 Composition API with <script setup>. Never @vue/compat, never the Options API.
 - Use PrimeVue {_PRIMEVUE_MAJOR} components instead of hand-written markup: tables → DataTable + Column,
@@ -177,27 +313,52 @@ PRIMEVUE FRONTEND (Vue 3):
 - In Vitest, assert on rendered text, props and emitted events — never on PrimeVue's
   internal DOM shape. A DataTable with zero rows still renders an empty-message row, so
   expecting findAll('tr') to be empty fails; assert the empty message is shown instead.
-  Keep component specs to behaviour the issue actually names.
+  Keep component specs to behaviour the issue actually names."""
 
-TESTING (the layers that run are detected from the files you produce):
-- PHPUnit (`php artisan test`) always runs in this Laravel repository, so every PHP change ships
-  a Feature or Unit test. Migrations are executed before the suite: a broken migration fails the
+_TEST_PHPUNIT = """\
+- PHPUnit (`php artisan test`) runs whenever the change touches PHP, so every PHP change ships a
+  Feature or Unit test. Migrations are executed before the suite: a broken migration fails the
   layer.
-- The OpenAPI layer runs when the task touches routes/api.php, app/Http/Controllers, or
-  app/Http/Resources.
-- Vitest and then Playwright run when the task produces .vue files. Playwright drives the real
-  application: the sandbox runs `php artisan migrate --force --seed`, `npm run build`, and
-  playwright.config.js serves the app with `php artisan serve` on http://127.0.0.1:8000.
-- The E2E database therefore contains exactly what database/seeders/DatabaseSeeder.php creates.
-  NEVER assume rows exist. If an E2E spec needs data, either register your seeder inside
-  DatabaseSeeder::run() (and emit DatabaseSeeder.php as a FILE block) or create the data through
-  the UI/API inside the spec itself.
-- Use precise Playwright locators: getByRole, getByTestId, or getByText(..., {{ exact: true }}).
-  A substring locator such as getByText('Done') matches every cell containing that word and
-  fails Playwright's strict mode with "resolved to N elements".
-- A backend-only task needs no .vue file, no Vitest spec and no Playwright spec. A frontend-only
-  task still keeps the PHP suite green but needs no new PHP code.
+- The OpenAPI layer runs when the change touches routes/api.php, app/Http/Controllers,
+  app/Http/Resources, or app/Http/Requests."""
 
+_TEST_FRONTEND_LAYERS = """\
+- Vitest and then Playwright run when the change touches the frontend (.vue, JavaScript, CSS,
+  Blade views, package.json, e2e/). Playwright drives the real application: the sandbox runs
+  `php artisan migrate --force --seed`, `npm run build`, and playwright.config.js serves the
+  app with `php artisan serve` on http://127.0.0.1:8000.
+- The E2E database therefore contains exactly what database/seeders/DatabaseSeeder.php creates.
+  NEVER assume rows exist."""
+
+_TEST_E2E_DATA = {
+    "frontend": """\
+  If an E2E spec needs data, create it through the UI or the existing /api routes inside the
+  spec itself. Only when the repository already has a seeder for that data, register it in
+  DatabaseSeeder::run() and emit DatabaseSeeder.php — the one PHP file a frontend task may write.""",
+    "fullstack": """\
+  If an E2E spec needs data, either register your seeder inside DatabaseSeeder::run() (and emit
+  DatabaseSeeder.php as a FILE block) or create the data through the UI/API inside the spec
+  itself.""",
+}
+
+_TEST_LOCATORS = """\
+- Use precise Playwright locators: getByRole, getByTestId, or getByText(..., { exact: true }).
+  A substring locator such as getByText('Done') matches every cell containing that word and
+  fails Playwright's strict mode with "resolved to N elements"."""
+
+_TEST_SCOPE_NOTE = {
+    "backend": """\
+- Vitest and Playwright do not run for a backend change: write no .vue file, no Vitest spec
+  and no Playwright spec.""",
+    "frontend": """\
+- Write no PHPUnit test. PHPUnit runs the existing PHP suite only when the change touches a
+  PHP file (a Blade view, routes/web.php, DatabaseSeeder.php).""",
+    "fullstack": """\
+- A backend-only task needs no .vue file, no Vitest spec and no Playwright spec. A frontend-only
+  task needs no PHP code and no PHPUnit test.""",
+}
+
+_CODE_OUTPUT_FORMAT = """\
 OUTPUT FORMAT – use this exact format for every file you produce:
 
 ### FILE: <relative/path/to/file.ext>
@@ -206,8 +367,108 @@ OUTPUT FORMAT – use this exact format for every file you produce:
 ```
 
 - One FILE block per file. Paths are relative to the repository root.
-- Produce every affected file in full – no placeholders like "// rest unchanged".\
-"""
+- Produce every affected file in full – no placeholders like "// rest unchanged"."""
+
+_CODE_TEST_INSTRUCTIONS = {
+    "backend": """\
+- Include a PHPUnit Feature or Unit test for every behaviour the plan changes.
+- Include the migration, factory and seeder when the plan lists database changes.
+- Add or extend the Feature test that proves each new or changed /api route responds as
+  documented.""",
+    "frontend": """\
+- Include a Vitest spec for every component you create or change, and a Playwright spec for
+  the user flow the issue names.""",
+    "fullstack": """\
+- Include the test files for every layer the plan touches (PHPUnit for PHP,
+  Vitest + Playwright for Vue.js). Skip the layers the plan does not touch.
+- Include the migration, factory and seeder when the plan lists database changes.
+- Add or extend the Feature test that proves each new or changed /api route responds as
+  documented.""",
+}
+
+_CODE_REPOSITORY_RULE = {
+    "backend": """\
+- Respect "Existing Repository State" above: it lists what the repository ALREADY has.
+  Never write a create-table migration for a table listed there — add a separate
+  ALTER-style migration instead. Do not re-emit a file listed there unless the plan
+  changes it, and reuse the existing model, controller, resource and route rather than
+  creating a second copy under a different path.""",
+    "frontend": """\
+- Respect "Existing Repository State" above: it lists what the repository ALREADY has.
+  Do not re-emit a file listed there unless the plan changes it, and reuse the existing
+  components and routes rather than creating a second copy under a different path.""",
+}
+_CODE_REPOSITORY_RULE["fullstack"] = _CODE_REPOSITORY_RULE["backend"]
+
+
+# ── System prompt composition ──────────────────────────────────────────────────
+
+def _normalise_scope(scope: str) -> str:
+    """An unknown scope gets the fullstack prompt: narrowing must be earned."""
+    return scope if scope in SCOPES else "fullstack"
+
+
+def _task_scope_block(scope: str, documentation: str) -> str:
+    """The TASK SCOPE block both system prompts carry right after their role."""
+    lines = [
+        f"TASK SCOPE: {_SCOPE_SUMMARY[scope]}",
+        "- Change only what the issue needs; every extra file widens the review and the test run.",
+    ]
+    if _SCOPE_BOUNDARY[scope]:
+        lines.append(_SCOPE_BOUNDARY[scope])
+    if documentation:
+        lines.append(
+            f'- The issue asks for documentation ("{documentation}"): change only the documentation '
+            "it names,\n  only as far as it asks."
+        )
+    else:
+        lines.append(_DOCUMENTATION_OUT_OF_SCOPE)
+    if scope != "frontend":
+        lines.append(_SCRAMBLE_DOCUMENTS_THE_API)
+    return "\n".join(lines)
+
+
+def _planning_system_prompt(scope: str, documentation: str) -> str:
+    """The planning system prompt for *scope* (already normalised)."""
+    standards = [_PLAN_COMMON_STANDARDS]
+    if scope != "frontend":
+        standards.append(_PLAN_BACKEND_STANDARDS)
+    if scope != "backend":
+        standards.append(_PLAN_FRONTEND_STANDARDS)
+    standards.append(_PLAN_TEST_STANDARDS[scope])
+
+    sections = [
+        _PLANNING_ROLE[scope],
+        "Your task in this phase is to produce a detailed IMPLEMENTATION PLAN — no code yet.",
+        _task_scope_block(scope, documentation),
+    ]
+    if scope != "frontend":
+        sections.append(_DATABASE_POLICY)
+    sections.append("PLANNING STANDARDS:\n" + "\n".join(standards))
+    sections.append(_PLANNING_OUTPUT_FORMAT)
+    return "\n\n".join(sections)
+
+
+def _coding_system_prompt(scope: str, documentation: str) -> str:
+    """The coding system prompt for *scope* (already normalised)."""
+    testing = ["TESTING (the layers that run are chosen from the files you write):"]
+    if scope != "frontend":
+        testing.append(_TEST_PHPUNIT)
+    if scope != "backend":
+        testing += [_TEST_FRONTEND_LAYERS, _TEST_E2E_DATA[scope], _TEST_LOCATORS]
+    testing.append(_TEST_SCOPE_NOTE[scope])
+
+    sections = [_CODING_ROLE[scope], _task_scope_block(scope, documentation)]
+    if scope != "frontend":
+        sections.append(_DATABASE_POLICY)
+    sections.append(_CODING_STANDARDS)
+    if scope != "frontend":
+        sections.append(_BACKEND_STANDARDS)
+    if scope != "backend":
+        sections.append(_FRONTEND_STANDARDS)
+    sections.append("\n".join(testing))
+    sections.append(_CODE_OUTPUT_FORMAT)
+    return "\n\n".join(sections)
 
 
 # ── Budget helper ──────────────────────────────────────────────────────────────
@@ -224,22 +485,26 @@ def _get_code_skill_budget() -> int:
     return _CODE_SKILL_CHAR_BUDGET_WHEN_ENABLED if include == "1" else 0
 
 
-def _format_catalog_section(catalog_skills: "list[Skill] | None", char_budget: int) -> str:
+def _format_catalog_section(
+    catalog_skills: "list[Skill] | None", char_budget: int, scope: str = "fullstack"
+) -> str:
     """
     Render the vendored Laravel/PrimeVue reference corpus as a prompt section.
 
     Returns an empty string when no catalog skills are supplied or none fit the
-    budget.  The section is headed so it reads before the issue-URL skills.
+    budget.  The section is headed so it reads before the issue-URL skills, and
+    names only the framework(s) the scope's documents come from.
     """
     if not catalog_skills:
         return ""
     formatted = format_skills_for_prompt(catalog_skills, char_budget=char_budget)
     if not formatted:
         return ""
-    return (
-        f"\n## Reference Documentation (Laravel {_LARAVEL_MAJOR} / PrimeVue {_PRIMEVUE_MAJOR})\n"
-        f"{formatted}\n"
-    )
+    frameworks = {
+        "backend": f"Laravel {_LARAVEL_MAJOR}",
+        "frontend": f"PrimeVue {_PRIMEVUE_MAJOR}",
+    }.get(scope, f"Laravel {_LARAVEL_MAJOR} / PrimeVue {_PRIMEVUE_MAJOR}")
+    return f"\n## Reference Documentation ({frameworks})\n{formatted}\n"
 
 
 def chunk_body(chunk: dict) -> str:
@@ -384,6 +649,8 @@ def build_plan_prompt(
     repo_context: str = "",
     retrieved_chunks: "list[dict] | None" = None,
     past_solutions: "list[dict] | None" = None,
+    scope: str = "fullstack",
+    scope_evidence: str = "",
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the planning phase.
@@ -413,10 +680,18 @@ def build_plan_prompt(
         Similar merged issues from the Redis solution cache (Phase 8);
         injected within _SOLUTION_PLAN_BUDGET above the reference docs,
         because they are about this project and the docs are generic.
+    scope:
+        "backend" | "frontend" | "fullstack" from issue_scope.classify_issue;
+        composes the system prompt and the plan structure.  Anything else is
+        treated as "fullstack".
+    scope_evidence:
+        Why the issue text got that scope (ScopeDecision.evidence()); shown to
+        the planner, which confirms or corrects the scope on line 1 of its plan.
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
     description = (issue.get("description", "") or "").strip()
+    scope = _normalise_scope(scope)
 
     repo_section = ""
     if repo_context:
@@ -425,7 +700,7 @@ def build_plan_prompt(
             f"{repo_context.strip()}\n"
         )
 
-    catalog_section = _format_catalog_section(catalog_skills, _CATALOG_PLAN_BUDGET)
+    catalog_section = _format_catalog_section(catalog_skills, _CATALOG_PLAN_BUDGET, scope)
     solutions_section = _format_solutions_section(past_solutions, _SOLUTION_PLAN_BUDGET)
     retrieved_section = _format_retrieved_section(
         retrieved_chunks, _QDRANT_PLAN_BUDGET, exclude_text=catalog_section
@@ -437,6 +712,11 @@ def build_plan_prompt(
         if formatted:
             skills_section = f"\n## Skill Documentation\n{formatted}\n"
 
+    structure = "\n".join(
+        f"{number}. {item}" for number, item in enumerate(_PLAN_STRUCTURE[scope], start=1)
+    )
+    scope_note = f"Task scope: {scope}" + (f" ({scope_evidence})" if scope_evidence else "") + "."
+
     user_prompt = f"""\
 ## Task
 GitLab Issue #{issue_id}: {subject}
@@ -445,19 +725,15 @@ GitLab Issue #{issue_id}: {subject}
 {description or "(no description provided)"}
 {repo_section}{solutions_section}{catalog_section}{retrieved_section}{skills_section}
 ## Required Plan Structure
-Produce a numbered implementation plan covering:
-1. Objective – one sentence
-2. Database changes – migrations (table/columns/indexes), factories, seeders; "none" if not needed
-3. Backend files to create/modify – path + purpose (model, FormRequest, controller, resource, route)
-4. API surface – each /api route: method, URI, request shape, response shape; "none" if not needed
-5. Frontend files to create/modify – path + which PrimeVue components are used
-6. Implementation steps per file (method names, logic, data flow)
-7. Test cases per layer that must pass (PHPUnit / OpenAPI / Vitest / Playwright) – file + test names
-8. Risks or ambiguities
+{scope_note}
+Line 1 of the plan, alone: {_SCOPE_DECLARATION[scope]}.
+Then a numbered implementation plan covering:
+{structure}
 
 Write the plan now. No code, no preamble.\
 """
-    return PLANNING_SYSTEM_PROMPT, user_prompt
+    system_prompt = _planning_system_prompt(scope, documentation_request(subject, description))
+    return system_prompt, user_prompt
 
 
 def build_code_prompt(
@@ -468,6 +744,7 @@ def build_code_prompt(
     repo_context: str = "",
     retrieved_chunks: "list[dict] | None" = None,
     recalled_failures: "list[dict] | None" = None,
+    scope: str = "fullstack",
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the code-generation phase.
@@ -496,10 +773,15 @@ def build_code_prompt(
         Older failed attempts of this issue from episodic memory (Phase 8);
         injected within _EPISODE_CODE_BUDGET, last before the instructions,
         where the model is told to correct itself.
+    scope:
+        The scope of the approved plan (node_plan) — widened by
+        node_on_layer_failure when a layer outside it went red.  Composes the
+        system prompt and the instructions; anything else means "fullstack".
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
     description = (issue.get("description", "") or "").strip()
+    scope = _normalise_scope(scope)
 
     repo_section = ""
     if repo_context:
@@ -508,7 +790,7 @@ def build_code_prompt(
             f"{repo_context.strip()}\n"
         )
 
-    catalog_section = _format_catalog_section(catalog_skills, _CATALOG_CODE_BUDGET)
+    catalog_section = _format_catalog_section(catalog_skills, _CATALOG_CODE_BUDGET, scope)
     retrieved_section = _format_retrieved_section(
         retrieved_chunks, _QDRANT_CODE_BUDGET, exclude_text=catalog_section
     )
@@ -533,16 +815,11 @@ GitLab Issue #{issue_id}: {subject}
 {catalog_section}{retrieved_section}{episodes_section}{skills_section}
 ## Instructions
 Implement the approved plan above:
-- Produce every file listed in the plan using the FILE format.
+- Produce every code and test file the plan lists, using the FILE format. A file outside
+  TASK SCOPE stays out even when the plan lists it.
 - Files must be complete and immediately deployable.
-- Include the test files for every layer the plan touches (PHPUnit for PHP,
-  Vitest + Playwright for Vue.js). Skip the layers the plan does not touch.
-- Include the migration, factory and seeder when the plan lists database changes.
-- Add or extend the Feature test that proves the new /api route responds as documented.
-- Respect "Existing Repository State" above: it lists what the repository ALREADY has.
-  Never write a create-table migration for a table listed there — add a separate
-  ALTER-style migration instead. Do not re-emit a file listed there unless the plan
-  changes it, and reuse the existing model, controller, resource and route rather than
-  creating a second copy under a different path.\
+{_CODE_TEST_INSTRUCTIONS[scope]}
+{_CODE_REPOSITORY_RULE[scope]}\
 """
-    return CODING_SYSTEM_PROMPT, user_prompt
+    system_prompt = _coding_system_prompt(scope, documentation_request(subject, description))
+    return system_prompt, user_prompt

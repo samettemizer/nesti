@@ -96,6 +96,9 @@ _BOOTSTRAP_COMMAND_TEMPLATE = [
         _TRAP_OWNER,
         "composer create-project --no-interaction --prefer-dist \"laravel/laravel:{version}\" /tmp/skel;",
         "rm -rf /tmp/skel/.git;",
+        # The skeleton ships Laravel's own README.md; copied over, it replaced
+        # the project's README (or added one) in every scaffold Merge Request.
+        "rm -f /tmp/skel/README.md;",
         "cp -a /tmp/skel/. /app/;",
         "cd /app;",
         "[ -f .env ] || cp .env.example .env;",

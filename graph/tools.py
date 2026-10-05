@@ -87,6 +87,24 @@ _API_TOUCH_PREFIXES = (
     "app/Http/Requests/",
 )
 
+# Written paths that change what the browser loads: the Vitest and Playwright
+# layers apply to them (in a repository that has Vue).  A pure PHP change in a
+# repository that merely contains .vue files must not pay for two Node
+# containers, and a pure .vue change cannot alter what PHPUnit executes.
+_FRONTEND_SUFFIXES = (
+    ".vue", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx",
+    ".css", ".scss", ".sass", ".less", ".html", ".svg",
+)
+_FRONTEND_PREFIXES = ("resources/js/", "resources/css/", "e2e/")
+_FRONTEND_FILES = frozenset({
+    "package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+})
+# Blade views and web routes are PHP that serves pages: they count for both sides.
+_SHARED_SUFFIXES = (".blade.php",)
+_SHARED_FILES = frozenset({"routes/web.php"})
+# Besides .php sources, what PHPUnit's run depends on.
+_BACKEND_FILES = frozenset({"composer.json", "composer.lock", "artisan", "phpunit.xml", ".env.example"})
+
 # Written by the openapi recipe; storage/app is git-ignored by Laravel, so the
 # route dump never lands in the Merge Request.
 _ROUTE_DUMP_REL = "storage/app/nesti-routes.json"
@@ -355,13 +373,39 @@ def _touches_api(written_files: "list[str] | None") -> bool:
     return False
 
 
+def _change_sides(written_files: "list[str] | None") -> tuple[bool, bool]:
+    """
+    ``(touches_backend, touches_frontend)`` for the paths the last attempt wrote.
+
+    ``None`` means "caller does not know" and touches both — the conservative
+    answer, as in ``_touches_api``.  A path on neither side (README.md,
+    .gitignore, openapi.json) touches neither: the PHPUnit fallback in
+    ``tool_detect_stack`` then keeps the change from reaching commit untested.
+    """
+    if written_files is None:
+        return True, True
+    backend = frontend = False
+    for raw in written_files:
+        path = raw.replace("\\", "/").removeprefix("./")
+        name = path.rsplit("/", 1)[-1]
+        if path.endswith(_SHARED_SUFFIXES) or path in _SHARED_FILES:
+            backend = frontend = True
+        elif path.endswith(".php") or name in _BACKEND_FILES:
+            backend = True
+        elif (path.endswith(_FRONTEND_SUFFIXES) or path.startswith(_FRONTEND_PREFIXES)
+              or name in _FRONTEND_FILES):
+            frontend = True
+    return backend, frontend
+
+
 def tool_detect_stack(workspace_path: str, written_files: "list[str] | None" = None) -> dict:
     """
     Determine which test layers apply to the code in workspace_path.
 
     result: {"stack": str, "has_vue": bool, "has_php": bool,
-             "run_phpunit": bool, "vue_files": list[str], "source": str,
-             "is_laravel": bool, "has_api_routes": bool, "run_openapi": bool}
+             "run_phpunit": bool, "run_frontend": bool, "vue_files": list[str],
+             "source": str, "is_laravel": bool, "has_api_routes": bool,
+             "run_openapi": bool}
 
     ``stack`` is one of:
       "php"       – PHP sources or a Composer project, no .vue files
@@ -369,19 +413,33 @@ def tool_detect_stack(workspace_path: str, written_files: "list[str] | None" = N
       "fullstack" – both layers present
       "unknown"   – neither detected (empty or non-code change)
 
-    ``run_phpunit`` is the routing decision, kept separate from the descriptive
-    label.  It is False only for the "vue" stack: a frontend-only workspace has
-    no composer.json and no phpunit binary, so running the PHP layer there
-    would fail on every attempt and drive the issue to permanent failure —
-    which is exactly the trap that made Vue-only issues impossible before.
-    "unknown" keeps run_phpunit=True so an unrecognised change still faces a
-    test layer instead of silently reaching commit untested.
+    ``stack`` describes the repository; the three ``run_*`` gates describe
+    *this change* (*written_files*, the paths the last attempt wrote):
+
+    ``run_frontend`` gates Vitest → Playwright.  It needs Vue in the
+    repository and a change that touched the frontend (.vue, JavaScript, CSS,
+    Blade views, routes/web.php, package.json, e2e/); a "vue" stack always
+    runs it, since it is that stack's only gate.  A backend change in a
+    repository that merely contains .vue files no longer starts two Node
+    containers.
+
+    ``run_phpunit`` gates the PHP layer.  It is False for the "vue" stack — a
+    frontend-only workspace has no composer.json and no phpunit binary, so
+    running the PHP layer there would fail on every attempt and drive the
+    issue to permanent failure — and for a change that touched only frontend
+    files while the frontend layers run: a .vue, CSS or JavaScript change
+    cannot alter what PHPUnit executes.  Whenever the frontend layers do not
+    run, PHPUnit does, so no change — "unknown" stack, README-only, a JS
+    change in a repository without Vue — ever reaches commit untested.
 
     ``run_openapi`` is the same kind of gate for the Scramble layer and needs
     all three of: a Laravel app (``artisan``), a registered API surface
-    (``routes/api.php``), and a change that actually touched that surface
-    (*written_files*).  Exporting the document for a pure .vue or migration
-    change would only add a slow container to every attempt.
+    (``routes/api.php``), and a change that actually touched that surface.
+    Exporting the document for a pure .vue or migration change would only add
+    a slow container to every attempt.
+
+    Omitting *written_files* (MCP callers) yields the conservative answer for
+    all three gates: every layer the repository supports runs.
 
     Detection is automatic; set NESTI_STACK to php / vue / fullstack to pin the
     *stack* when a repository's layout misleads the scan.  NESTI_STACK never
@@ -418,11 +476,16 @@ def tool_detect_stack(workspace_path: str, written_files: "list[str] | None" = N
                 stack = "unknown"
             source = "auto"
 
+        touches_backend, touches_frontend = _change_sides(written_files)
+        run_frontend = stack == "vue" or (has_vue and touches_frontend)
+        run_phpunit = stack != "vue" and (touches_backend or not run_frontend)
+
         return _ok({
             "stack": stack,
             "has_vue": has_vue,
             "has_php": has_php,
-            "run_phpunit": stack != "vue",
+            "run_phpunit": run_phpunit,
+            "run_frontend": run_frontend,
             "vue_files": vue_files,
             "source": source,
             "is_laravel": is_laravel,

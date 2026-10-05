@@ -155,7 +155,8 @@ class ConversationStore:
             "Analyse the failure and correct the implementation. Output the "
             "COMPLETE set of files for this change using the FILE format, "
             "including the files that were already correct: any file you wrote "
-            "before and now omit is deleted from the workspace. Keep the same "
+            "before and now omit is reverted — a new file is deleted, an "
+            "existing file gets its original content back. Keep the same "
             "path for a file you are only editing — renaming a migration "
             "leaves the old table behind and breaks the next attempt."
         )
