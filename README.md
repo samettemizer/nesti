@@ -429,8 +429,9 @@ ISSUE_GUIDELINE.md         <- how to write effective GitLab issues
 **1. Clone and configure**
 ```bash
 cp .env.example .env
-# Edit .env — at minimum: ANTHROPIC_API_KEY, GITLAB_URL, GITLAB_TOKEN,
-#   GITLAB_PROJECT_PATH, GITLAB_ISSUE_LABEL
+# Edit .env — at minimum: GITLAB_URL, GITLAB_TOKEN,
+#   GITLAB_PROJECT_PATH, GITLAB_ISSUE_LABEL, plus an enabled API key
+#   or a consumer subscription login.
 ```
 
 **2. Build the sandbox images** (one per test layer)
@@ -577,8 +578,10 @@ See `.env.example` for all variables. Key ones:
 
 | Variable | Required | Default |
 |----------|----------|---------|
-| `ANTHROPIC_API_KEY` | **Yes** | — |
-| `DEEPSEEK_API_KEY` | Recommended | — |
+| `DEEPSEEK_API_ENABLED` | No | `true` |
+| `DEEPSEEK_API_KEY` | When DeepSeek API is enabled | — |
+| `ANTHROPIC_API_ENABLED` | No | `false` |
+| `ANTHROPIC_API_KEY` | When Anthropic API is enabled | — |
 | `GITLAB_URL` + `GITLAB_TOKEN` | **Yes** | — |
 | `GITLAB_PROJECT_PATH` | **Yes** | — |
 | `GITLAB_ISSUE_LABEL` | No | `nesti` |
@@ -599,6 +602,15 @@ See `.env.example` for all variables. Key ones:
 | `DOCKER_SANDBOX_BOOTSTRAP_TIMEOUT` | No | `1800` |
 | `NESTI_STACK` | No | `auto` |
 | `INCLUDE_SKILLS_IN_CODE_PROMPT` | No | `0` |
+
+Paid API clients require both their enable flag and an API key. A false flag
+prevents planner, coder, escalation and fallback calls even when the key is
+present; availability is checked before each attempt. Anthropic's billed API
+is opt-in and does not control a Claude consumer subscription.
+`NESTI_CONSUMER_PRIORITY` selects the consumer providers independently. To use
+only ChatGPT Plus with DeepSeek fallback, set it to `chatgpt-plus`, keep both
+local-model flags false, enable DeepSeek and disable Anthropic. Editing `.env`
+changes the next container's configuration, not an already-running process.
 
 ---
 

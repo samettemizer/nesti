@@ -26,6 +26,8 @@ import tempfile
 
 # ── Environment before any project import ────────────────────────────────────
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
+os.environ["ANTHROPIC_API_ENABLED"] = "true"
+os.environ["DEEPSEEK_API_ENABLED"] = "true"
 os.environ["LOCAL_LLM_ENABLED"] = "false"
 os.environ["HERMES3_LLM_ENABLED"] = "false"
 os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"   # unreachable → memory fallback
@@ -1127,6 +1129,11 @@ class _StubCoder:
             raise RuntimeError(f"{self.name} down")
         return f"code from {self.name}"
 
+    def generate_plan(self, system_prompt, user_prompt, messages=None):
+        if self.fail:
+            raise RuntimeError(f"{self.name} down")
+        return f"plan from {self.name}"
+
 
 _chain = LLMClient()
 _a, _b, _c, _d = (_StubCoder("A", fail=True), _StubCoder("B", available=False),
@@ -1165,6 +1172,64 @@ f = run(1220, docker_outcomes=[True], code_responses=[GOOD_CODE])
 check(f["mr_url"] == "https://gitlab.example/mr/1220"
       and nodes._llm.current_coder_name != "none (all exhausted)",
       "node_setup resets the coder chain at the start of every issue")
+
+# Paid APIs must never be contacted when disabled, including below-floor
+# fallback; flags are evaluated again on an already-constructed chain.
+from unittest.mock import patch  # noqa: E402
+from llm_client import AnthropicLLMClient, DeepSeekLLMClient  # noqa: E402
+
+with patch.dict(os.environ, {
+    "DEEPSEEK_API_KEY": "deepseek-test-key",
+    "ANTHROPIC_API_KEY": "anthropic-test-key",
+    "DEEPSEEK_API_ENABLED": "false",
+    "ANTHROPIC_API_ENABLED": "false",
+}), patch("llm_client.build_consumer_clients", return_value=[_StubCoder("Consumer")]), \
+        patch("llm_client.requests.post") as _deep_http, \
+        patch("llm_client.anthropic.Anthropic") as _anthropic_sdk:
+    _deep_http.return_value.json.return_value = {
+        "choices": [{"message": {"content": "deepseek answer"}}],
+    }
+    _anthropic_sdk.return_value.messages.create.return_value.content[0].text = "anthropic answer"
+    _gated = LLMClient()
+    _consumer = _gated._coders[0]
+    check(_gated.generate_plan("s", "u") == "plan from Consumer"
+          and _gated.generate_code("s", "u") == "code from Consumer"
+          and not _deep_http.called and not _anthropic_sdk.called,
+          "disabled paid APIs leave the consumer first and make no transport calls")
+    _consumer.fail = True
+    os.environ["DEEPSEEK_API_ENABLED"] = " TrUe "
+    check(_gated.generate_plan("s", "u") == "deepseek answer"
+          and _gated.generate_code("s", "u") == "deepseek answer"
+          and _deep_http.call_count == 2 and not _anthropic_sdk.called,
+          "enabling DeepSeek after construction supplies both planner and coder fallback")
+    os.environ["DEEPSEEK_API_ENABLED"] = "false"
+    try:
+        _gated.generate_code("s", "u")
+        _disabled_exhausted = False
+    except RuntimeError:
+        _disabled_exhausted = True
+    check(_disabled_exhausted and _deep_http.call_count == 2 and not _anthropic_sdk.called,
+          "disabled APIs remain skipped after escalation and below-floor fallback")
+    os.environ["ANTHROPIC_API_ENABLED"] = "true"
+    check(_gated.generate_plan("s", "u") == "anthropic answer"
+          and _gated.generate_code("s", "u") == "anthropic answer",
+          "explicit Anthropic opt-in is respected by an existing chain")
+    os.environ["ANTHROPIC_API_ENABLED"] = "false"
+    _anthropic_calls = _anthropic_sdk.call_count
+    _blocked_direct = 0
+    for _paid in (DeepSeekLLMClient(), AnthropicLLMClient()):
+        for _method in (_paid.generate_plan, _paid.generate_code):
+            try:
+                _method("s", "u")
+            except RuntimeError:
+                _blocked_direct += 1
+    check(_blocked_direct == 4 and _deep_http.call_count == 2
+          and _anthropic_sdk.call_count == _anthropic_calls,
+          "direct plan/code calls to disabled paid clients stop before HTTP or SDK creation")
+    os.environ.update(DEEPSEEK_API_ENABLED="true", ANTHROPIC_API_ENABLED="true",
+                      DEEPSEEK_API_KEY="", ANTHROPIC_API_KEY="")
+    check(not DeepSeekLLMClient().available and not AnthropicLLMClient().available,
+          "enabling a paid API without credentials cannot make it callable")
 
 # ═════ Scenario 23: ChatGPT subscription — Codex backend stream and quota ═════
 print("\n── Scenario 23: ChatGPT subscription (Codex backend) ──")

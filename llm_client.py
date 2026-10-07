@@ -19,10 +19,10 @@ Cascade rules
   • Test failures           → task_engine calls escalate_coder(), which raises
                               the minimum coder tier for the NEXT attempt.
   • Every provider failure and tier escalation emits a Telegram notification.
-  • A provider is skipped when it is unavailable — its env vars are absent, or
-    (consumer tier) no session is stored for it. Availability is re-checked
-    before every attempt, so `nesti /provider login|logout` takes effect
-    without restarting the orchestrator.
+  • A provider is skipped when its enable flag is false, its API key is
+    absent, or (consumer tier) no session is stored for it. Availability is
+    re-checked before every attempt, so consumer login/logout and process
+    environment changes take effect on the next call.
 """
 
 import json
@@ -242,7 +242,10 @@ class DeepSeekLLMClient(BaseLLMClient):
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key)
+        return (
+            os.environ.get("DEEPSEEK_API_ENABLED", "true").strip().lower() == "true"
+            and bool(self.api_key)
+        )
 
     def _call(
         self,
@@ -252,7 +255,8 @@ class DeepSeekLLMClient(BaseLLMClient):
     ) -> str:
         if not self.available:
             raise RuntimeError(
-                "DeepSeek is not configured (DEEPSEEK_API_KEY missing)."
+                "DeepSeek API is disabled or unconfigured "
+                "(DEEPSEEK_API_ENABLED must be true and DEEPSEEK_API_KEY set)."
             )
 
         payload_messages = messages if messages else [
@@ -332,7 +336,10 @@ class AnthropicLLMClient(BaseLLMClient):
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key)
+        return (
+            os.environ.get("ANTHROPIC_API_ENABLED", "false").strip().lower() == "true"
+            and bool(self.api_key)
+        )
 
     def _call(
         self,
@@ -341,7 +348,10 @@ class AnthropicLLMClient(BaseLLMClient):
         messages: list[dict] | None = None,
     ) -> str:
         if not self.available:
-            raise RuntimeError("Anthropic API is not configured (ANTHROPIC_API_KEY missing).")
+            raise RuntimeError(
+                "Anthropic API is disabled or unconfigured "
+                "(ANTHROPIC_API_ENABLED must be true and ANTHROPIC_API_KEY set)."
+            )
 
         msg_list = messages if messages else [{"role": "user", "content": user_prompt}]
         # Anthropic keeps the system prompt separate and rejects system-role
@@ -943,14 +953,9 @@ class LLMClient:
                 "Hermes-3 not enabled (HERMES3_LLM_URL / HERMES3_LLM_MODEL missing) "
                 "– excluded from planner chain."
             )
-        if deepseek.available:
-            self._planners.append(deepseek)
-        else:
-            logger.warning(
-                "DeepSeek not configured (DEEPSEEK_API_KEY missing) "
-                "– excluded from planner chain."
-            )
-        self._planners.append(claude)  # Claude is always the final safety net
+        # Keep paid tiers even when disabled: available is re-checked before
+        # every call, so a flag change cannot strand a constructed client.
+        self._planners.extend((deepseek, claude))
 
         # ── Coder chain: consumers → Qwen → DeepSeek → Claude API ────────
         self._coders: list[BaseLLMClient] = [*consumers]
@@ -961,13 +966,7 @@ class LLMClient:
                 "Qwen3 not enabled (LOCAL_LLM_URL / LOCAL_LLM_MODEL missing) "
                 "– excluded from coder chain."
             )
-        if deepseek.available:
-            self._coders.append(deepseek)
-        else:
-            logger.warning(
-                "DeepSeek not configured – excluded from coder chain."
-            )
-        self._coders.append(claude)
+        self._coders.extend((deepseek, claude))
 
         # Minimum coder tier; raised by escalate_coder() after test failures
         self._min_coder_tier: int = 0
