@@ -111,6 +111,13 @@ class IssueState(TypedDict, total=False):
     playwright_passed: bool
     playwright_output: str
 
+    # ── Fixture dependencies ───────────────────────────────────────────────
+    # A verified missing-seeder report from the E2E sandbox (endpoint/model/
+    # seeder/table) and what node_pause_dependency made of it.  Both are
+    # cleared by node_code so no attempt inherits a previous block.
+    fixture_request: dict | None       # set only by node_playwright_test
+    dependency_status: str             # "" | "paused" | "ineligible" | "error"
+
     # ── Hierarchical vector memory (Phase 8) ───────────────────────────────
     # How much memory reached the prompts — reported in the MR body so a
     # reviewer sees it without reading logs.  All zero when memory is off.

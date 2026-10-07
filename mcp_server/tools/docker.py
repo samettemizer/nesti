@@ -63,9 +63,14 @@ def docker_run_vitest(workspace_path: str) -> dict:
 def docker_run_playwright(workspace_path: str) -> dict:
     """
     Run Playwright E2E tests against workspace_path in a headless Chromium
-    sandbox. Installs dependencies, builds the app, and serves it via the
-    webServer entry in playwright.config.js automatically.
-    Returns passed: bool and output: str.
+    sandbox. Installs dependencies; for a Laravel app runs the migrations,
+    DatabaseSeeder and the fixtures declared in e2e/nesti-fixtures.json; builds
+    the app; and serves it via the webServer entry in playwright.config.js.
+    Returns passed: bool, output: str and fixture_request: dict | None.
+    fixture_request ({endpoint, model, seeder, table}) is set only when the
+    sandbox verified that a declared fixture's seeder class and file are both
+    absent and stopped before the browser started; any other failure is an
+    ordinary test failure with fixture_request None.
     """
     return tool_playwright_run_tests(workspace_path)
 

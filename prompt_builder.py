@@ -119,10 +119,10 @@ _SCOPE_BOUNDARY = {
   Vitest spec or Playwright spec. Those layers do not run for a backend change, so nothing
   would verify such a file.""",
     "frontend": """\
-- No backend files: no migration, model, controller, FormRequest, API Resource, service,
-  routes/api.php entry or PHPUnit test. The backend the UI needs is listed under Existing
-  Repository State; use it as it is. Page plumbing is frontend work: a Blade view or a
-  routes/web.php entry that serves the page is allowed.""",
+- No backend files: no migration, model, factory, seeder, controller, FormRequest, API
+  Resource, service, routes/api.php entry or PHPUnit test. The backend the UI needs is listed
+  under Existing Repository State; use it as it is. Page plumbing is frontend work: a Blade
+  view or a routes/web.php entry that serves the page is allowed.""",
     "fullstack": "",
 }
 
@@ -183,7 +183,23 @@ _PLAN_FRONTEND_STANDARDS = f"""\
 - For UI work, name the **PrimeVue components** to be used (by their PrimeVue {_PRIMEVUE_MAJOR} names)
   instead of describing raw HTML, and the Vue component files under resources/js/components/.
 - Name the existing routes and response shapes the UI relies on, as listed under Existing
-  Repository State."""
+  Repository State.
+- Name how the feature reaches the served page: the entry chain (routes/web.php → Blade view →
+  resources/js/app.js) and the exact change to it — e.g. app.component('TaskTable', TaskTable)
+  before app.mount('#app') plus <task-table></task-table> inside <div id="app">, or rendering
+  from an existing App.vue root. Keep the PrimeVue/Aura setup and every existing registration.
+  An App.vue no entry imports, or a component only a test mounts, is not on the page."""
+
+# The E2E data contract the planner and the coder share (frontend_runner +
+# scripts/e2e_fixtures.php consume e2e/nesti-fixtures.json).
+_PLAN_E2E_DATA = """\
+- E2E data comes from DatabaseSeeder, from records a spec creates through existing UI/API
+  routes, or from a fixture declared in e2e/nesti-fixtures.json: the sandbox runs its seeder
+  only while the declared GET /api collection is still empty. Plan a fixture only when a
+  Playwright case needs real rows from an existing unauthenticated GET /api collection — never
+  for a valid empty state, a mocked API or a spec that creates its own data. Name the model's
+  existing seeder; when none exists, name Database\\Seeders\\<Model>Seeder without planning that
+  class: Nesti verifies it is absent and opens a backend dependency issue."""
 
 _PLAN_TEST_STANDARDS = {
     "backend": """\
@@ -192,13 +208,17 @@ _PLAN_TEST_STANDARDS = {
   Playwright cases.""",
     "frontend": """\
 - Define the Vitest (component) and Playwright (E2E) test cases the implementation must
-  satisfy, and where the E2E data comes from: the E2E database holds only what
-  DatabaseSeeder creates. A frontend task defines no PHPUnit cases.""",
+  satisfy. At least one Playwright case loads the served page and asserts the feature on real
+  data. A frontend task defines no PHPUnit cases.
+""" + _PLAN_E2E_DATA,
     "fullstack": """\
 - Define the test cases the implementation must satisfy, in the layers the task actually
   touches, grouped by layer: PHPUnit (Feature/Unit) → OpenAPI → Vitest → Playwright. A
   frontend-only task defines no PHPUnit cases; a backend-only task defines no Vitest or
-  Playwright cases.""",
+  Playwright cases. A UI change gets at least one Playwright case that loads the served page
+  and asserts the feature on real data.
+""" + _PLAN_E2E_DATA + """
+  A model or /api collection this change adds ships its own factory and seeder.""",
 }
 
 _PLANNING_OUTPUT_FORMAT = """\
@@ -301,8 +321,21 @@ PRIMEVUE FRONTEND (Vue 3):
   the lowercase component name (OrganizationChart → 'primevue/organizationchart').
 - The PrimeVue plugin and the Aura preset are already registered in resources/js/app.js
   (app.use(PrimeVue, {{ theme: {{ preset: Aura }} }}) with Aura from '@primeuix/themes/aura').
-  Do not re-register it and do not rewrite resources/js/app.js unless the task adds a global
-  service (ToastService, ConfirmationService) — then add only that line.
+  Never re-register or reconfigure them, and keep every existing import, app.use(...) and
+  app.component(...) line. A global service (ToastService, ConfirmationService) adds only its line.
+- A feature must reach the page the app serves (routes/web.php → its Blade view → the @vite
+  entry resources/js/app.js or app.ts). Make the import/registration/mount change it needs and
+  keep the existing root architecture:
+  - In-DOM template (createApp({{}}) mounted on <div id="app"> of resources/views/app.blade.php):
+    import the component, add app.component('TaskTable', TaskTable) before app.mount('#app'),
+    and put <task-table></task-table> inside <div id="app"> of the served Blade view. In-DOM
+    tags, props and events are kebab-case (:page-size, @row-select); never self-close a custom tag.
+  - SFC root (createApp(App) with an imported App.vue): keep it and render the feature from that
+    root. Never convert one architecture into the other.
+  - An App.vue that no entry file imports is not a page implementation: nothing renders it.
+- Edit the entry file or the Blade view only from its complete body quoted under Existing
+  Repository State, emitting the whole file with your change. If that body is named as omitted,
+  never reconstruct it from a fragment or replace the boot code by guess; state the assumption.
 - Components live in resources/js/components/<Name>.vue; Vitest specs in
   resources/js/components/__tests__/<Name>.test.js; Playwright specs in e2e/<feature>.spec.js.
 - vite.config.js, vitest.config.js, playwright.config.js and package.json already exist. You
@@ -325,20 +358,32 @@ _TEST_PHPUNIT = """\
 _TEST_FRONTEND_LAYERS = """\
 - Vitest and then Playwright run when the change touches the frontend (.vue, JavaScript, CSS,
   Blade views, package.json, e2e/). Playwright drives the real application: the sandbox runs
-  `php artisan migrate --force --seed`, `npm run build`, and playwright.config.js serves the
-  app with `php artisan serve` on http://127.0.0.1:8000.
-- The E2E database therefore contains exactly what database/seeders/DatabaseSeeder.php creates.
-  NEVER assume rows exist."""
+  the migrations and DatabaseSeeder, then the fixtures declared in e2e/nesti-fixtures.json,
+  `npm run build`, and playwright.config.js serves the app with `php artisan serve` on
+  http://127.0.0.1:8000.
+- Test the integration on the served page: at least one Playwright spec opens it (page.goto('/')
+  or the feature's web route) and asserts the feature with real API data. A directly mounted
+  component or a mocked API proves nothing about integration.
+- The E2E database holds what DatabaseSeeder creates plus any declared fixture. NEVER assume
+  other rows exist."""
+
+_E2E_FIXTURE_RULE = """\
+  If an E2E spec needs data, create it through the UI or the existing /api routes inside the
+  spec, or use what DatabaseSeeder creates. Declare a fixture in e2e/nesti-fixtures.json only
+  when the spec needs nonempty real rows from an existing unauthenticated GET /api collection —
+  never for a valid empty state, a mocked API, or a spec that creates its own data:
+  {"version":1,"fixtures":[{"endpoint":"/api/tasks","model":"App\\\\Models\\\\Task","seeder":"Database\\\\Seeders\\\\TaskSeeder"}]}
+  The sandbox runs that seeder only while the endpoint is still empty. Name the model's
+  existing seeder; when none exists, name Database\\Seeders\\<Model>Seeder anyway and do NOT
+  write that class or register it in DatabaseSeeder: Nesti verifies it is absent and opens a
+  backend dependency issue. The manifest is test setup, not default seeding — register a seeder
+  in DatabaseSeeder::run() only when the issue asks for default seed data. On a retry, re-emit a
+  still-needed manifest in full, or emit {"version":1,"fixtures":[]} once it is no longer needed."""
 
 _TEST_E2E_DATA = {
-    "frontend": """\
-  If an E2E spec needs data, create it through the UI or the existing /api routes inside the
-  spec itself. Only when the repository already has a seeder for that data, register it in
-  DatabaseSeeder::run() and emit DatabaseSeeder.php — the one PHP file a frontend task may write.""",
-    "fullstack": """\
-  If an E2E spec needs data, either register your seeder inside DatabaseSeeder::run() (and emit
-  DatabaseSeeder.php as a FILE block) or create the data through the UI/API inside the spec
-  itself.""",
+    "frontend": _E2E_FIXTURE_RULE,
+    "fullstack": _E2E_FIXTURE_RULE + """
+  A model or /api collection this change adds ships its own factory and seeder.""",
 }
 
 _TEST_LOCATORS = """\
@@ -351,8 +396,8 @@ _TEST_SCOPE_NOTE = {
 - Vitest and Playwright do not run for a backend change: write no .vue file, no Vitest spec
   and no Playwright spec.""",
     "frontend": """\
-- Write no PHPUnit test. PHPUnit runs the existing PHP suite only when the change touches a
-  PHP file (a Blade view, routes/web.php, DatabaseSeeder.php).""",
+- Write no PHPUnit test and no PHP class. PHPUnit runs the existing PHP suite only when the
+  change touches a PHP file (a Blade view, routes/web.php).""",
     "fullstack": """\
 - A backend-only task needs no .vue file, no Vitest spec and no Playwright spec. A frontend-only
   task needs no PHP code and no PHPUnit test.""",

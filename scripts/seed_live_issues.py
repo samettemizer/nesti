@@ -13,9 +13,8 @@ Idempotent: an issue whose title already exists as an OPEN issue carrying the
 opt-in label is skipped, so re-running after a partial seed never duplicates
 work. GitLab titles are not unique, so the match is on exact title.
 
-GitLabIssuesClient deliberately exposes no issue-creation method — creating
-work is not the orchestrator's job — so this operator tool POSTs directly
-rather than widening that client's surface.
+Creation goes through GitLabIssuesClient.create_issue, the same verified
+single-POST path Nesti uses for fixture-dependency issues.
 
 Usage:
     python scripts/seed_live_issues.py --dry-run
@@ -38,8 +37,6 @@ load_dotenv()
 # its GitLab configuration from the environment.
 from gitlab_issues_client import GitLabIssuesClient  # noqa: E402
 
-_REQUEST_TIMEOUT = 30
-_LIST_LIMIT = 100
 
 ISSUES: tuple[dict[str, str], ...] = (
     {
@@ -116,17 +113,10 @@ def _client() -> GitLabIssuesClient:
 
 def _existing_open_titles(client: GitLabIssuesClient) -> dict[str, int]:
     """Map title → iid for every open issue already carrying the opt-in label."""
-    response = client.session.get(
-        f"{client._project_api}/issues",
-        params={
-            "state": "opened",
-            "labels": client.issue_label,
-            "per_page": _LIST_LIMIT,
-        },
-        timeout=_REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    return {issue["title"]: issue["iid"] for issue in response.json()}
+    return {
+        issue["subject"]: issue["iid"]
+        for issue in client.list_issues(state="opened", labels=[client.issue_label])
+    }
 
 
 def main() -> int:
@@ -156,19 +146,13 @@ def main() -> int:
         if title in existing:
             print(f"SKIP #{existing[title]} {title}")
             continue
-        response = client.session.post(
-            f"{client._project_api}/issues",
-            json={
-                "title": title,
-                "description": issue["description"],
-                "labels": client.issue_label,
-            },
-            timeout=_REQUEST_TIMEOUT,
-        )
-        if response.status_code not in (200, 201):
-            print(f"FAIL  {title} → HTTP {response.status_code}: {response.text[:300]}")
+        try:
+            payload = client.create_issue(
+                title, issue["description"], labels=[client.issue_label]
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"FAIL  {title} → {exc}")
             return 1
-        payload = response.json()
         created.append(payload["iid"])
         print(f"CREATED #{payload['iid']} {title}  {payload.get('web_url', '')}")
 

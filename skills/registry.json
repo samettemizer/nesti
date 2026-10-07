@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-02T18:02:03Z",
+  "generated_at": "2026-10-05T08:15:30Z",
   "primevue": {
     "version": "5.0.1",
     "source_pattern": "https://primevue.dev/llms/components/{slug}.md",
@@ -1871,7 +1871,7 @@
           "visual hierarchy"
         ],
         "path": "practices/frontend-design.md",
-        "chars": 10068
+        "chars": 10783
       },
       {
         "slug": "minimalist-ui",
@@ -1886,7 +1886,7 @@
           "flat design"
         ],
         "path": "practices/minimalist-ui.md",
-        "chars": 9982
+        "chars": 9984
       },
       {
         "slug": "senior-security",
@@ -1921,7 +1921,7 @@
           "test coverage"
         ],
         "path": "practices/tdd.md",
-        "chars": 9409
+        "chars": 9411
       }
     ]
   }

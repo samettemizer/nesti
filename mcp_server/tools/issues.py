@@ -28,7 +28,8 @@ def issue_list_pending() -> dict:
     """
     List the pending issues in the configured GitLab project, oldest first.
     Pending means the issue is open, carries the opt-in GITLAB_ISSUE_LABEL,
-    and does not yet carry the "<label>::in-progress" lock label.
+    carries neither the "<label>::in-progress" lock nor the "<label>::pause"
+    hold, and no unresolved fixture-dependency record holds it.
     """
     return tool_issue_list_pending()
 
@@ -37,10 +38,13 @@ def issue_list_pending() -> dict:
 def issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
     """
     Move a GitLab issue through the intake lifecycle.
-    status must be one of: "new", "in_progress", "closed"
-    GitLab has no in-progress state, so the mapping is by label: "in_progress"
-    adds the "<label>::in-progress" lock label, "closed" closes the issue, and
-    "new" removes the lock label to return the issue to the pending pool.
+    status must be one of: "new", "in_progress", "closed", "paused"
+    GitLab has no in-progress or paused state, so the mapping is by label:
+    "in_progress" adds the "<label>::in-progress" lock label (only while the
+    issue is pending), "closed" closes the issue, "new" removes the lock label
+    to return the issue to the pending pool (refused for a paused or
+    dependency-held issue), and "paused" adds the "<label>::pause" hold label
+    (refused for a closed or opted-out issue).
     Optionally add a note to the issue.
     """
     return tool_issue_set_status(issue_id, status, note)

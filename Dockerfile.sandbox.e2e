@@ -34,6 +34,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ownership" and that fatal would lead the retry prompt.
 RUN git config --global --add safe.directory '*'
 
+# Nesti's fixture helper (scripts/e2e_fixtures.php) replaces the former
+# `php artisan migrate --force --seed` in the artisan branch below.  It boots
+# the workspace application against its recreated SQLite file only, runs
+# migrate and the default db:seed, then prepares every fixture the suite
+# declared in e2e/nesti-fixtures.json: it probes each declared GET collection
+# through Laravel's HTTP kernel and, when the endpoint and its model table are
+# both verifiably empty, runs the declared seeder once.  Exit codes:
+#   0  fixtures ready (report {"status":"ready"})
+#   78 a declared seeder's class AND file are both absent (report
+#      {"status":"missing_seeder",...}); Nesti pauses the issue for a backend
+#      dependency instead of counting a failed browser suite
+#   1  any other preparation/contract error (no report)
+# `set -e` stops the CMD on either nonzero code, before the build and browser.
+# The report is written to /nesti-results — outside the repository — which
+# FrontendRunner mounts over this directory with its own empty one.
+COPY scripts/e2e_fixtures.php /opt/nesti/e2e_fixtures.php
+RUN mkdir -p /nesti-results
+
 # Same two-step lockfile fallback as the Node sandbox — missing lockfile falls
 # back to `npm install`, stale lockfile falls through `npm ci` to `npm install`
 # (see Dockerfile.sandbox.node for the full reasoning).
@@ -50,7 +68,9 @@ RUN git config --global --add safe.directory '*'
 # its code.  Only chromium is fetched — the suite runs headless Chromium.
 #
 # For a Laravel repo the artisan branch prepares the app (composer install,
-# .env, key, sqlite db, migrate --seed) so Playwright's webServer can boot it
-# via `php artisan serve`; a pure SPA repo skips to the lockfile-tolerant npm
-# install and the vite build/preview contract.
-CMD ["bash", "-lc", "set -e; if [ -f artisan ]; then composer install --no-interaction --prefer-dist --no-progress; [ -f .env ] || cp .env.example .env; php artisan key:generate --force; php artisan config:clear; rm -f database/database.sqlite; touch database/database.sqlite; php artisan migrate --force --seed; fi; if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi; npx playwright install chromium; npm run build; npx playwright test --reporter=list"]
+# .env, key, a freshly recreated database/database.sqlite, then the fixture
+# helper) so Playwright's webServer can boot it via `php artisan serve`.  The
+# exported APP_ENV/DB_* pin the testing environment to that workspace SQLite
+# file, whatever the repository's .env says.  A pure SPA repo skips to the
+# lockfile-tolerant npm install and the vite build/preview contract.
+CMD ["bash", "-lc", "set -e; if [ -f artisan ]; then export APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=\"$PWD/database/database.sqlite\"; composer install --no-interaction --prefer-dist --no-progress; [ -f .env ] || cp .env.example .env; php artisan key:generate --force; php artisan config:clear; rm -f database/database.sqlite; touch database/database.sqlite; php /opt/nesti/e2e_fixtures.php; fi; if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi; npx playwright install chromium; npm run build; npx playwright test --reporter=list"]

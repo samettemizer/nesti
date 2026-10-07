@@ -19,7 +19,9 @@ reopened issue with surviving history).
 
 Error strategy per node
 ───────────────────────
-• node_setup      – raises on unrecoverable git errors (after removing its own
+• node_setup      – a refused claim returns ``failure_reason`` and routes
+                    straight to cleanup (nothing cloned, no LLM call); raises
+                    on unrecoverable git errors (after removing its own
                     tempdir); TaskEngine's try/except reopens the issue.
 • node_plan       – catches RuntimeError ("all planners failed"), leaves
                     ``plan`` empty; route_after_plan then routes to failure.
@@ -55,6 +57,14 @@ node_plan decides whether the issue is backend, frontend or fullstack work
 (issue text first, then the planner's ``SCOPE:`` line) and logs it as the run's
 one ``SCOPE:`` line.  The scope narrows the prompts, the reference docs and the
 retrieved chunks; it never gates a test layer.
+
+Fixture dependencies
+────────────────────
+When the E2E sandbox verifies that a declared fixture's seeder genuinely does
+not exist, node_playwright_test logs BLOCKED and node_pause_dependency pauses
+the issue durably in GitLab and opens one backend dependency issue — with no
+planner, coder or escalation call, independently of the scope.  The issue is
+resumed by TaskEngine's reconciliation only after that child's MR is merged.
 """
 
 import logging
@@ -74,7 +84,8 @@ from graph.tools import (
     tool_skill_catalog_select, tool_skill_catalog_status, tool_quota_check,
     tool_memory_search_docs, tool_memory_find_similar, tool_memory_remember_solution,
     tool_memory_remember_failure, tool_memory_recall_failures,
-    tool_memory_forget_episodes,
+    tool_memory_forget_episodes, tool_issue_pause_for_fixture,
+    _STACK_SCAN_PRUNE,
 )
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
@@ -150,7 +161,9 @@ def _cleared_layer_outputs() -> dict:
     (``_last_failure_output`` picks the newest red layer with any output),
     widen the scope on the wrong side, and reach the MR body as a layer that
     never ran on the merged code.  Clearing them in node_code's *return* keeps
-    its own episodic-recall query on the failure that led to it.
+    its own episodic-recall query on the failure that led to it.  The fixture
+    fields are cleared for the same reason: no attempt inherits an earlier
+    attempt's block.
     """
     return {
         "test_output": "",
@@ -158,6 +171,8 @@ def _cleared_layer_outputs() -> dict:
         "openapi_paths": [],
         "vitest_output": "",
         "playwright_output": "",
+        "fixture_request": None,
+        "dependency_status": "",
     }
 
 
@@ -310,14 +325,19 @@ def _prune_stale_files(
 # Directories whose contents the coder needs to know about, with the cap on how
 # many entries each contributes. Migrations are listed in full: a duplicate
 # create-table migration is the one mistake that cannot be recovered from.
+# Entries are paths relative to the listed directory, so same-named files in
+# different subdirectories stay distinguishable.
 _INVENTORY_DIRS = (
     ("database/migrations", 60),
+    ("database/factories", 40),
+    ("database/seeders", 40),
     ("app/Models", 40),
     ("app/Http/Controllers", 40),
     ("app/Http/Resources", 40),
     ("app/Http/Requests", 40),
     ("app/Services", 40),
     ("resources/js/components", 40),
+    ("resources/views", 40),
     ("tests/Feature", 40),
 )
 
@@ -326,8 +346,83 @@ _INVENTORY_DIRS = (
 _INVENTORY_ROUTE_FILES = ("routes/api.php", "routes/web.php")
 _MAX_ROUTE_FILE_CHARS = 1500
 
+# Frontend and fullstack prompts also quote the files that decide whether a
+# component reaches the served page (the @vite entry, the Blade view, an SFC
+# root), the default seeder and the fixture manifest, then the build/test
+# configs — in this priority order.  Issue #12's coder never saw app.js or the
+# Blade view and shipped a component nothing mounted.  Only COMPLETE bodies are
+# quoted; a body over a budget or unreadable is named as omitted, so no prompt
+# presents a fragment as a file that is safe to rewrite.
+_INVENTORY_QUOTED_FILES = (
+    ("resources/js/app.js", "js"),
+    ("resources/js/app.ts", "ts"),
+    ("resources/views/app.blade.php", "blade"),
+    ("resources/js/App.vue", "vue"),
+    ("database/seeders/DatabaseSeeder.php", "php"),
+    ("e2e/nesti-fixtures.json", "json"),
+    ("vite.config.js", "js"),
+    ("vite.config.ts", "ts"),
+    ("playwright.config.js", "js"),
+    ("playwright.config.ts", "ts"),
+)
+_MAX_QUOTED_FILE_CHARS = 6000
+_MAX_QUOTED_TOTAL_CHARS = 16000
 
-def _repo_inventory(repo_path: str) -> str:
+
+def _inventory_listing(directory: Path) -> list[str]:
+    """Every file under *directory*, relative to it, pruning dependency trees."""
+    names: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(directory):
+        # In-place mutation is what makes os.walk skip these subtrees.
+        dirnames[:] = [d for d in dirnames if d not in _STACK_SCAN_PRUNE]
+        names += [Path(dirpath, name).relative_to(directory).as_posix() for name in filenames]
+    return sorted(names)
+
+
+def _quoted_entry_files(root: Path) -> list[str]:
+    """Quote complete entry bodies within the total section budget, never fragments."""
+    entries: list[tuple[str | None, str]] = []
+    for relative, language in _INVENTORY_QUOTED_FILES:
+        path = root / relative
+        if path.is_symlink():
+            entries.append((None, f"\n{relative}: exists, body omitted (symbolic link)."))
+            continue
+        if not path.is_file():
+            continue
+        try:
+            body = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            entries.append((None,
+                f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}). "
+                "Do not recreate it."))
+            continue
+        if len(body) > _MAX_QUOTED_FILE_CHARS:
+            entries.append((None,
+                f"\n{relative}: exists, body omitted ({len(body)} characters, over the "
+                f"{_MAX_QUOTED_FILE_CHARS}-character quote limit). Do not recreate it from memory."))
+            continue
+        quote = f"\nCurrent {relative} (complete):\n```{language}\n{body}\n```"
+        omitted = (
+            f"\n{relative}: exists, body omitted (the {_MAX_QUOTED_TOTAL_CHARS}-character "
+            "quote budget is spent). Do not recreate it from memory."
+        )
+        entries.append((quote, omitted))
+
+    # Reserve every omission notice first so later files can always be named;
+    # headings, fences, separators and notices all count toward the budget.
+    remaining = _MAX_QUOTED_TOTAL_CHARS - len("\n\n".join(omitted for _, omitted in entries))
+    sections: list[str] = []
+    for quote, omitted in entries:
+        extra = len(quote) - len(omitted) if quote is not None else 0
+        if quote is not None and extra <= remaining:
+            sections.append(quote)
+            remaining -= extra
+        else:
+            sections.append(omitted)
+    return sections
+
+
+def _repo_inventory(repo_path: str, scope: str = "fullstack") -> str:
     """
     Describe what the cloned repository already contains, for the prompts.
 
@@ -338,8 +433,13 @@ def _repo_inventory(repo_path: str) -> str:
     backend including a second ``create_tasks_table`` migration, and the PHP
     layer then failed with "table already exists" on every attempt.
 
+    Every scope gets the backend listing and the route files.  A frontend or
+    fullstack scope additionally gets the page-entry chain, the default seeder
+    and the fixture manifest quoted in full (see _INVENTORY_QUOTED_FILES).
+
     Never raises: an unreadable workspace yields an empty string and the
-    prompts are built without the section, exactly as before.
+    prompts are built without the section, exactly as before; one unreadable
+    file is named, never fatal for the rest.
     """
     try:
         root = Path(repo_path)
@@ -351,9 +451,7 @@ def _repo_inventory(repo_path: str) -> str:
             directory = root / relative
             if not directory.is_dir():
                 continue
-            names = sorted(
-                entry.name for entry in directory.rglob("*") if entry.is_file()
-            )
+            names = _inventory_listing(directory)
             if not names:
                 continue
             shown = names[:cap]
@@ -364,10 +462,17 @@ def _repo_inventory(repo_path: str) -> str:
             route_file = root / relative
             if not route_file.is_file():
                 continue
-            body = route_file.read_text(encoding="utf-8", errors="replace").strip()
+            try:
+                body = route_file.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError as exc:
+                lines.append(f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}).")
+                continue
             if len(body) > _MAX_ROUTE_FILE_CHARS:
                 body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
             lines.append(f"\nCurrent {relative}:\n```php\n{body}\n```")
+
+        if scope != "backend":
+            lines += _quoted_entry_files(root)
 
         if not lines:
             return (
@@ -446,10 +551,15 @@ def _test_report(state: IssueState) -> str:
 
 def node_setup(state: IssueState) -> dict:
     """
-    Create tempdir workspace, clone repo, create branch.
-    Lock the issue (status → in-progress) so no other worker picks it up.
+    Lock the issue (status → in-progress), then create the tempdir workspace,
+    clone the repo and create the branch.
     Put the coder chain back on its head tier: ``_llm`` lives for the whole
     loop process, and one issue's escalations must not start the next one.
+
+    Only a verified claim continues: the lock refuses an issue that stopped
+    being pending since it was listed (paused, held by a dependency record,
+    taken by another worker), and then nothing is cloned and no LLM is called
+    — ``failure_reason`` routes straight to cleanup.
     """
     logger.debug("→ node_setup")
     issue_id = state["issue_id"]
@@ -457,10 +567,12 @@ def node_setup(state: IssueState) -> dict:
     _llm.reset_coder_tier()
 
     # Lock first so no other worker grabs the issue during the clone.
-    # Phase 1 ignored the lock result as well – log and continue.
     lock = tool_issue_set_status(issue_id, "in_progress")
     if not lock["success"]:
-        logger.warning("Could not lock issue #%s: %s", issue_id, lock["error"])
+        reason = f"Could not claim issue #{issue_id}: {lock['error']}"
+        logger.warning("%s – leaving it untouched.", reason)
+        logger.debug("← node_setup (claim refused)")
+        return {"failure_reason": reason}
 
     workspace = tempfile.mkdtemp(prefix=f"ai-dev-{issue_id}-")
     repo_path = os.path.join(workspace, "repo")
@@ -597,7 +709,7 @@ def node_plan(state: IssueState) -> dict:
         max_topic_docs=topics,
         max_practice_docs=1,
     )
-    repo_context = _repo_inventory(state.get("repo_path", ""))
+    repo_context = _repo_inventory(state.get("repo_path", ""), decision.scope)
 
     # Phase 8 memory: how similar issues were solved before (Redis solution
     # cache) and the corpus passages the keyword catalog missed (Qdrant).
@@ -694,7 +806,7 @@ def node_code(state: IssueState) -> dict:
     )
     # Rebuilt every attempt: the previous attempt's own files are part of the
     # repository now, and a retry must see them rather than re-inventing them.
-    repo_context = _repo_inventory(state.get("repo_path", ""))
+    repo_context = _repo_inventory(state.get("repo_path", ""), scope)
 
     # Phase 8 memory.  A narrow scope filters the doc search from the first
     # attempt.  A fullstack scope falls back to the detected stack, and only
@@ -876,6 +988,8 @@ def _log_layer_verdict(
     passed: bool,
     state: IssueState,
     reason: str = "",
+    *,
+    blocked: bool = False,
 ) -> None:
     """Emit the one-line verdict for a test layer.
 
@@ -883,6 +997,8 @@ def _log_layer_verdict(
     issue number and the provider/model/billing that produced the code — this
     is the line an operator greps for in `docker-compose logs`. Green goes to
     INFO, red to ERROR so a failure stays visible at any sane log level.
+    ``blocked`` (INFO) says the suite never started because fixture
+    preparation stopped first — neither a pass nor a failed browser run.
 
     The attribution comes from IssueState, written by node_code from the coder
     that actually answered: the chain head moves under escalation and would
@@ -893,7 +1009,7 @@ def _log_layer_verdict(
         "model: %s · %s" + (" · reason: %s" if reason else "")
     )
     args = [
-        "PASSED" if passed else "FAILED",
+        "BLOCKED" if blocked else ("PASSED" if passed else "FAILED"),
         state.get("issue_id", "?"),
         state.get("attempt", 0),
         state.get("max_attempts", _ENV_MAX_ATTEMPTS),
@@ -903,7 +1019,7 @@ def _log_layer_verdict(
     ]
     if reason:
         args.append(reason)
-    (logger.info if passed else logger.error)(message, *args)
+    (logger.info if passed or blocked else logger.error)(message, *args)
 
 
 def node_test(state: IssueState) -> dict:
@@ -1000,22 +1116,117 @@ def node_vitest_test(state: IssueState) -> dict:
 
 
 def node_playwright_test(state: IssueState) -> dict:
-    """Run Playwright E2E tests in the browser sandbox."""
+    """
+    Run Playwright E2E tests in the browser sandbox.
+
+    ``fixture_request`` is set only when the sandbox verified that a declared
+    fixture's seeder class and file are both absent and stopped before the
+    browser started; that run logs BLOCKED rather than FAILED, and
+    route_after_playwright hands it to node_pause_dependency.
+    """
     logger.debug("→ node_playwright_test")
     logger.info("Running Playwright E2E tests (attempt %d) …", state.get("attempt", 0))
 
     result = tool_playwright_run_tests(state["repo_path"])
-    passed = result.get("result", {}).get("passed", False) if result["success"] else False
-    output = (
-        result.get("result", {}).get("output", "")
-        if result["success"]
-        else result.get("error", "")
-    )
+    detail = result.get("result", {}) if result["success"] else {}
+    passed = bool(detail.get("passed", False))
+    output = detail.get("output", "") if result["success"] else result.get("error", "")
+    fixture_request = None if passed else detail.get("fixture_request")
 
-    _log_layer_verdict("Playwright", passed, state)
+    if fixture_request:
+        _log_layer_verdict(
+            "Playwright", False, state,
+            reason=(
+                f"fixture GET {fixture_request['endpoint']} needs "
+                f"{fixture_request['seeder']}, whose class and file are absent; "
+                "the browser suite did not start"
+            ),
+            blocked=True,
+        )
+    else:
+        _log_layer_verdict("Playwright", passed, state)
 
     logger.debug("← node_playwright_test (passed=%s)", passed)
-    return {"playwright_passed": passed, "playwright_output": output}
+    return {
+        "playwright_passed": passed,
+        "playwright_output": output,
+        "fixture_request": fixture_request,
+    }
+
+
+def node_pause_dependency(state: IssueState) -> dict:
+    """
+    Turn a verified missing-seeder fixture into a durable dependency.
+
+    No planner, coder, escalation, quota check, commit or reopen happens here:
+
+    • paused     – GitLab holds the durable record, the issue carries the
+                   pause label and the backend child exists (or its creation
+                   is held for an operator).  The conversation and episodes are
+                   dropped only now, after the intent is durable, so the
+                   resumed run starts fresh.  → cleanup
+    • ineligible – the prerequisite belongs to this change's own backend work;
+                   the explanation is appended to the Playwright output and the
+                   shared retry budget decides (on_layer_failure / failure).
+    • error      – a transport or transition failure: alert, try a plain
+                   pause, and stop (→ cleanup) without node_failure, whose
+                   reopen would undo the hold.
+    """
+    logger.debug("→ node_pause_dependency")
+    issue_id = state["issue_id"]
+    subject = state.get("subject", f"issue-{issue_id}")
+    requirement = state.get("fixture_request") or {}
+
+    result = tool_issue_pause_for_fixture(
+        issue_id, state["repo_path"], requirement, list(state.get("written_files") or [])
+    )
+    detail = result["result"] if result["success"] else {}
+    status = detail.get("status")
+
+    if status == "paused":
+        _store.delete(issue_id)
+        forgot = tool_memory_forget_episodes(issue_id)
+        if not forgot["success"]:
+            logger.warning("Failed to drop the episodes of issue #%s: %s", issue_id, forgot["error"])
+        logger.info("Issue #%s paused: %s", issue_id, detail.get("reason", ""))
+        logger.debug("← node_pause_dependency (paused)")
+        return {"dependency_status": "paused", "failure_reason": detail.get("reason", "")}
+
+    if status == "ineligible":
+        reason = detail.get("reason", "")
+        logger.info("Issue #%s: fixture dependency ineligible – %s", issue_id, reason)
+        logger.debug("← node_pause_dependency (ineligible)")
+        return {
+            "dependency_status": "ineligible",
+            "fixture_request": None,
+            "playwright_output": f"{state.get('playwright_output', '')}\n\n{reason}".strip(),
+        }
+
+    error = detail.get("reason") if result["success"] else result["error"]
+    error = error or f"unexpected dependency status {status!r}"
+    held = tool_issue_set_status(
+        issue_id, "paused",
+        note=f"Nesti: handling this issue's fixture dependency failed ({error}); "
+             "holding it for an operator.",
+    )
+    if held["success"]:
+        message = f"Fixture dependency handling failed and the issue is held (paused): {error}"
+    else:
+        message = (
+            f"Fixture dependency handling failed ({error}) and the pause could not be "
+            f"applied ({held['error']}): the issue may keep its stale in-progress lock. "
+            "Operator recovery: stop the poller, confirm no dependency issue was created, "
+            "then resume the issue and clear its conversation and episodes (README, "
+            "'Fixture dependencies'). Reconciliation cannot recreate a record that was "
+            "never saved."
+        )
+    logger.error("Issue #%s: %s", issue_id, message)
+    telegram_notify(
+        f"⚠️ Fixture dependency handling failed for issue <b>#{issue_id}</b> – "
+        f"<i>{subject}</i>\n<code>{message}</code>"
+    )
+    logger.debug("← node_pause_dependency (error)")
+    return {"dependency_status": "error", "failure_reason": message}
 
 
 def node_on_layer_failure(state: IssueState) -> dict:

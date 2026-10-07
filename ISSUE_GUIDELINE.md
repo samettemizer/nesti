@@ -254,11 +254,31 @@ Write acceptance criteria that map to the test layers the issue touches:
 
 ### Practical warnings
 
-**E2E database state.** The Playwright sandbox database contains exactly what
-`DatabaseSeeder` creates (the sandbox runs `php artisan migrate --force
---seed`). Do **not** write E2E criteria that assume rows exist unless you also
-ask for a seeder that creates them. If the issue adds a table and a seeder,
-name the seeder explicitly in the requirements.
+**E2E database state.** The isolated Playwright database starts with
+`DatabaseSeeder`; a declared existing fixture seeder may additionally run
+once. For a hard nonempty existing unauthenticated GET collection, name the
+endpoint/model/seeder in committed `e2e/nesti-fixtures.json`:
+
+```json
+{"version":1,"fixtures":[{"endpoint":"/api/tasks","model":"App\\Models\\Task","seeder":"Database\\Seeders\\TaskSeeder"}]}
+```
+
+Do not declare a manifest for valid empty states, mocked UI, or a spec that
+creates data through existing UI/API routes. For an existing API/model with
+no seeder, declare the desired conventional seeder in JSON; do not create or
+register a nonexistent PHP class in the frontend parent. Only verified class
+and file absence pauses it for one backend dependency, resumed after merge.
+New model/API work still includes its factory, seeder and PHPUnit proof in
+the same issue. The manifest is sandbox test setup, not production default
+seeding. Retries re-emit it or deliberately remove the prerequisite with an
+empty fixture list.
+
+**Real-page integration.** Register/mount the component in the actual
+served JS entry and Blade view while preserving PrimeVue/Aura/plugins.
+In-DOM custom tags are kebab-case with closing tags; preserve an SFC root
+when the app uses one. Register the real API response waiter before
+navigation, then compare visible row content with that response. A passing
+isolated component test or unused `App.vue` does not prove `/` renders it.
 
 **Component-test DOM.** Component-test criteria should be about rendered text,
 props, and events rather than PrimeVue's internal DOM structure. For example,
@@ -428,7 +448,7 @@ Requirements:
 - PrimeVue `DataTable` + `Column` for `title`, `due_date` and `is_done`.
 - Sortable columns.
 - A search input filtering rows client-side.
-- Mounted on `/`.
+- Mounted on `/` through the existing served entry/view, preserving PrimeVue/Aura.
 
 https://primevue.dev/llms/components/datatable.md
 
@@ -444,9 +464,10 @@ Acceptance Criteria:
 ### 3. Frontend Form (Vitest + Playwright layers)
 
 > PrimeVue Dialog posting to an existing API. A frontend-scoped issue: the
-> change runs Vitest → Playwright (Playwright drives the full app, seeder data
-> matters). PHPUnit joins only if the change touches PHP — e.g. registers a
-> seeder for E2E data; OpenAPI does not run, the `/api` surface is unchanged.
+> change runs Vitest → Playwright; specs can create their own data through
+> the existing API. A hard nonempty prerequisite uses the fixture manifest.
+> PHPUnit joins if the change touches shared Blade/web-route plumbing;
+> OpenAPI does not run when the `/api` surface is unchanged.
 
 **Title:**
 ```
