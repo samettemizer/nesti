@@ -21,11 +21,15 @@ frontend-only change never runs PHPUnit, and a change that did not touch the
 API surface never pays for a Scramble export.
 
 TaskEngine only:
-  1. Polls GitLab Issues for the next pending issue (via graph.tools – no
+  1. Reconciles fixture dependencies (graph.tools): paused issues whose
+     backend dependency MR has merged are resumed BEFORE pending selection,
+     even when the queue would otherwise be empty.
+  2. Polls GitLab Issues for the next pending issue (via graph.tools – no
      direct GitLabIssuesClient / GitLabClient / DockerRunner imports here).
-  2. Seeds the initial IssueState and invokes the compiled graph.
-  3. Acts as the crash net: if the graph itself raises, the issue is
-     reopened and a Telegram alert is sent.
+  3. Seeds the initial IssueState and invokes the compiled graph.
+  4. Acts as the crash net: if the graph itself raises, the issue is
+     reopened and a Telegram alert is sent (a paused or dependency-held issue
+     refuses that reopen, so a crash never undoes a hold).
 
 main.py is unchanged: it still constructs TaskEngine() and calls run_once().
 """
@@ -35,7 +39,11 @@ import os
 
 from graph.builder import graph
 from graph.state import IssueState
-from graph.tools import tool_issue_list_pending, tool_issue_set_status
+from graph.tools import (
+    tool_issue_list_pending,
+    tool_issue_reconcile_dependencies,
+    tool_issue_set_status,
+)
 from telegram_notifier import notify as telegram_notify
 
 logger = logging.getLogger(__name__)
@@ -52,7 +60,22 @@ class TaskEngine:
 
         Returns True if a Merge Request was successfully opened, False otherwise.
         """
-        # ── 1. Fetch next pending issue ───────────────────────────────────
+        # ── 1. Reconcile fixture dependencies ─────────────────────────────
+        # Before selection on purpose: a parent released here is eligible in
+        # this very poll, and an unreadable issue list aborts the poll rather
+        # than selecting work against an unknown dependency state.
+        reconciled = tool_issue_reconcile_dependencies()
+        if not reconciled["success"]:
+            logger.error("Fixture dependency reconciliation failed: %s", reconciled["error"])
+            return False
+        summary = reconciled["result"]
+        if summary["resumed"] or summary["waiting"] or summary["errors"]:
+            logger.info(
+                "Fixture dependencies: resumed %s, waiting %s, errors %s",
+                summary["resumed"], summary["waiting"], summary["errors"],
+            )
+
+        # ── 2. Fetch next pending issue ───────────────────────────────────
         listing = tool_issue_list_pending()
         if not listing["success"]:
             logger.error("Failed to query GitLab for pending issues: %s", listing["error"])
@@ -70,7 +93,7 @@ class TaskEngine:
 
         max_attempts = int(os.environ.get("MAX_CODE_RETRIES", "2")) + 1
 
-        # ── 2. Seed initial state ─────────────────────────────────────────
+        # ── 3. Seed initial state ─────────────────────────────────────────
         initial_state: IssueState = {
             "issue":          issue,
             "issue_id":       issue_id,
@@ -104,6 +127,8 @@ class TaskEngine:
             "vitest_output":     "",
             "playwright_passed": False,
             "playwright_output": "",
+            "fixture_request":   None,
+            "dependency_status": "",
             "retrieved_chunks":  0,
             "past_solutions":    0,
             "recalled_failures": 0,
@@ -112,13 +137,13 @@ class TaskEngine:
             "error":          "",
         }
 
-        # ── 3. Run the graph ──────────────────────────────────────────────
+        # ── 4. Run the graph ──────────────────────────────────────────────
         try:
-            # A fullstack retry cycle now traverses 7 nodes (on_layer_failure →
+            # A fullstack retry cycle traverses up to 8 nodes (on_layer_failure →
             # code → detect_stack → phpunit_test → openapi_test → vitest_test →
-            # playwright_test), and setup → bootstrap → load_skills → plan adds
-            # a fixed prologue; size the recursion limit so large
-            # MAX_CODE_RETRIES values never trip LangGraph's default of 25.
+            # playwright_test → pause_dependency), and setup → bootstrap →
+            # load_skills → plan adds a fixed prologue; size the recursion limit
+            # so large MAX_CODE_RETRIES values never trip LangGraph's default of 25.
             final_state = graph.invoke(
                 initial_state,
                 config={"recursion_limit": max(25, 16 + 9 * max_attempts)},

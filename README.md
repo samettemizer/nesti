@@ -13,6 +13,7 @@ a human writing a single line of code.
 
 ```
 GitLab issue (labelled, opt-in)
+  → claim issue            independently verified lock, or stop before cloning
   → bootstrap             scaffold or top-up the Laravel app
   → load skills            vendored corpus + URLs from the issue
   → decide scope           [backend | frontend | fullstack]  issue text, confirmed by the planner
@@ -23,6 +24,7 @@ GitLab issue (labelled, opt-in)
         PHPUnit → OpenAPI → Vitest → Playwright
   → all green: commit + push + GitLab MR (body: Closes #<iid>) + close issue
   → red layer: escalate provider, retry (shared budget: MAX_CODE_RETRIES + 1)
+  → verified missing E2E fixture: pause, open one backend dependency, wait for its MR merge
   → all retries exhausted: remove lock label, comment failure, return to pending
 ```
 
@@ -74,13 +76,14 @@ restored from `HEAD`, so a renamed migration cannot leave two
 Intake is **opt-in by label**. Only open issues carrying the label configured
 in `GITLAB_ISSUE_LABEL` (default `nesti`) are picked up.
 
-GitLab issues have only `opened` and `closed`, so the three-state intake model
-lives in labels:
+GitLab issues have only `opened` and `closed`; intake state lives in labels
+and trusted dependency notes:
 
 | State       | Condition |
 |-------------|-----------|
-| **pending** | open, has `<label>`, does NOT have `<label>::in-progress` |
+| **pending** | open, has `<label>`, neither control label, no active or malformed dependency record |
 | **in progress** | open, has `<label>::in-progress` (the lock Nesti owns) |
+| **paused** | open, has `<label>::pause` or an active dependency record |
 | **done** | closed |
 
 Scoped labels (the `::` form) are mutually exclusive within their scope in
@@ -93,6 +96,10 @@ natively cross-linked.
 
 **Failure (retries exhausted):** Nesti removes the lock label and comments the
 failure, returning the issue to the pending pool so it can be retried.
+
+Human closures and opt-outs are never reversed. A manual pause is not removed
+by dependency reconciliation. `"new"` status refuses paused or unresolved
+dependency issues; it only unlocks an issue still open and opted in.
 
 Issue numbers are the project-scoped `iid` (what `#7` means in the project UI).
 
@@ -207,11 +214,11 @@ when their issue finishes.
 Memory is optional and never raises: an unreachable Qdrant, a pre-8 Redis or a
 missing embedder degrades retrieval to "no results", and
 `NESTI_MEMORY_ENABLED=false` runs the pipeline exactly as before. Index the
-corpus once after `docker-compose up` (and after `fetch_skills.py`); changing
-the embedding model requires `--recreate`:
+corpus with Redis/Qdrant available before starting the poller, and after
+`fetch_skills.py`; changing the embedding model requires `--recreate`:
 
 ```bash
-docker exec nesti-orchestrator python scripts/index_skills.py
+docker-compose run --rm --no-deps --entrypoint python nesti-orchestrator scripts/index_skills.py
 ```
 
 The seven `memory_*` MCP tools expose the same stores.
@@ -239,13 +246,107 @@ Playwright specs — Vitest's default include glob matches `e2e/*.spec.js` and
 dies with a Playwright error. The Node sandbox CMD also passes
 `--exclude 'e2e/**'`.
 
-For a Laravel repo the E2E sandbox runs `composer install`, sets up the database
-(`php artisan migrate --force --seed`), `npm run build`, then
-`npx playwright test` with `php artisan serve` as the web server on
-`http://127.0.0.1:8000`.
+For Laravel, the E2E sandbox exports `APP_ENV=testing` and pins SQLite to the
+recreated workspace `database/database.sqlite`. After Composer/config setup,
+the image-owned `scripts/e2e_fixtures.php` runs migrations, default seeding and
+declared fixture preparation. Only then do the build and browser tests run.
+The helper refuses a declared model using another database before migrating
+or seeding. Scope never controls data preparation.
 
 Set `NESTI_STACK` to `php`, `vue`, or `fullstack` to pin the detection if your
 repository layout misleads it; the default `auto` is right for most projects.
+
+### Served-page integration
+
+A component test does not prove the component is served. Follow the existing
+route → Blade view → Vite entry → Vue root. For an in-DOM root, preserve
+PrimeVue/Aura/plugins, register the feature before `app.mount('#app')`, and
+place its explicit kebab-case tag in the served Blade view. An unused
+`App.vue` is not a page. Preserve an existing SFC-root architecture.
+
+## Fixture dependencies
+
+An optional committed `e2e/nesti-fixtures.json` declares a hard nonempty
+real-data prerequisite for an existing unauthenticated GET collection:
+
+```json
+{"version":1,"fixtures":[{"endpoint":"/api/tasks","model":"App\\Models\\Task","seeder":"Database\\Seeders\\TaskSeeder"}]}
+```
+
+The UTF-8 manifest is limited to 32 KiB and 16 unique requirements, with
+exact fields and local `/api/...` paths. Empty states, mocked tests and specs
+that create data through existing UI/API routes need no manifest. A retry
+must re-emit a still-required manifest or deliberately emit `fixtures: []`;
+normal stale-file pruning is unchanged.
+
+The helper probes the real HTTP kernel after default seeding. A nonempty
+collection is already satisfied; otherwise it requires an empty model table
+and an endpoint SELECT on that table, then runs an existing declared seeder
+once. Default-seeded rows are not duplicated. This is test setup, not a
+silent change to production `DatabaseSeeder`.
+
+Only a seeder whose class **and** conventional PHP file are absent can
+produce exit 78 and a matching bounded atomic report at
+`/nesti-results/fixtures.json`. The browser never started: the verdict is
+`Playwright BLOCKED`, not FAILED or PASSED. Timeouts, HTTP/auth/JSON errors,
+unconfirmed mapping, existing filtered-out rows, broken/no-op/throwing
+seeders and unrelated seed errors remain ordinary failures.
+
+For an unchanged HEAD-backed API/model and no coder-authored backend files,
+Nesti saves trusted intent in GitLab, verifies `nesti::pause`, and creates
+one English `Scope: backend` issue. Declare the applicable existing seeder,
+or the conventional missing `<Model>Seeder` in JSON without adding or
+registering a nonexistent class in the frontend parent. New backend work
+must ship its own factory/seeder and uses the normal retry path instead.
+
+Dependency truth is the latest non-system
+`NESTI_FIXTURE_DEPENDENCIES_V1` note authored by the configured token's user
+(`GET /user`). A canonical key binds project, parent IID, target branch and
+requirement; the child carries `NESTI_FIXTURE_CHILD_V1` ownership metadata.
+Redis history is not dependency state. Intent/submission/link/merge/release
+writes are read back independently; foreign or malformed metadata cannot
+release a parent, and stale writes are refused.
+
+Every poll reconciles before selecting work. A closed child or an open MR is
+not completion: an independently read related MR must start with exactly
+`Closes #<child>`, be merged with `merged_at`, and target the recorded project
+and configured `GITLAB_DEFAULT_BRANCH`. Only all merged items release the
+parent; normal setup then claims it. No parent LLM/escalation/commit runs
+while waiting. Later reconciliation never clears a released parent's live
+lock or a later manual pause. A merged-but-still-unsatisfied requirement
+blocks for an operator without opening a second child.
+
+### Operator recovery
+
+Stop the poller first (`docker-compose stop nesti-orchestrator`), restore
+GitLab access and use the same automation identity. Notes, labels, issue
+creation and related/detail MR reads must be permitted. A new token for the
+same user is safe; changing users requires explicit migration of trusted
+notes/child ownership, never a silent trust fallback.
+
+- **Unknown child POST outcome:** enumerate all issues, including closed and
+  unlabelled, and check trusted exact-key ownership markers. Reconcile one
+  found child. Only after establishing no request remains in flight and no
+  child exists may an operator read `get_fixture_state`, reset that item's
+  `creation_submitted=false`, `state="creating"`, `reason=""`, and write it
+  with `save_fixture_state`. The next poll makes one POST; elapsed time alone
+  is not evidence that creation failed.
+- **Blocked existing child corrected by a later MR:** explicitly set its
+  item to `waiting` and clear its reason through the verified state methods.
+  Normal MR merge verification still applies. Ambiguous ownership must be
+  resolved before changing state.
+- **Pause/stale lock with no durable record:** verify no child or open/merged
+  closing MR exists, then use `resume_issue` and clear only that parent's
+  conversation and episodes. Ordinary crash recovery refuses the hold;
+  reconciliation cannot reconstruct evidence never saved.
+- **Configured target changed:** keep the hold and explicitly migrate the
+  record after reviewing the target/MR. Do not manually strip labels to
+  bypass a durable record.
+
+Use a one-off application container with `--entrypoint python` while the
+poller is stopped; dependency mutations are deliberately not exposed by MCP.
+Restart only after independently verifying the intended note and labels.
+
 
 ---
 
@@ -272,10 +373,10 @@ main.py                    <- CLI entry point (--loop / single-run)
 task_engine.py             <- invokes the LangGraph pipeline
 graph/
   state.py                 <- IssueState TypedDict
-  tools.py                 <- 24 atomic tool functions (issues, GitLab, sandboxes, skills, memory, quota)
+  tools.py                 <- atomic issue/GitLab/sandbox/skill/memory/quota functions
   nodes.py                 <- LangGraph nodes
   edges.py                 <- conditional routing, one router per test layer
-  builder.py               <- compiled StateGraph (14 nodes)
+  builder.py               <- compiled StateGraph
 mcp_server/
   server.py                <- MCP stdio server (FastMCP), 25 tools
   tools/                   <- issues, GitLab, sandbox, skill, memory, quota MCP tools
@@ -283,6 +384,8 @@ mcp_server/
 conversation_store.py      <- Redis-backed per-issue message history
 llm_client.py              <- provider cascade with multi-turn support
 issue_scope.py             <- backend/frontend/fullstack scope of an issue + documentation-request check
+e2e_fixtures.py            <- manifest, sandbox-report and durable dependency contracts
+issue_dependencies.py      <- verified pause/child/merge/release workflow, no LLM
 prompt_builder.py          <- scope-composed system + user prompts with a TASK SCOPE block
 skill_loader.py            <- URL extraction + markdown fetching from issue text
 skill_catalog.py           <- deterministic offline skill selection from vendored corpus
@@ -302,6 +405,7 @@ scripts/
   oauth.py                 <- `nesti` CLI: provider login / logout + /usage
   preflight.py             <- pre-run config + lifecycle + Docker verification
   seed_live_issues.py      <- creates demo issues with the opt-in label
+  e2e_fixtures.php          <- image-owned isolated Laravel fixture preparation
 test_graph_smoke.py        <- offline smoke tests for the LangGraph pipeline
 test_live_laravel.py       <- opt-in integration tests (Docker + network)
 ```
@@ -325,8 +429,9 @@ ISSUE_GUIDELINE.md         <- how to write effective GitLab issues
 **1. Clone and configure**
 ```bash
 cp .env.example .env
-# Edit .env — at minimum: ANTHROPIC_API_KEY, GITLAB_URL, GITLAB_TOKEN,
-#   GITLAB_PROJECT_PATH, GITLAB_ISSUE_LABEL
+# Edit .env — at minimum: GITLAB_URL, GITLAB_TOKEN,
+#   GITLAB_PROJECT_PATH, GITLAB_ISSUE_LABEL, plus an enabled API key
+#   or a consumer subscription login.
 ```
 
 **2. Build the sandbox images** (one per test layer)
@@ -353,16 +458,33 @@ Verifies config, the GitLab Issues lifecycle (creates a throwaway probe issue
 and drives lock → unlock → close), the GitLab repo, Anthropic, Redis
 (warn-only), Docker + the three sandbox images, and the vendored corpus.
 
-**5. Start**
+**5. Build, index, then start**
 ```bash
+docker-compose build nesti-orchestrator nesti-mcp
+docker-compose up -d nesti-redis nesti-qdrant
+docker-compose run --rm --no-deps --entrypoint python nesti-orchestrator scripts/index_skills.py
 docker-compose up --build -d
 docker-compose logs -f nesti-orchestrator
 ```
 
 This starts four containers: `nesti-orchestrator`, `nesti-redis`,
 `nesti-mcp` and `nesti-qdrant`. Redis and Qdrant persist across restarts via
-the named `nesti_redis_data` and `nesti_qdrant_data` volumes. Index the skill
-corpus once afterwards (see [Hierarchical Vector Memory](#hierarchical-vector-memory)).
+the named `nesti_redis_data` and `nesti_qdrant_data` volumes.
+
+When a practice instruction changes, **index before starting the poller**:
+
+```bash
+docker-compose stop nesti-orchestrator
+docker-compose build nesti-orchestrator nesti-mcp
+docker-compose up -d nesti-redis nesti-qdrant
+docker-compose run --rm --no-deps --entrypoint python nesti-orchestrator scripts/index_skills.py --only practices
+docker-compose up --build -d
+```
+
+Verify `DocumentMemory.indexed_doc_hashes()["practices/frontend-design.md"]`
+matches SHA-256 of the deployed file. An indexing failure with memory enabled
+must not restart polling with stale instructions. Skip indexing only when
+`NESTI_MEMORY_ENABLED=false` was already the operator's configuration.
 
 **6. Connect the MCP server (optional)**
 ```bash
@@ -379,8 +501,8 @@ the Claude extension automatically.
 
 ## MCP Server
 
-`nesti-mcp` exposes all 24 `graph/tools.py` functions plus one extra skill
-tool over the Model Context Protocol (stdio transport) — **25 tools** in total.
+`nesti-mcp` exposes the public issue/GitLab/Docker/skill/memory/quota layer —
+**25 tools** — over the Model Context Protocol (stdio transport).
 Any MCP-compatible client — Claude Code CLI, VS Code Claude extension, Cursor —
 can drive the same GitLab/Docker toolchain the orchestrator uses, e.g.:
 
@@ -397,6 +519,9 @@ can drive the same GitLab/Docker toolchain the orchestrator uses, e.g.:
 
 The MCP server runs alongside the orchestrator; it does not replace it.
 Every tool returns the uniform `{"success": bool, ...}` shape.
+`docker_run_playwright` returns `{"passed", "output", "fixture_request"}`;
+Vitest retains its tuple contract internally. The two dependency mutation
+tools remain graph-internal, preserving the single polling writer.
 
 Dependency: `mcp>=1.0.0,<2`. The MCP SDK renamed `FastMCP` to `MCPServer` in
 2.x and changed the decorator API; the server stays on the 1.x line.
@@ -453,8 +578,10 @@ See `.env.example` for all variables. Key ones:
 
 | Variable | Required | Default |
 |----------|----------|---------|
-| `ANTHROPIC_API_KEY` | **Yes** | — |
-| `DEEPSEEK_API_KEY` | Recommended | — |
+| `DEEPSEEK_API_ENABLED` | No | `true` |
+| `DEEPSEEK_API_KEY` | When DeepSeek API is enabled | — |
+| `ANTHROPIC_API_ENABLED` | No | `false` |
+| `ANTHROPIC_API_KEY` | When Anthropic API is enabled | — |
 | `GITLAB_URL` + `GITLAB_TOKEN` | **Yes** | — |
 | `GITLAB_PROJECT_PATH` | **Yes** | — |
 | `GITLAB_ISSUE_LABEL` | No | `nesti` |
@@ -476,6 +603,15 @@ See `.env.example` for all variables. Key ones:
 | `NESTI_STACK` | No | `auto` |
 | `INCLUDE_SKILLS_IN_CODE_PROMPT` | No | `0` |
 
+Paid API clients require both their enable flag and an API key. A false flag
+prevents planner, coder, escalation and fallback calls even when the key is
+present; availability is checked before each attempt. Anthropic's billed API
+is opt-in and does not control a Claude consumer subscription.
+`NESTI_CONSUMER_PRIORITY` selects the consumer providers independently. To use
+only ChatGPT Plus with DeepSeek fallback, set it to `chatgpt-plus`, keep both
+local-model flags false, enable DeepSeek and disable Anthropic. Editing `.env`
+changes the next container's configuration, not an already-running process.
+
 ---
 
 ## Verification
@@ -483,16 +619,14 @@ See `.env.example` for all variables. Key ones:
 **Offline smoke tests** (no Docker, no network):
 ```bash
 python test_graph_smoke.py
-# 319 checks — covers every node, every routing edge, the full state machine
+# Behavior regressions: graph gates, fixture protocol, durable recovery and target checkout
 ```
 
 **Live integration tests** (needs Docker + network):
 ```bash
 python test_live_laravel.py
-# Proves all 8 real-container steps: greenfield scaffold, migration,
-# php artisan test green, openapi.json with /api/tasks, a deliberately
-# undocumented route reported as undocumented, Vitest green, Playwright
-# green against php artisan serve.
+# Includes the real empty/seeded/missing/broken fixture matrix, SQLite isolation,
+# real-page row matching, and existing PHP/OpenAPI/Vitest gates.
 ```
 
 ---

@@ -18,6 +18,17 @@ a backend change never starts a Node container even in a repository full of
 did not touch the API surface never pays for a Scramble export.  Every layer
 shares the same retry budget: ``attempt`` is incremented once per node_code
 run, not once per layer, and every red gate routes to the same escalation node.
+
+``route_after_code`` rejects unapplied responses before these layers, using
+the same retry budget without assigning a failed test verdict.
+
+Fixture dependencies
+────────────────────
+``route_after_playwright`` sends a verified missing-seeder report to
+``pause_dependency`` before it looks at the budget; that node either pauses
+the issue (→ cleanup) or finds the prerequisite belongs to the change itself
+(→ the shared retry budget).  ``route_after_setup`` lets only a verified claim
+reach the clone and the LLMs.
 """
 
 import logging
@@ -39,6 +50,22 @@ def _retry_or_fail(state: IssueState, retry_target: str) -> str:
     return "failure"
 
 
+def route_after_setup(state: IssueState) -> str:
+    """
+    After node_setup:
+      - the issue was claimed and cloned → "bootstrap"
+      - the claim was refused            → "cleanup"
+
+    Only a verified claim may clone, bootstrap or reach an LLM: an issue that
+    stopped being pending between listing and locking (paused, held by a
+    dependency record, taken by someone else) is left exactly as it is.
+    """
+    if state.get("failure_reason"):
+        logger.debug("route_after_setup → cleanup (%s)", state["failure_reason"])
+        return "cleanup"
+    return "bootstrap"
+
+
 def route_after_plan(state: IssueState) -> str:
     """
     After node_plan:
@@ -50,6 +77,13 @@ def route_after_plan(state: IssueState) -> str:
         return "code"
     logger.debug("route_after_plan → failure")
     return "failure"
+
+
+def route_after_code(state: IssueState) -> str:
+    """Reject unapplied code before stack detection or any test-layer verdict."""
+    if state.get("files_written", False):
+        return "detect_stack"
+    return _retry_or_fail(state, "on_layer_failure")
 
 
 def route_after_detect_stack(state: IssueState) -> str:
@@ -64,9 +98,6 @@ def route_after_detect_stack(state: IssueState) -> str:
     is True whenever the frontend layers do not run, so an unclassified change
     is still tested rather than waved through to commit.
 
-    node_detect_stack pins run_phpunit=True when no files were written, which
-    routes here to node_test's short-circuit guard — the attempt then fails
-    with corrective feedback exactly as it did before Phase 4.
     """
     if state.get("run_phpunit", True):
         logger.debug("route_after_detect_stack → phpunit_test (stack=%s)", state.get("stack"))
@@ -139,13 +170,40 @@ def route_after_vitest(state: IssueState) -> str:
 def route_after_playwright(state: IssueState) -> str:
     """
     After node_playwright_test:
-      - passed                  → "commit"
-      - failed + retries remain → "on_layer_failure"
-      - failed + no retries     → "failure"
+      - passed                              → "commit"
+      - verified missing-seeder fixture     → "pause_dependency" (before the budget)
+      - failed + retries remain             → "on_layer_failure"
+      - failed + no retries                 → "failure"
+
+    A fixture request means the browser never started because a declared
+    seeder genuinely does not exist; no code attempt can fix a prerequisite
+    that belongs to the target branch, so it is checked before the budget —
+    even on the last attempt.
     """
     if state.get("playwright_passed", False):
         logger.debug("route_after_playwright → commit")
         return "commit"
+    if state.get("fixture_request"):
+        logger.debug("route_after_playwright → pause_dependency")
+        return "pause_dependency"
     target = _retry_or_fail(state, "on_layer_failure")
     logger.debug("route_after_playwright → %s", target)
     return target
+
+
+def route_after_dependency_pause(state: IssueState) -> str:
+    """
+    After node_pause_dependency:
+      - ineligible (the prerequisite is this change's own backend work)
+        → the shared retry budget: "on_layer_failure" or "failure"
+      - paused, or a transport error already reported → "cleanup"
+
+    A paused or errored parent never reaches node_failure: reopening it would
+    undo the hold, and another code attempt cannot create a merged seeder.
+    """
+    if state.get("dependency_status") == "ineligible":
+        target = _retry_or_fail(state, "on_layer_failure")
+        logger.debug("route_after_dependency_pause → %s", target)
+        return target
+    logger.debug("route_after_dependency_pause → cleanup (%s)", state.get("dependency_status"))
+    return "cleanup"

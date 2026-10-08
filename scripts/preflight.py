@@ -143,23 +143,18 @@ def check_issues() -> None:
 
 def _probe_issue_lifecycle(client: GitLabIssuesClient) -> None:
     """Create a throwaway issue and drive it through the whole lifecycle."""
-    created = client.session.post(
-        f"{client._project_api}/issues",
-        json={
-            "title": "nesti preflight probe",
-            "description": "Created by scripts/preflight.py to verify the issue "
-                           "lifecycle. Safe to ignore; left closed.",
-            "labels": client.issue_label,
-        },
-        timeout=_REQUEST_TIMEOUT,
-    )
-    if created.status_code not in (200, 201):
+    try:
+        probe = client.create_issue(
+            "nesti preflight probe",
+            "Created by scripts/preflight.py to verify the issue "
+            "lifecycle. Safe to ignore; left closed.",
+            labels=[client.issue_label],
+        )
+    except Exception as exc:  # pylint: disable=broad-except
         _fail(
             "Issue creation",
-            f"POST /issues → HTTP {created.status_code}: {created.text[:200]} — the "
-            f"token needs at least Reporter rights on {client.project_path}",
+            f"{exc} — the token needs at least Reporter rights on {client.project_path}",
         )
-    probe = created.json()
     iid, web_url = probe["iid"], probe.get("web_url", "")
     _ok("Issue creation", f"probe issue #{iid}")
 

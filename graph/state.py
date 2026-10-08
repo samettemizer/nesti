@@ -15,13 +15,11 @@ Design notes
   therefore the correct merge semantic — an append-reducer would duplicate
   every turn on each node update.
 
-• ``files_written`` is a small extension over the Phase 2 spec: node_code
-  records whether the LLM response contained parseable ``### FILE:`` blocks.
-  Without it, a response with no FILE blocks would send an untouched clone
-  into the sandbox, the baseline test suite would pass, and the pipeline
-  would open an empty "successful" Merge Request.  node_test short-circuits
-  to a failure when this flag is False, preserving the Phase 1
-  no-FILE-blocks retry-with-feedback behaviour.
+• ``files_written`` records whether node_code accepted any FILE or DELETE
+  operations. Without it an untouched clone could pass its baseline tests
+  and produce an empty "successful" Merge Request. ``route_after_code``
+  sends unapplied responses directly to generation feedback or exhaustion,
+  before stack detection and without a fabricated test-layer verdict.
 
 • ``run_phpunit`` (Phase 4) is stored next to the descriptive ``stack`` label
   because the two answer different questions.  ``stack`` says what the
@@ -110,6 +108,13 @@ class IssueState(TypedDict, total=False):
     vitest_output: str
     playwright_passed: bool
     playwright_output: str
+
+    # ── Fixture dependencies ───────────────────────────────────────────────
+    # A verified missing-seeder report from the E2E sandbox (endpoint/model/
+    # seeder/table) and what node_pause_dependency made of it.  Both are
+    # cleared by node_code so no attempt inherits a previous block.
+    fixture_request: dict | None       # set only by node_playwright_test
+    dependency_status: str             # "" | "paused" | "ineligible" | "error"
 
     # ── Hierarchical vector memory (Phase 8) ───────────────────────────────
     # How much memory reached the prompts — reported in the MR body so a

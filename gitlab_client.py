@@ -48,14 +48,21 @@ class GitLabClient:
     # ------------------------------------------------------------------
 
     def clone(self, target_path: str) -> git.Repo:
-        """Clone the Hello World repo into *target_path* and return the Repo object."""
+        """
+        Clone the configured repository into *target_path* and return the Repo.
+
+        The configured target branch (GITLAB_DEFAULT_BRANCH) is checked out
+        explicitly rather than the server's default HEAD: a merge request
+        targets that branch, and a parent resumed after its fixture dependency
+        merged must start from the branch that carries the merge.
+        """
         clone_url = self.repo_url
         if not self.use_ssh:
             # Embed token for HTTPS auth
             clone_url = self._authenticated_https_url()
         # if gitlab is not in isolated environment; log will include access-token (clone-url)
-        logger.info("Cloning %s into %s …", self.project_path, target_path)
-        repo = git.Repo.clone_from(clone_url, target_path)
+        logger.info("Cloning %s (%s) into %s …", self.project_path, self.default_branch, target_path)
+        repo = git.Repo.clone_from(clone_url, target_path, branch=self.default_branch)
         repo.config_writer().set_value("user", "name", "AI Developer").release()
         repo.config_writer().set_value("user", "email", "nesti@yourdomain.com").release()
         return repo

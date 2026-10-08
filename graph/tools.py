@@ -48,6 +48,7 @@ from docker_runner import DockerRunner
 from frontend_runner import FrontendRunner
 from gitlab_client import GitLabClient
 from gitlab_issues_client import GitLabIssuesClient
+from issue_dependencies import FixtureDependencies
 from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
 from skill_catalog import catalog_status, select_skills
@@ -166,10 +167,11 @@ _GITIGNORE_LINES = ("/database/*.sqlite*", "/.phpunit.cache")
 
 _VALID_STACKS = ("php", "vue", "fullstack")
 
-# Intake lifecycle vocabulary. GitLab has no "in progress" issue state, so
-# GitLabIssuesClient expresses these three words as labels plus open/closed —
-# the strings stay stable so every node and MCP client is unaffected.
-_VALID_STATUSES = ("in_progress", "closed", "new")
+# Intake lifecycle vocabulary. GitLab has no "in progress" or "paused" issue
+# state, so GitLabIssuesClient expresses these words as labels plus
+# open/closed — the strings stay stable so every node and MCP client is
+# unaffected.
+_VALID_STATUSES = ("in_progress", "closed", "new", "paused")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,8 +208,9 @@ def tool_issue_list_pending() -> dict:
     List pending issues for the configured project, oldest first.
     result: list of issue dicts (possibly empty).
 
-    Pending means: open, carrying the opt-in GITLAB_ISSUE_LABEL, and not yet
-    carrying the ``<label>::in-progress`` lock.
+    Pending means: open, carrying the opt-in GITLAB_ISSUE_LABEL, carrying
+    neither the ``<label>::in-progress`` lock nor the ``<label>::pause`` hold,
+    and not held by an unresolved (or malformed) fixture-dependency record.
     """
     try:
         return _ok(GitLabIssuesClient().list_pending(limit=_ISSUE_LIST_LIMIT))
@@ -219,15 +222,19 @@ def tool_issue_list_pending() -> dict:
 def tool_issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
     """
     Move an issue through the intake lifecycle.
-    status: "in_progress" | "closed" | "new"
+    status: "in_progress" | "closed" | "new" | "paused"
     result: {"issue_id": int, "status": str}
 
-    The vocabulary is deliberately the same three words the pipeline has always
-    used; GitLab expresses them as labels plus open/closed state:
-      in_progress → add    <label>::in-progress
+    The vocabulary is deliberately the words the pipeline has always used;
+    GitLab expresses them as labels plus open/closed state:
+      in_progress → add    <label>::in-progress (only while the issue is pending)
       closed      → remove <label>::in-progress, close, comment
       new         → remove <label>::in-progress, reopen, comment (back to the
-                    pending pool, which is what makes a failed issue retryable)
+                    pending pool, which is what makes a failed issue retryable);
+                    refused for a paused issue or one an unresolved dependency
+                    record holds, so a crash handler cannot undo the hold
+      paused      → add    <label>::pause, remove <label>::in-progress (manual
+                    hold; refused for a closed or opted-out issue)
     """
     if status not in _VALID_STATUSES:
         return _err(f"Invalid status {status!r} – expected one of {_VALID_STATUSES}.")
@@ -237,6 +244,8 @@ def tool_issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
             updated = client.lock_issue(issue_id)
         elif status == "closed":
             updated = client.close_issue(issue_id, note=note)
+        elif status == "paused":
+            updated = client.pause_issue(issue_id, note=note)
         else:  # "new"
             updated = client.reopen_issue(issue_id, note=note)
         if not updated:
@@ -244,6 +253,48 @@ def tool_issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
         return _ok({"issue_id": issue_id, "status": status})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_set_status(%s, %s) failed: %s", issue_id, status, exc)
+        return _err(exc)
+
+
+def _fixture_dependencies() -> FixtureDependencies:
+    """The dependency manager over the configured project and MR target branch."""
+    return FixtureDependencies(GitLabIssuesClient(), GitLabClient().default_branch)
+
+
+def tool_issue_pause_for_fixture(
+    issue_id: int, repo_path: str, requirement: dict, written_files: list[str]
+) -> dict:
+    """
+    Pause *issue_id* on a verified missing-seeder fixture and open its backend
+    dependency issue once.  Graph-internal: deliberately not exposed over MCP,
+    where a second process would become a second dependency writer and could
+    hand in caller-invented evidence.
+
+    result: {"status": "paused", "child_iid": int | None, "reason": str}
+          | {"status": "ineligible" | "error", "reason": str}
+    """
+    try:
+        return _ok(_fixture_dependencies().pause_for_fixture(
+            issue_id, repo_path, requirement, written_files
+        ))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_pause_for_fixture(%s) failed: %s", issue_id, exc)
+        return _err(exc)
+
+
+def tool_issue_reconcile_dependencies() -> dict:
+    """
+    Advance every open opted-in issue's fixture dependency record: link or
+    create children, observe merged MRs, resume released parents.  Runs before
+    every pending-issue selection; graph-internal like the pause tool.
+
+    result: {"resumed": [iid], "waiting": [iid], "errors": [{"issue_id", "error"}]}
+    success=False only when the issues could not be listed at all.
+    """
+    try:
+        return _ok(_fixture_dependencies().reconcile())
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_reconcile_dependencies() failed: %s", exc)
         return _err(exc)
 
 
@@ -891,14 +942,17 @@ def tool_vitest_run_tests(workspace_path: str) -> dict:
 def tool_playwright_run_tests(workspace_path: str) -> dict:
     """
     Run Playwright E2E tests in the browser sandbox.
-    result: {"passed": bool, "output": str}.
+    result: {"passed": bool, "output": str, "fixture_request": dict | None}.
 
-    The sandbox builds the app and Playwright's webServer config serves it;
-    no server needs to be running beforehand.
+    The sandbox prepares a Laravel app's database and the fixtures declared in
+    e2e/nesti-fixtures.json, builds the app, and Playwright's webServer config
+    serves it; no server needs to be running beforehand.  ``fixture_request``
+    is the declared requirement (endpoint, model, seeder, table) whose seeder
+    class and file are both absent — set only when the helper verified that
+    and stopped before the browser started; None for every other outcome.
     """
     try:
-        passed, output = FrontendRunner().run_playwright(workspace_path)
-        return _ok({"passed": passed, "output": output})
+        return _ok(FrontendRunner().run_playwright(workspace_path))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_playwright_run_tests(%s) failed: %s", workspace_path, exc)
         return _err(exc)

@@ -26,6 +26,8 @@ mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,s
 llm_client.py                provider cascade — the only module that calls LLMs
 prompt_builder.py            plan + code prompts composed per task scope, FILE-block output format
 issue_scope.py               backend/frontend/fullstack task scope + documentation-request check
+e2e_fixtures.py              manifest/report and trusted dependency metadata contracts
+issue_dependencies.py        durable pause/child/merge/release workflow; no LLM
 conversation_store.py        Redis per-issue history (ai-dev:issue:{id}:messages)
 docker_runner.py             PHP sandbox, OpenAPI export, bootstrap, FILE-block writer
 frontend_runner.py           Vitest + Playwright sandboxes
@@ -35,7 +37,7 @@ embedding.py, vector_store.py, semantic_cache.py   Phase 8 vector memory
 layer_output.py              condenses sandbox output to its meaningful tail
 telegram_notifier.py         fire-and-forget alerts
 scripts/                     oauth.py (`nesti` CLI), fetch_skills.py, index_skills.py,
-                             preflight.py, seed_live_issues.py
+                             preflight.py, seed_live_issues.py, e2e_fixtures.php
 skills/, templates/laravel/  vendored doc corpus (primevue/laravel/practices),
                              bootstrap templates
 test_graph_smoke.py          offline regression net (.venv/bin/python test_graph_smoke.py)
@@ -162,6 +164,18 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     `issue_scope.documentation_request` finds the issue asking for them.
     `_prune_stale_files` restores committed files (`git checkout HEAD --`),
     never deletes them, and the scaffold never copies the skeleton README.
+31. **A missing fixture needs exit 78 plus a valid declared sandbox report.**
+    Never infer it from timeout text, locators, mocks or an empty response.
+    Broken seeders and API/contract errors remain ordinary failures.
+32. **Dependency truth lives in trusted GitLab notes, not Redis history.**
+    Keep intent → verified pause → submitted → one child POST ordering.
+    No parent LLM/retry while held; release only after a qualifying related MR
+    actually merges on the recorded project/target.
+33. **Wire a feature into the existing served entry chain.** Preserve
+    PrimeVue/Aura/plugins and the root architecture; register before mount.
+    In-DOM Blade custom tags are kebab-case and never self-closing.
+34. **A rejected claim stops before clone/bootstrap/LLM.** Cleanup is the
+    terminal path; never log an unapplied lock and continue.
 
 ---
 
@@ -178,8 +192,9 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `graph/nodes.py` | `docker_runner.py` | `write_files()` → `(bool, list[str])` |
 | `graph/nodes.py` | `docker_runner.py` | `run_tests()` → `(bool, str)` |
 | `graph/tools.py` | `docker_runner.py` | `run_openapi_export()` / `run_bootstrap()` / `run_scramble_install()` → `(bool, str)` |
-| `graph/tools.py` | `frontend_runner.py` | `run_vitest()` / `run_playwright()` → `(bool, str)` — never raise |
-| `graph/tools.py` | `gitlab_issues_client.py` | `lock/close/reopen_issue()` → `bool`, verified against a read-back |
+| `graph/tools.py` | `frontend_runner.py` | `run_vitest()` → `(bool, str)`; `run_playwright()` → `{"passed": bool, "output": str, "fixture_request": dict\|None}` |
+| `graph/tools.py` | `gitlab_issues_client.py` | `lock/close/reopen/pause/resume_issue()` → `bool`, verified by independent GET |
+| `graph/tools.py` | `issue_dependencies.py` | `pause_for_fixture(...)` → paused/ineligible/error; `reconcile()` → resumed/waiting/errors; no LLM |
 | `graph/tools.py` | `skill_catalog.py` | `select_skills()` never raises, returns `list[Skill]` |
 | `mcp_server/tools/*.py` | `graph/tools.py` | pass-through `{"success": bool, ...}` — no reshaping |
 | `mcp_server/tools/skills.py` | `skill_loader.py` / `skill_catalog.py` | returns JSON-serialisable dicts (never `Skill` dataclasses) |

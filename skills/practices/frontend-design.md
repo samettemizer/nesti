@@ -9,12 +9,12 @@ triggers: visual design, ui design, typography, color palette, design system, lo
 
 # Frontend Visual Design
 
-*Visual direction for a Nesti screen: where design decisions go, how to plan them, what to avoid. Adapted for Nesti from the `frontend-design` skill (Apache License 2.0, see practices/licenses/frontend-design.txt). Modified: retargeted to issue-driven Laravel 13 + Vue 3 + PrimeVue 5 screens; interactive and screenshot steps removed; PrimeVue theming placement added.*
+*Visual direction for a Nesti screen: where design decisions go, how to plan them, what to avoid. Adapted for Nesti from the `frontend-design` skill (Apache License 2.0, see practices/licenses/frontend-design.txt). Modified: retargeted to issue-driven Laravel 13 + Vue 3 + PrimeVue 5 screens; interactive and screenshot steps removed; PrimeVue theming placement and entry-point registration added.*
 
 ## Where design decisions live in a Nesti app
 
 - Build with PrimeVue 5 components, not hand-written markup: DataTable + Column, InputText / Select / DatePicker / Checkbox / InputNumber, Button, Dialog / ConfirmDialog, Toast / Message, Menubar / Breadcrumb / Tabs. Import per file (`import Button from 'primevue/button'`).
-- The Aura preset stays exactly as registered in resources/js/app.js. Do not call `definePreset` and do not rewrite app.js for an ordinary issue. If the issue explicitly demands an app-wide theme change, the planner flags it as a risk in the plan instead of silently rewriting the setup.
+- resources/js/app.js keeps its PrimeVue plugin, Aura preset and every existing import and registration exactly as they are: never call `definePreset` or reconfigure PrimeVue there. The usual import/registration/mount a new feature needs is expected, otherwise the served page never shows it. In the in-DOM template (`createApp({})` mounted on `<div id="app">` in resources/views/app.blade.php) add `app.component('TaskTable', TaskTable)` before `app.mount('#app')` and `<task-table></task-table>` inside that div; in-DOM tags, props and events are kebab-case and custom tags are never self-closing. An SFC-root app (`createApp(App)`) keeps its architecture and renders the feature from App.vue. An App.vue no entry imports is not a page. If the issue explicitly demands an app-wide theme change, the planner flags it as a risk in the plan instead of silently rewriting the setup.
 - App-wide typography, colour CSS variables and keyframes go in resources/css/app.css (loaded by `@vite` in resources/views/app.blade.php; Tailwind 4 is imported there).
 - Per-instance visuals: the `pt` (pass-through) prop for classes/attributes on a component's DOM sections, the `dt` prop for design tokens scoped to one instance (PrimeVue recommends it over `:deep()`), or a scoped `<style>` in the SFC.
 - Layout (grid, flex, spacing, breakpoints) with Tailwind 4 utility classes. `tailwindcss-primeui` is not installed.
@@ -99,7 +99,7 @@ For a scroll reveal use the `v-animateonscroll` directive with the change's own 
 <script setup>
 import AnimateOnScroll from 'primevue/animateonscroll';
 
-const vAnimateonscroll = AnimateOnScroll; // local registration; app.js registers nothing globally
+const vAnimateonscroll = AnimateOnScroll; // local registration; never register directives in app.js
 </script>
 
 <template>
@@ -126,5 +126,5 @@ Keep the tone plain: sentence case, plain verbs, no filler. Each written element
 ## Testing a design change
 
 - Vitest asserts copy, props and emitted events (`wrapper.text()`, `wrapper.emitted()`), never CSS classes, colours or PrimeVue's internal DOM shape. Mount with the PrimeVue plugin and Aura preset in `global.plugins`.
-- Playwright asserts what a user sees: `getByRole('button', { name: 'Publish' })`, `getByText('Published', { exact: true })`, `getByTestId(...)`. Seed data through DatabaseSeeder or create it in the spec.
+- Playwright opens the served page and asserts what a user sees on real data: `getByRole('button', { name: 'Publish' })`, `getByText('Published', { exact: true })`, `getByTestId(...)`. Data comes from DatabaseSeeder, from the spec itself, or from a fixture declared in e2e/nesti-fixtures.json.
 - Styling itself is not unit-tested. A purely visual change still ships a spec for the behaviour or copy the issue names.

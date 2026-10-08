@@ -19,13 +19,15 @@ reopened issue with surviving history).
 
 Error strategy per node
 ───────────────────────
-• node_setup      – raises on unrecoverable git errors (after removing its own
+• node_setup      – a refused claim returns ``failure_reason`` and routes
+                    straight to cleanup (nothing cloned, no LLM call); raises
+                    on unrecoverable git errors (after removing its own
                     tempdir); TaskEngine's try/except reopens the issue.
 • node_plan       – catches RuntimeError ("all planners failed"), leaves
                     ``plan`` empty; route_after_plan then routes to failure.
 • node_code       – catches RuntimeError ("all coders exhausted") and jumps
-                    ``attempt`` to ``max_attempts`` so route_after_phpunit
-                    routes straight to failure (Phase 1 aborted immediately too).
+                    ``attempt`` to ``max_attempts`` so route_after_code routes
+                    straight to failure. Unapplied code never starts a test layer.
 • node_commit     – tool failures reopen the issue + notify instead of raising,
                     so the commit → cleanup edge still runs.
 
@@ -55,10 +57,19 @@ node_plan decides whether the issue is backend, frontend or fullstack work
 (issue text first, then the planner's ``SCOPE:`` line) and logs it as the run's
 one ``SCOPE:`` line.  The scope narrows the prompts, the reference docs and the
 retrieved chunks; it never gates a test layer.
+
+Fixture dependencies
+────────────────────
+When the E2E sandbox verifies that a declared fixture's seeder genuinely does
+not exist, node_playwright_test logs BLOCKED and node_pause_dependency pauses
+the issue durably in GitLab and opens one backend dependency issue — with no
+planner, coder or escalation call, independently of the scope.  The issue is
+resumed by TaskEngine's reconciliation only after that child's MR is merged.
 """
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -74,7 +85,8 @@ from graph.tools import (
     tool_skill_catalog_select, tool_skill_catalog_status, tool_quota_check,
     tool_memory_search_docs, tool_memory_find_similar, tool_memory_remember_solution,
     tool_memory_remember_failure, tool_memory_recall_failures,
-    tool_memory_forget_episodes,
+    tool_memory_forget_episodes, tool_issue_pause_for_fixture,
+    _STACK_SCAN_PRUNE,
 )
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
@@ -116,13 +128,11 @@ _DOC_CHUNK_KEEP = 6
 # output would embed its first 512 tokens — installer chatter, not the error.
 _EPISODE_QUERY_CHARS = 1200
 
-# Fed into node_test's short-circuit when the coder produced no parseable
-# files; on_test_failure then appends it to the history, replacing Phase 1's
-# _NO_FILE_BLOCKS_FEEDBACK with the same corrective intent.
+# Corrective feedback for an unapplied coding response, before any test layer.
 _NO_FILE_BLOCKS_OUTPUT = (
-    "No files could be written or tested: the previous response did not "
-    "contain any '### FILE: <path>' blocks. Output every affected file in "
-    "full using the FILE format."
+    "No file changes could be applied or tested. Output each created or "
+    "modified file in full using '### FILE: <path>' blocks and each requested "
+    "physical removal using '### DELETE: <path>' directives."
 )
 
 # Reference-doc lanes per scope: (PrimeVue component docs, Laravel topic docs).
@@ -150,7 +160,9 @@ def _cleared_layer_outputs() -> dict:
     (``_last_failure_output`` picks the newest red layer with any output),
     widen the scope on the wrong side, and reach the MR body as a layer that
     never ran on the merged code.  Clearing them in node_code's *return* keeps
-    its own episodic-recall query on the failure that led to it.
+    its own episodic-recall query on the failure that led to it.  The fixture
+    fields are cleared for the same reason: no attempt inherits an earlier
+    attempt's block.
     """
     return {
         "test_output": "",
@@ -158,6 +170,8 @@ def _cleared_layer_outputs() -> dict:
         "openapi_paths": [],
         "vitest_output": "",
         "playwright_output": "",
+        "fixture_request": None,
+        "dependency_status": "",
     }
 
 
@@ -239,7 +253,7 @@ def _prune_stale_files(
     previous: list[str], current: list[str], repo_path: str
 ) -> list[str]:
     """
-    Revert files the previous attempt wrote that this attempt did not re-emit.
+    Revert file changes the previous attempt made that this attempt did not re-emit.
 
     The workspace persists across retries, so without this an attempt that
     renames a file leaves both versions behind.  For Laravel that is fatal
@@ -310,15 +324,21 @@ def _prune_stale_files(
 # Directories whose contents the coder needs to know about, with the cap on how
 # many entries each contributes. Migrations are listed in full: a duplicate
 # create-table migration is the one mistake that cannot be recovered from.
+# Entries are paths relative to the listed directory, so same-named files in
+# different subdirectories stay distinguishable.
 _INVENTORY_DIRS = (
     ("database/migrations", 60),
+    ("database/factories", 40),
+    ("database/seeders", 40),
     ("app/Models", 40),
     ("app/Http/Controllers", 40),
     ("app/Http/Resources", 40),
     ("app/Http/Requests", 40),
     ("app/Services", 40),
     ("resources/js/components", 40),
+    ("resources/views", 40),
     ("tests/Feature", 40),
+    ("e2e", 40),
 )
 
 # Route files are quoted rather than listed: the coder must see which URIs are
@@ -326,8 +346,90 @@ _INVENTORY_DIRS = (
 _INVENTORY_ROUTE_FILES = ("routes/api.php", "routes/web.php")
 _MAX_ROUTE_FILE_CHARS = 1500
 
+# Every scope quotes the default seeder so backend removals can preserve
+# unrelated registrations. Frontend/fullstack also quote the served entry
+# chain, fixture manifest and configs. Only COMPLETE bodies are quoted; an
+# oversized or unreadable body is named as omitted, never safe to rewrite.
+_INVENTORY_QUOTED_FILES = (
+    ("resources/js/app.js", "js"),
+    ("resources/js/app.ts", "ts"),
+    ("resources/views/app.blade.php", "blade"),
+    ("resources/js/App.vue", "vue"),
+    ("database/seeders/DatabaseSeeder.php", "php"),
+    ("e2e/nesti-fixtures.json", "json"),
+    ("vite.config.js", "js"),
+    ("vite.config.ts", "ts"),
+    ("playwright.config.js", "js"),
+    ("playwright.config.ts", "ts"),
+    ("vitest.config.js", "js"),
+    ("vitest.config.ts", "ts"),
+    ("package.json", "json"),
+)
+_MAX_QUOTED_FILE_CHARS = 8000
+_MAX_QUOTED_TOTAL_CHARS = 16000
 
-def _repo_inventory(repo_path: str) -> str:
+
+def _inventory_listing(directory: Path) -> list[str]:
+    """Every file under *directory*, relative to it, pruning dependency trees."""
+    names: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(directory):
+        # In-place mutation is what makes os.walk skip these subtrees.
+        dirnames[:] = [d for d in dirnames if d not in _STACK_SCAN_PRUNE]
+        names += [Path(dirpath, name).relative_to(directory).as_posix() for name in filenames]
+    return sorted(names)
+
+
+def _quoted_entry_files(
+    root: Path, scope: str = "fullstack", referenced_files: list[tuple[str, str]] | None = None
+) -> list[str]:
+    """Quote complete task targets and entry bodies within one budget, never fragments."""
+    fixed_files = [
+        (relative, language) for relative, language in _INVENTORY_QUOTED_FILES
+        if scope != "backend" or relative == "database/seeders/DatabaseSeeder.php"
+    ]
+    files = dict.fromkeys((referenced_files or []) + fixed_files)
+    entries: list[tuple[str | None, str]] = []
+    for relative, language in files:
+        path = root / relative
+        if path.is_symlink():
+            entries.append((None, f"\n{relative}: exists, body omitted (symbolic link)."))
+            continue
+        if not path.is_file():
+            continue
+        try:
+            body = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            entries.append((None,
+                f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}). "
+                "Do not recreate it."))
+            continue
+        if len(body) > _MAX_QUOTED_FILE_CHARS:
+            entries.append((None,
+                f"\n{relative}: exists, body omitted ({len(body)} characters, over the "
+                f"{_MAX_QUOTED_FILE_CHARS}-character quote limit). Do not recreate it from memory."))
+            continue
+        quote = f"\nCurrent {relative} (complete):\n```{language}\n{body}\n```"
+        omitted = (
+            f"\n{relative}: exists, body omitted (the {_MAX_QUOTED_TOTAL_CHARS}-character "
+            "quote budget is spent). Do not recreate it from memory."
+        )
+        entries.append((quote, omitted))
+
+    # Reserve every omission notice first so later files can always be named;
+    # headings, fences, separators and notices all count toward the budget.
+    remaining = _MAX_QUOTED_TOTAL_CHARS - len("\n\n".join(omitted for _, omitted in entries))
+    sections: list[str] = []
+    for quote, omitted in entries:
+        extra = len(quote) - len(omitted) if quote is not None else 0
+        if quote is not None and extra <= remaining:
+            sections.append(quote)
+            remaining -= extra
+        else:
+            sections.append(omitted)
+    return sections
+
+
+def _repo_inventory(repo_path: str, scope: str = "fullstack", task_text: str = "") -> str:
     """
     Describe what the cloned repository already contains, for the prompts.
 
@@ -338,8 +440,15 @@ def _repo_inventory(repo_path: str) -> str:
     backend including a second ``create_tasks_table`` migration, and the PHP
     layer then failed with "table already exists" on every attempt.
 
+    Every scope gets the backend listing, route files and default seeder.
+    Files named by the issue or plan get complete bodies before fixed entry
+    files, so modifying an existing component does not require guessing its
+    implementation. Frontend/fullstack also get the served entry chain,
+    fixture manifest and configs within the same bounded quote section.
+
     Never raises: an unreadable workspace yields an empty string and the
-    prompts are built without the section, exactly as before.
+    prompts are built without the section, exactly as before; one unreadable
+    file is named, never fatal for the rest.
     """
     try:
         root = Path(repo_path)
@@ -347,27 +456,39 @@ def _repo_inventory(repo_path: str) -> str:
             return ""
 
         lines: list[str] = []
+        referenced_files: list[tuple[str, str]] = []
         for relative, cap in _INVENTORY_DIRS:
             directory = root / relative
             if not directory.is_dir():
                 continue
-            names = sorted(
-                entry.name for entry in directory.rglob("*") if entry.is_file()
-            )
+            names = _inventory_listing(directory)
             if not names:
                 continue
             shown = names[:cap]
             suffix = f" … (+{len(names) - cap} more)" if len(names) > cap else ""
             lines.append(f"- {relative}/: {', '.join(shown)}{suffix}")
+            for name in names:
+                path = f"{relative}/{name}"
+                basename = name.rsplit("/", 1)[-1]
+                pattern = rf"(?<![\w./-])(?:{re.escape(path)}|{re.escape(basename)})(?![\w./-])"
+                if task_text and re.search(pattern, task_text):
+                    language = Path(name).suffix.lstrip(".")
+                    referenced_files.append((path, language))
 
         for relative in _INVENTORY_ROUTE_FILES:
             route_file = root / relative
             if not route_file.is_file():
                 continue
-            body = route_file.read_text(encoding="utf-8", errors="replace").strip()
+            try:
+                body = route_file.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError as exc:
+                lines.append(f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}).")
+                continue
             if len(body) > _MAX_ROUTE_FILE_CHARS:
                 body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
             lines.append(f"\nCurrent {relative}:\n```php\n{body}\n```")
+
+        lines += _quoted_entry_files(root, scope, referenced_files)
 
         if not lines:
             return (
@@ -387,13 +508,20 @@ def _repo_inventory(repo_path: str) -> str:
 
 def _last_failure_output(state: IssueState) -> tuple[str, str]:
     """
-    Return ``(layer_label, output)`` for the test layer that ended the run.
+    Return ``(failure_kind, output)`` for generation rejection or the red test layer.
 
     Layers are checked newest-first (Playwright → Vitest → OpenAPI → PHPUnit)
     so the retry turn and the reopen note carry the failure the model actually
     has to fix.  Without this, a Vue-only issue would reopen with an empty
     note: PHPUnit never ran, so ``test_output`` is blank.
     """
+    if state.get("files_written") is False:
+        output = state.get("error") or _NO_FILE_BLOCKS_OUTPUT
+        response = state.get("code_response", "").strip()
+        if response and not state.get("error"):
+            output += f"\n\nCoder response:\n{condense(response, _MAX_NOTE_CHARS)}"
+        return "Code generation", output
+
     candidates = (
         ("Playwright (E2E tests)", state.get("playwright_passed", False),
          state.get("playwright_output", "")),
@@ -446,10 +574,15 @@ def _test_report(state: IssueState) -> str:
 
 def node_setup(state: IssueState) -> dict:
     """
-    Create tempdir workspace, clone repo, create branch.
-    Lock the issue (status → in-progress) so no other worker picks it up.
+    Lock the issue (status → in-progress), then create the tempdir workspace,
+    clone the repo and create the branch.
     Put the coder chain back on its head tier: ``_llm`` lives for the whole
     loop process, and one issue's escalations must not start the next one.
+
+    Only a verified claim continues: the lock refuses an issue that stopped
+    being pending since it was listed (paused, held by a dependency record,
+    taken by another worker), and then nothing is cloned and no LLM is called
+    — ``failure_reason`` routes straight to cleanup.
     """
     logger.debug("→ node_setup")
     issue_id = state["issue_id"]
@@ -457,10 +590,12 @@ def node_setup(state: IssueState) -> dict:
     _llm.reset_coder_tier()
 
     # Lock first so no other worker grabs the issue during the clone.
-    # Phase 1 ignored the lock result as well – log and continue.
     lock = tool_issue_set_status(issue_id, "in_progress")
     if not lock["success"]:
-        logger.warning("Could not lock issue #%s: %s", issue_id, lock["error"])
+        reason = f"Could not claim issue #{issue_id}: {lock['error']}"
+        logger.warning("%s – leaving it untouched.", reason)
+        logger.debug("← node_setup (claim refused)")
+        return {"failure_reason": reason}
 
     workspace = tempfile.mkdtemp(prefix=f"ai-dev-{issue_id}-")
     repo_path = os.path.join(workspace, "repo")
@@ -597,7 +732,7 @@ def node_plan(state: IssueState) -> dict:
         max_topic_docs=topics,
         max_practice_docs=1,
     )
-    repo_context = _repo_inventory(state.get("repo_path", ""))
+    repo_context = _repo_inventory(state.get("repo_path", ""), decision.scope, issue_text)
 
     # Phase 8 memory: how similar issues were solved before (Redis solution
     # cache) and the corpus passages the keyword catalog missed (Qdrant).
@@ -663,7 +798,7 @@ def node_plan(state: IssueState) -> dict:
 def node_code(state: IssueState) -> dict:
     """
     Generate code via LLM coder chain.
-    Writes FILE blocks into the repo. Appends code turns to the history.
+    Applies FILE blocks and DELETE directives. Appends code turns to the history.
     The prompt, its reference docs and its retrieved chunks follow ``scope``.
     """
     logger.debug("→ node_code")
@@ -694,7 +829,7 @@ def node_code(state: IssueState) -> dict:
     )
     # Rebuilt every attempt: the previous attempt's own files are part of the
     # repository now, and a retry must see them rather than re-inventing them.
-    repo_context = _repo_inventory(state.get("repo_path", ""))
+    repo_context = _repo_inventory(state.get("repo_path", ""), scope, haystack)
 
     # Phase 8 memory.  A narrow scope filters the doc search from the first
     # attempt.  A fullstack scope falls back to the detected stack, and only
@@ -747,11 +882,8 @@ def node_code(state: IssueState) -> dict:
             messages=messages,
         )
     except RuntimeError as exc:
-        # Every reachable coder failed. Phase 1 aborted the retry loop
-        # immediately; jumping attempt to max_attempts makes route_after_phpunit
-        # deterministically route to node_failure (node_detect_stack keeps
-        # run_phpunit=True when no files were written, so that is the router
-        # this path reaches).
+        # Every reachable coder failed: exhaust the shared budget so
+        # route_after_code goes straight to failure without a test verdict.
         logger.error("All coding providers exhausted on attempt %d: %s", attempt, exc)
         logger.debug("← node_code (providers exhausted)")
         return {
@@ -771,13 +903,21 @@ def node_code(state: IssueState) -> dict:
     messages = _store.append(issue_id, "assistant", code_response)
 
     from docker_runner import DockerRunner
-    # write_files is a @staticmethod – call it on the class; instantiating
-    # DockerRunner would open a Docker socket that file writing doesn't need.
-    files_written, written = DockerRunner.write_files(code_response, state["repo_path"])
+    # Static file application needs neither a Docker client nor a container.
+    apply_error = ""
+    try:
+        files_written, written = DockerRunner.write_files(code_response, state["repo_path"])
+    except ValueError as exc:
+        files_written, written = False, []
+        apply_error = f"File changes rejected: {exc}"
+        logger.warning("%s", apply_error)
     if files_written:
-        logger.info("Wrote %d file(s): %s", len(written), ", ".join(written))
+        logger.info("Applied %d file change(s): %s", len(written), ", ".join(written))
     else:
-        logger.warning("No FILE blocks found in LLM output (attempt %d).", attempt)
+        logger.warning("No file changes applied (attempt %d).", attempt)
+        # A rejected/empty response must not lose earlier changes: the next
+        # valid complete response still needs to restore omitted deletions.
+        written = state.get("written_files") or []
 
     if files_written:
         pruned = _prune_stale_files(
@@ -796,6 +936,7 @@ def node_code(state: IssueState) -> dict:
         "files_written": files_written,
         "written_files": written,
         "attempt": attempt,
+        "error": apply_error,
         "coder_provider": attribution["provider"],
         "coder_model": attribution["model"],
         "coder_billing": attribution["billing"],
@@ -816,18 +957,7 @@ def node_detect_stack(state: IssueState) -> dict:
     """
     logger.debug("→ node_detect_stack")
 
-    # No parseable FILE blocks this attempt: there is nothing new to classify.
-    # Route to node_test anyway — its files_written guard turns the attempt
-    # into a failure with corrective feedback (Phase 1 behaviour, preserved).
-    if not state.get("files_written", False):
-        logger.debug("← node_detect_stack (no files written – deferring to node_test guard)")
-        return {
-            "has_vue_files": False,
-            "stack": "unknown",
-            "run_phpunit": True,
-            "run_frontend": False,
-            "run_openapi": False,
-        }
+    # route_after_code admits only responses with accepted file operations.
 
     result = tool_detect_stack(state["repo_path"], state.get("written_files"))
     if not result["success"]:
@@ -876,6 +1006,8 @@ def _log_layer_verdict(
     passed: bool,
     state: IssueState,
     reason: str = "",
+    *,
+    blocked: bool = False,
 ) -> None:
     """Emit the one-line verdict for a test layer.
 
@@ -883,6 +1015,8 @@ def _log_layer_verdict(
     issue number and the provider/model/billing that produced the code — this
     is the line an operator greps for in `docker-compose logs`. Green goes to
     INFO, red to ERROR so a failure stays visible at any sane log level.
+    ``blocked`` (INFO) says the suite never started because fixture
+    preparation stopped first — neither a pass nor a failed browser run.
 
     The attribution comes from IssueState, written by node_code from the coder
     that actually answered: the chain head moves under escalation and would
@@ -893,7 +1027,7 @@ def _log_layer_verdict(
         "model: %s · %s" + (" · reason: %s" if reason else "")
     )
     args = [
-        "PASSED" if passed else "FAILED",
+        "BLOCKED" if blocked else ("PASSED" if passed else "FAILED"),
         state.get("issue_id", "?"),
         state.get("attempt", 0),
         state.get("max_attempts", _ENV_MAX_ATTEMPTS),
@@ -903,28 +1037,13 @@ def _log_layer_verdict(
     ]
     if reason:
         args.append(reason)
-    (logger.info if passed else logger.error)(message, *args)
+    (logger.info if passed or blocked else logger.error)(message, *args)
 
 
 def node_test(state: IssueState) -> dict:
     """Run PHPUnit tests in the Docker sandbox."""
     logger.debug("→ node_test")
 
-    # Guard: if the last code response yielded no files, running the suite
-    # against the untouched clone would pass on the green baseline and lead
-    # to an empty Merge Request. Short-circuit as a failed attempt instead,
-    # with corrective output for the model (Phase 1 behaviour).
-    if not state.get("files_written", False):
-        logger.warning("Skipping test run – no files were written this attempt.")
-        _log_layer_verdict("PHPUnit", False, state, reason="no FILE blocks were produced")
-        logger.debug("← node_test (short-circuit)")
-        # When node_code hit "all coders exhausted" it stored the reason in
-        # state["error"]; surface that instead of the generic no-blocks
-        # message so node_failure's reopen note matches Phase 1's content.
-        return {
-            "test_passed": False,
-            "test_output": state.get("error") or _NO_FILE_BLOCKS_OUTPUT,
-        }
 
     logger.info("Running tests (attempt %d) …", state.get("attempt", 0))
     result = tool_docker_run_tests(state["repo_path"])
@@ -1000,22 +1119,117 @@ def node_vitest_test(state: IssueState) -> dict:
 
 
 def node_playwright_test(state: IssueState) -> dict:
-    """Run Playwright E2E tests in the browser sandbox."""
+    """
+    Run Playwright E2E tests in the browser sandbox.
+
+    ``fixture_request`` is set only when the sandbox verified that a declared
+    fixture's seeder class and file are both absent and stopped before the
+    browser started; that run logs BLOCKED rather than FAILED, and
+    route_after_playwright hands it to node_pause_dependency.
+    """
     logger.debug("→ node_playwright_test")
     logger.info("Running Playwright E2E tests (attempt %d) …", state.get("attempt", 0))
 
     result = tool_playwright_run_tests(state["repo_path"])
-    passed = result.get("result", {}).get("passed", False) if result["success"] else False
-    output = (
-        result.get("result", {}).get("output", "")
-        if result["success"]
-        else result.get("error", "")
-    )
+    detail = result.get("result", {}) if result["success"] else {}
+    passed = bool(detail.get("passed", False))
+    output = detail.get("output", "") if result["success"] else result.get("error", "")
+    fixture_request = None if passed else detail.get("fixture_request")
 
-    _log_layer_verdict("Playwright", passed, state)
+    if fixture_request:
+        _log_layer_verdict(
+            "Playwright", False, state,
+            reason=(
+                f"fixture GET {fixture_request['endpoint']} needs "
+                f"{fixture_request['seeder']}, whose class and file are absent; "
+                "the browser suite did not start"
+            ),
+            blocked=True,
+        )
+    else:
+        _log_layer_verdict("Playwright", passed, state)
 
     logger.debug("← node_playwright_test (passed=%s)", passed)
-    return {"playwright_passed": passed, "playwright_output": output}
+    return {
+        "playwright_passed": passed,
+        "playwright_output": output,
+        "fixture_request": fixture_request,
+    }
+
+
+def node_pause_dependency(state: IssueState) -> dict:
+    """
+    Turn a verified missing-seeder fixture into a durable dependency.
+
+    No planner, coder, escalation, quota check, commit or reopen happens here:
+
+    • paused     – GitLab holds the durable record, the issue carries the
+                   pause label and the backend child exists (or its creation
+                   is held for an operator).  The conversation and episodes are
+                   dropped only now, after the intent is durable, so the
+                   resumed run starts fresh.  → cleanup
+    • ineligible – the prerequisite belongs to this change's own backend work;
+                   the explanation is appended to the Playwright output and the
+                   shared retry budget decides (on_layer_failure / failure).
+    • error      – a transport or transition failure: alert, try a plain
+                   pause, and stop (→ cleanup) without node_failure, whose
+                   reopen would undo the hold.
+    """
+    logger.debug("→ node_pause_dependency")
+    issue_id = state["issue_id"]
+    subject = state.get("subject", f"issue-{issue_id}")
+    requirement = state.get("fixture_request") or {}
+
+    result = tool_issue_pause_for_fixture(
+        issue_id, state["repo_path"], requirement, list(state.get("written_files") or [])
+    )
+    detail = result["result"] if result["success"] else {}
+    status = detail.get("status")
+
+    if status == "paused":
+        _store.delete(issue_id)
+        forgot = tool_memory_forget_episodes(issue_id)
+        if not forgot["success"]:
+            logger.warning("Failed to drop the episodes of issue #%s: %s", issue_id, forgot["error"])
+        logger.info("Issue #%s paused: %s", issue_id, detail.get("reason", ""))
+        logger.debug("← node_pause_dependency (paused)")
+        return {"dependency_status": "paused", "failure_reason": detail.get("reason", "")}
+
+    if status == "ineligible":
+        reason = detail.get("reason", "")
+        logger.info("Issue #%s: fixture dependency ineligible – %s", issue_id, reason)
+        logger.debug("← node_pause_dependency (ineligible)")
+        return {
+            "dependency_status": "ineligible",
+            "fixture_request": None,
+            "playwright_output": f"{state.get('playwright_output', '')}\n\n{reason}".strip(),
+        }
+
+    error = detail.get("reason") if result["success"] else result["error"]
+    error = error or f"unexpected dependency status {status!r}"
+    held = tool_issue_set_status(
+        issue_id, "paused",
+        note=f"Nesti: handling this issue's fixture dependency failed ({error}); "
+             "holding it for an operator.",
+    )
+    if held["success"]:
+        message = f"Fixture dependency handling failed and the issue is held (paused): {error}"
+    else:
+        message = (
+            f"Fixture dependency handling failed ({error}) and the pause could not be "
+            f"applied ({held['error']}): the issue may keep its stale in-progress lock. "
+            "Operator recovery: stop the poller, confirm no dependency issue was created, "
+            "then resume the issue and clear its conversation and episodes (README, "
+            "'Fixture dependencies'). Reconciliation cannot recreate a record that was "
+            "never saved."
+        )
+    logger.error("Issue #%s: %s", issue_id, message)
+    telegram_notify(
+        f"⚠️ Fixture dependency handling failed for issue <b>#{issue_id}</b> – "
+        f"<i>{subject}</i>\n<code>{message}</code>"
+    )
+    logger.debug("← node_pause_dependency (error)")
+    return {"dependency_status": "error", "failure_reason": message}
 
 
 def node_on_layer_failure(state: IssueState) -> dict:
@@ -1034,9 +1248,8 @@ def node_on_layer_failure(state: IssueState) -> dict:
 
     The retry prompt must carry the standards of the layer that failed, so a
     red layer outside the scope widens it: a frontend scope whose change broke
-    PHPUnit becomes fullstack.  An attempt that wrote no FILE blocks reports
-    through the PHPUnit label but says nothing about the backend; it never
-    widens.
+    PHPUnit becomes fullstack. An unapplied coding response says nothing about
+    the backend or frontend and never widens the scope.
     """
     logger.debug("→ node_on_layer_failure")
 
@@ -1220,7 +1433,7 @@ def node_failure(state: IssueState) -> dict:
             f"❌ Issue <b>#{issue_id}</b> – <i>{subject}</i>\n"
             f"All code generation attempts exhausted. Reopening."
         )
-        logger.error("Tests failed after %d attempt(s). Reopening issue #%s.", attempts, issue_id)
+        logger.error("%s failed after %d attempt(s). Reopening issue #%s.", layer, attempts, issue_id)
 
     tool_issue_set_status(issue_id, "new", note=note)
 

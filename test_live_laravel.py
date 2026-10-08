@@ -16,13 +16,22 @@ tool_laravel_bootstrap, so it lives in the repo next to the smoke suite.
 
 What it proves, in order:
   1. a greenfield directory becomes a Laravel 13 + Scramble + PrimeVue app
-  2. a realistic feature (migration → model → factory → FormRequest →
-     controller → API Resource → route → tests → Vue component → specs) is
-     written through the FILE-block contract
+  2. a realistic feature (migration → model → factory → seeder → FormRequest →
+     controller → API Resource → route → tests → Vue component registered on
+     the served page → specs → E2E fixture manifest) is written through the
+     FILE-block contract
   3. `php artisan migrate` + `php artisan test` go green in the PHP sandbox
   4. the OpenAPI gate passes for a documented surface AND fails, naming the
      route, for an undocumented one
-  5. Vitest and Playwright go green, the latter against `php artisan serve`
+  5. Vitest goes green
+  6. Playwright goes green against `php artisan serve`: the image-owned
+     fixture helper seeds the declared, deliberately unregistered TaskSeeder
+     explicitly, and the browser sees exactly the 15 real rows on `/`
+  7. the fixture matrix with the real helper, Laravel kernel, SQLite and
+     Chromium: a valid empty state, existing/registered seeders, a missing
+     seeder (the only dependency request), and ordinary failures for broken
+     seeders, unrelated seed errors, HTTP/shape/mapping errors and a model on
+     another database (refused before migration)
 
 Run:  python test_live_laravel.py [--keep]
 """
@@ -33,6 +42,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -335,8 +345,13 @@ class TaskApiTest extends TestCase
 _COMPONENT = """<template>
     <div class="task-table" data-testid="task-table">
         <InputText v-model="search" placeholder="Search tasks" data-testid="task-search" />
-        <DataTable :value="filtered">
-            <Column field="title" header="Title" sortable />
+        <DataTable :value="filtered" data-key="id">
+            <template #empty>No tasks found.</template>
+            <Column field="title" header="Title" sortable>
+                <template #body="{ data }">
+                    <span data-testid="task-title">{{ data.title }}</span>
+                </template>
+            </Column>
             <Column field="due_date" header="Due date" sortable />
             <Column field="is_done" header="Done" sortable />
         </DataTable>
@@ -418,16 +433,62 @@ describe('TaskTable', () => {
     });
 });"""
 
+# The response waiter is registered before navigation so the page's own GET
+# /api/tasks cannot slip past it; the visible titles must be exactly the
+# first page the real API returned, which an unmounted feature, a mock or a
+# doubly seeded database (30 rows) all fail.
 _E2E_SPEC = """import { expect, test } from '@playwright/test';
 
-test('the task table renders against the real application', async ({ page }) => {
+test('the served home page renders the real seeded tasks', async ({ page }) => {
+    const tasksResponse = page.waitForResponse((response) =>
+        response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/tasks');
+
     await page.goto('/');
 
-    await expect(page.locator('[data-testid="task-table"]')).toBeVisible();
+    const response = await tasksResponse;
+    expect(response.status()).toBe(200);
+    const payload = await response.json();
+    expect(payload.meta.total).toBe(15);
+    const titles = payload.data.map((task) => task.title);
+    expect(titles).toHaveLength(10);
+
+    await expect(page.getByTestId('task-table')).toBeVisible();
+    await expect(page.getByTestId('task-search')).toBeVisible();
     await expect(page.locator('th', { hasText: 'Title' }).first()).toBeVisible();
     await expect(page.locator('th', { hasText: 'Due date' }).first()).toBeVisible();
-    await expect(page.locator('[data-testid="task-search"]')).toBeVisible();
+    await expect(page.getByTestId('task-title')).toHaveText(titles);
 });"""
+
+# Step 7's valid empty state: the real API answers zero rows and the page
+# shows the DataTable's explicit empty slot.
+_E2E_EMPTY_SPEC = """import { expect, test } from '@playwright/test';
+
+test('the served home page shows the real empty state', async ({ page }) => {
+    const tasksResponse = page.waitForResponse((response) =>
+        response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/tasks');
+
+    await page.goto('/');
+
+    const response = await tasksResponse;
+    expect(response.status()).toBe(200);
+    const payload = await response.json();
+    expect(payload.meta.total).toBe(0);
+    expect(payload.data).toEqual([]);
+
+    await expect(page.getByTestId('task-table')).toBeVisible();
+    await expect(page.getByText('No tasks found.')).toBeVisible();
+    await expect(page.getByTestId('task-title')).toHaveCount(0);
+});"""
+
+# The E2E data contract: GET /api/tasks needs real Task rows, prepared by
+# TaskSeeder — which DatabaseSeeder deliberately does NOT call, so step 6
+# proves the helper's explicit-class seeding rather than the default seed.
+_TASK_REQUIREMENT = {
+    "endpoint": "/api/tasks",
+    "model": "App\\Models\\Task",
+    "seeder": "Database\\Seeders\\TaskSeeder",
+}
+_FIXTURE_MANIFEST = json.dumps({"version": 1, "fixtures": [_TASK_REQUIREMENT]}, indent=4)
 
 # The one template the fixture is allowed to extend: registering a feature
 # component is exactly what the coding prompt tells the model to do here.
@@ -495,6 +556,7 @@ def _feature_blocks() -> str:
         _block("resources/js/components/TaskTable.vue", "vue", _COMPONENT),
         _block("resources/js/components/__tests__/TaskTable.test.js", "js", _COMPONENT_SPEC),
         _block("e2e/tasks.spec.js", "js", _E2E_SPEC),
+        _block("e2e/nesti-fixtures.json", "json", _FIXTURE_MANIFEST),
         _block("resources/js/app.js", "js", _APP_JS),
         _block("resources/views/app.blade.php", "blade", _APP_BLADE),
     ))
@@ -572,10 +634,6 @@ def step_write_feature(repo: str) -> None:
     written_ok, written = DockerRunner.write_files(_feature_blocks(), repo)
     if not written_ok:
         _fail("2. write the fixture feature", "no FILE blocks were parsed")
-    expected = 14
-    if len(written) != expected:
-        _fail("2. write the fixture feature",
-              f"expected {expected} files, wrote {len(written)}: {written}")
     _record("2. write the fixture feature", True, ", ".join(written))
 
 
@@ -652,12 +710,275 @@ def step_vitest(repo: str) -> None:
 
 def step_playwright(repo: str) -> None:
     started = time.monotonic()
-    passed, output = FrontendRunner().run_playwright(repo)
+    result = FrontendRunner().run_playwright(repo)
     took = time.monotonic() - started
-    if not passed:
-        _fail("6. Playwright E2E layer", output[-_OUTPUT_TAIL:])
+    output = result["output"]
+    if not result["passed"]:
+        _fail("6. Playwright E2E layer",
+              f"fixture_request={result['fixture_request']}\n{output[-_OUTPUT_TAIL:]}")
+    if result["fixture_request"] is not None:
+        _fail("6. Playwright E2E layer",
+              f"a green run carried fixture_request={result['fixture_request']}")
+    if not _BROWSER_RUN.search(output):
+        _fail("6. Playwright E2E layer", f"the browser suite did not run:\n{output[-_OUTPUT_TAIL:]}")
     _record("6. Playwright E2E layer", True,
-            f"green against `php artisan serve` ({took:.0f}s)")
+            f"green against `php artisan serve`; {_helper_line(output, _EXPLICIT_SEED_LOG)} "
+            f"({took:.0f}s)")
+
+
+# ── Step 7: the fixture matrix ───────────────────────────────────────────────
+
+_MANIFEST_PATH = "e2e/nesti-fixtures.json"
+_SPEC_PATH = "e2e/tasks.spec.js"
+_SEEDER_PATH = "database/seeders/TaskSeeder.php"
+_DATABASE_SEEDER_PATH = "database/seeders/DatabaseSeeder.php"
+_MODEL_PATH = "app/Models/Task.php"
+_ROUTES_API_PATH = "routes/api.php"
+_DATABASE_CONFIG_PATH = "config/database.php"
+_SENTINEL_PATH = "database/other.sqlite"
+
+# Every file step 7 rewrites; all of it is restored afterwards.
+_FIXTURE_CASE_FILES = (
+    _MANIFEST_PATH, _SPEC_PATH, _SEEDER_PATH, _DATABASE_SEEDER_PATH, _MODEL_PATH,
+    _ROUTES_API_PATH, _DATABASE_CONFIG_PATH, _SENTINEL_PATH,
+)
+
+_FIXTURE_REQUEST = {**_TASK_REQUIREMENT, "table": "tasks"}
+_EXPLICIT_SEED_LOG = "row(s) after Database\\Seeders\\TaskSeeder, fixture satisfied"
+_BROWSER_RUN = re.compile(r"Running \d+ tests? using")
+
+_DATABASE_SEEDER_TEMPLATE = """<?php
+
+namespace Database\\Seeders;
+
+use Illuminate\\Database\\Seeder;
+
+class DatabaseSeeder extends Seeder
+{
+    public function run(): void
+    {
+        __BODY__
+    }
+}"""
+
+
+def _database_seeder(body: str) -> str:
+    return _DATABASE_SEEDER_TEMPLATE.replace("__BODY__", body)
+
+
+_SEED_CALL = "Task::factory()->count(15)->create();"
+_NOOP_SEEDER = _SEEDER.replace(_SEED_CALL, "// Seeds nothing.")
+_THROWING_SEEDER = _SEEDER.replace(
+    _SEED_CALL, "throw new \\RuntimeException('TaskSeeder exploded on purpose');")
+_MISNAMED_SEEDER = _SEEDER.replace("class TaskSeeder extends", "class TaskSeederRenamed extends")
+_UNPARSABLE_SEEDER = _SEEDER.replace(_SEED_CALL, "Task::factory()->count(15)->create(")
+
+_MODEL_OTHER_TABLE = _MODEL.replace(
+    "    use HasFactory;\n", "    use HasFactory;\n\n    protected $table = 'task_items';\n")
+_MODEL_OTHER_DATABASE = _MODEL.replace(
+    "    use HasFactory;\n", "    use HasFactory;\n\n    protected $connection = 'sqlite_other';\n")
+
+_CONNECTIONS_OPENER = "'connections' => ["
+_OTHER_CONNECTION = """'connections' => [
+
+        'sqlite_other' => [
+            'driver' => 'sqlite',
+            'database' => database_path('other.sqlite'),
+            'prefix' => '',
+        ],
+"""
+
+_INDEX_ROUTE = "Route::get('/tasks', [TaskController::class, 'index']);"
+
+
+def _routes_api(get_route: str) -> str:
+    """routes/api.php with the GET /tasks route swapped for *get_route*."""
+    return _ROUTES_API.replace(
+        "use Illuminate\\Support\\Facades\\Route;",
+        "use App\\Http\\Resources\\TaskResource;\n"
+        "use App\\Models\\Task;\n"
+        "use Illuminate\\Support\\Facades\\Route;",
+    ).replace(_INDEX_ROUTE, get_route)
+
+
+def _helper_line(output: str, needle: str = "") -> str:
+    """The helper's line containing *needle*, else its last line."""
+    lines = [line.strip() for line in output.splitlines() if "[nesti-fixtures]" in line]
+    matching = [line for line in lines if needle in line] if needle else []
+    return (matching or lines or ["(no [nesti-fixtures] output)"])[-1]
+
+
+def _apply_files(repo: str, files: dict[str, str | bytes | None]) -> None:
+    for rel, content in files.items():
+        path = Path(repo, rel)
+        if content is None:
+            path.unlink(missing_ok=True)
+        elif isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content, encoding="utf-8")
+
+
+def _check_fixture_case(
+    step: str,
+    result: dict,
+    took: float,
+    kind: str,
+    needles: tuple[str, ...] = (),
+    absent: tuple[str, ...] = (),
+) -> None:
+    """Assert one case: kind is "pass", "blocked" or "fail" (ordinary failure)."""
+    output = result["output"]
+    browser_ran = bool(_BROWSER_RUN.search(output))
+    if kind == "pass":
+        ok = (result["passed"] and result["fixture_request"] is None and browser_ran
+              and "[nesti-fixtures] ready" in output)
+    elif kind == "blocked":
+        ok = (not result["passed"] and result["fixture_request"] == _FIXTURE_REQUEST
+              and not browser_ran and "[nesti-fixtures] missing seeder" in output)
+    else:
+        ok = (not result["passed"] and result["fixture_request"] is None
+              and not browser_ran and "[nesti-fixtures] FAILED" in output)
+    missing = [needle for needle in needles if needle not in output]
+    present = [needle for needle in absent if needle in output]
+    if not ok or missing or present:
+        _fail(step,
+              f"expected {kind}: passed={result['passed']} "
+              f"fixture_request={result['fixture_request']} browser_ran={browser_ran} "
+              f"missing={missing} unexpected={present}\n{output[-_OUTPUT_TAIL:]}")
+    _record(step, True,
+            f"passed={result['passed']} fixture_request={result['fixture_request']} "
+            f"browser_ran={browser_ran} ({took:.0f}s): {_helper_line(output, needles[0] if needles else '')}")
+
+
+def step_fixture_dependencies(repo: str) -> None:
+    """
+    Step 7: drive the real image-owned fixture helper through every outcome.
+
+    Only harness-owned files change between cases (manifest, specs, seeders,
+    model, API routes, a database connection); every E2E run recreates its
+    own SQLite file.  The final case restores the positive fixture, so the
+    workspace ends with built assets and the 15-row database.
+    """
+    snapshot: dict[str, bytes | None] = {
+        rel: (Path(repo, rel).read_bytes() if Path(repo, rel).is_file() else None)
+        for rel in _FIXTURE_CASE_FILES
+    }
+    skeleton_config = (snapshot[_DATABASE_CONFIG_PATH] or b"").decode("utf-8")
+    if _CONNECTIONS_OPENER not in skeleton_config:
+        _fail("7. fixture matrix", f"{_DATABASE_CONFIG_PATH} has no {_CONNECTIONS_OPENER!r}")
+    other_config = skeleton_config.replace(_CONNECTIONS_OPENER, _OTHER_CONNECTION, 1)
+
+    # The positive fixture: manifest + existing, unregistered TaskSeeder.
+    positive: dict[str, str | bytes | None] = {
+        _MANIFEST_PATH: _FIXTURE_MANIFEST,
+        _SPEC_PATH: _E2E_SPEC,
+        _SEEDER_PATH: _SEEDER,
+        _DATABASE_SEEDER_PATH: snapshot[_DATABASE_SEEDER_PATH],
+        _MODEL_PATH: _MODEL,
+        _ROUTES_API_PATH: _ROUTES_API,
+        _DATABASE_CONFIG_PATH: snapshot[_DATABASE_CONFIG_PATH],
+        _SENTINEL_PATH: None,
+    }
+    registered = _database_seeder("$this->call(TaskSeeder::class);")
+    sentinel = Path(repo, _SENTINEL_PATH)
+    database = Path(repo, "database/database.sqlite")
+
+    def other_database_untouched() -> str | None:
+        if not sentinel.is_file() or sentinel.read_bytes() != b"":
+            return f"{_SENTINEL_PATH} was modified"
+        if sentinel.stat().st_mtime_ns != sentinel_mtime[0]:
+            return f"{_SENTINEL_PATH} was touched"
+        if database.stat().st_size != 0:
+            return "database/database.sqlite was migrated although the helper refused"
+        return None
+
+    sentinel_mtime = [0]
+
+    def prepare_sentinel() -> None:
+        sentinel.write_bytes(b"")
+        sentinel_mtime[0] = sentinel.stat().st_mtime_ns
+
+    cases: list[tuple[str, dict[str, str | bytes | None], str, tuple[str, ...], tuple[str, ...]]] = [
+        ("7a. no manifest, no task seeding → real empty state",
+         {_MANIFEST_PATH: None, _SPEC_PATH: _E2E_EMPTY_SPEC},
+         "pass", ("0 declared fixture(s)",), ("db:seed --class",)),
+        ("7b. TaskSeeder registered in DatabaseSeeder → 15 rows, not 30",
+         {_DATABASE_SEEDER_PATH: registered},
+         "pass", (), ("db:seed --class",)),
+        ("7c. TaskSeeder absent, unregistered → dependency request",
+         {_SEEDER_PATH: None},
+         "blocked", ("[nesti-fixtures] missing seeder",), ()),
+        ("7d. TaskSeeder absent, referenced by DatabaseSeeder → dependency request",
+         {_SEEDER_PATH: None, _DATABASE_SEEDER_PATH: registered},
+         "blocked",
+         ("default seeding stopped: Target class [Database\\Seeders\\TaskSeeder] does not exist.",),
+         ()),
+        ("7e. no-op TaskSeeder → ordinary failure",
+         {_SEEDER_PATH: _NOOP_SEEDER},
+         "fail", ("still returns no rows",), ()),
+        ("7f. throwing TaskSeeder → ordinary failure",
+         {_SEEDER_PATH: _THROWING_SEEDER},
+         "fail", ("TaskSeeder exploded on purpose",), ()),
+        ("7g. TaskSeeder.php with the wrong class name → ordinary failure",
+         {_SEEDER_PATH: _MISNAMED_SEEDER},
+         "fail", ("cannot be loaded although database/seeders/TaskSeeder.php exists",), ()),
+        ("7h. TaskSeeder.php with a syntax error → ordinary failure",
+         {_SEEDER_PATH: _UNPARSABLE_SEEDER},
+         "fail", ("ParseError",), ()),
+        ("7i. DatabaseSeeder calls an undeclared missing class → ordinary failure",
+         {_DATABASE_SEEDER_PATH: _database_seeder("$this->call(UnrelatedSeeder::class);")},
+         "fail", ("Target class [Database\\Seeders\\UnrelatedSeeder] does not exist.",), ()),
+        ("7j. DatabaseSeeder throws → ordinary failure",
+         {_DATABASE_SEEDER_PATH: _database_seeder(
+             "throw new \\RuntimeException('unrelated default-seed failure');")},
+         "fail", ("unrelated default-seed failure",), ()),
+        ("7k. endpoint behind auth → ordinary failure",
+         {_ROUTES_API_PATH: _routes_api(_INDEX_ROUTE.replace(";", "->middleware('auth');"))},
+         "fail", ("answered HTTP 401",), ()),
+        ("7l. endpoint redirects → ordinary failure",
+         {_ROUTES_API_PATH: _routes_api("Route::get('/tasks', fn () => redirect('/'));")},
+         "fail", ("answered HTTP 302",), ()),
+        ("7m. endpoint is not a collection → ordinary failure",
+         {_ROUTES_API_PATH: _routes_api(
+             "Route::get('/tasks', fn () => response()->json(['tasks' => []]));")},
+         "fail", ("neither a JSON array nor an object with an array",), ()),
+        ("7n. endpoint answers [] without reading tasks → ordinary failure",
+         {_ROUTES_API_PATH: _routes_api("Route::get('/tasks', fn () => response()->json([]));")},
+         "fail", ("ran no SELECT on table tasks",), ()),
+        ("7o. endpoint filters out existing rows → ordinary failure",
+         {_DATABASE_SEEDER_PATH: registered,
+          _ROUTES_API_PATH: _routes_api(
+              "Route::get('/tasks', fn () => TaskResource::collection("
+              "Task::query()->where('id', '<', 0)->paginate(10)));")},
+         "fail", ("although table tasks has records",), ()),
+        ("7p. declared model's table does not exist → ordinary failure",
+         {_MODEL_PATH: _MODEL_OTHER_TABLE},
+         "fail", ("table task_items does not exist after migration",), ()),
+        ("7q. declared model on another database → refused before migration",
+         {_MODEL_PATH: _MODEL_OTHER_DATABASE, _DATABASE_CONFIG_PATH: other_config},
+         "fail", ("is not the recreated workspace SQLite file",),
+         ("[nesti-fixtures] migrate --force", "db:seed")),
+        ("7r. positive fixture restored → explicit TaskSeeder, 15 rows",
+         {},
+         "pass", (_EXPLICIT_SEED_LOG,), ()),
+    ]
+
+    try:
+        for step, changes, kind, needles, absent in cases:
+            _apply_files(repo, {**positive, **changes})
+            if _MODEL_PATH in changes and changes[_MODEL_PATH] is _MODEL_OTHER_DATABASE:
+                prepare_sentinel()
+            started = time.monotonic()
+            result = FrontendRunner().run_playwright(repo)
+            took = time.monotonic() - started
+            _check_fixture_case(step, result, took, kind, needles, absent)
+            if sentinel.exists():
+                problem = other_database_untouched()
+                if problem:
+                    _fail(step, problem)
+    finally:
+        _apply_files(repo, positive)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -696,6 +1017,8 @@ def main() -> int:
             step_vitest(repo)
         if args.from_step <= 6:
             step_playwright(repo)
+        if args.from_step <= 7:
+            step_fixture_dependencies(repo)
     except StepFailed:
         pass
     except KeyboardInterrupt:

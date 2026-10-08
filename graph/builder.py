@@ -3,20 +3,28 @@ graph/builder.py – assembles and compiles the LangGraph pipeline.
 
 Topology
 ────────
-    setup → bootstrap → load_skills → plan ─┬→ code → detect_stack ─┐
-                                            │                       │
-          ┌─────────────────────────────────┘                       │
-          │   phpunit_test ←────────────────────────────────────────┤
-          │        │   └→ openapi_test ─→ vitest_test ─→ playwright_test ─→ commit ─┐
-          │        └→ vitest_test ←───────────────────────────────────────┘         │
-          │                                                                         ├→ cleanup → END
-          │   on_layer_failure ─→ code (loop)                                       │
-          └→ failure ───────────────────────────────────────────────────────────────┘
+    setup ─┬→ bootstrap → load_skills → plan ─┬→ code → detect_stack ─┐
+           │                                  │                       │
+           │    ┌─────────────────────────────┘                       │
+           │    │   phpunit_test ←────────────────────────────────────┤
+           │    │        │   └→ openapi_test ─→ vitest_test ─→ playwright_test ─→ commit ─┐
+           │    │        └→ vitest_test ←───────────────────────────────────┘ │           │
+           │    │                                                 pause_dependency ──────┤
+           │    │   on_layer_failure ─→ code (loop)                                       ├→ cleanup → END
+           │    └→ failure ───────────────────────────────────────────────────────────────┤
+           └──────────────────────────────────────────────────────────────────────────────┘
+
+``setup`` claims the issue first; a refused claim goes straight to ``cleanup``
+so nothing is cloned and no LLM is called.
 
 ``bootstrap`` guarantees the clone is a Laravel application before any skill or
 prompt work happens: a greenfield repository is scaffolded, an existing Laravel
 app is topped up, and a foreign PHP project raises rather than being
 overwritten.
+
+``code`` reaches ``detect_stack`` only after accepted file operations.
+Unapplied responses route directly to generation feedback or exhaustion;
+they cannot start a test layer or report a PHPUnit failure.
 
 ``detect_stack`` picks the entry layer: PHP-bearing stacks start at
 ``phpunit_test``; a frontend-only stack jumps straight to ``vitest_test`` so a
@@ -27,8 +35,13 @@ escalation node ``on_layer_failure``, which loops back to ``code``.
 ``openapi_test`` sits between the PHP and frontend layers and runs only when
 the attempt touched the API surface of a Laravel repo that has one.
 
-``cleanup`` is reached from both ``commit`` and ``failure``, so the tempdir
-workspace is always removed regardless of outcome.
+``pause_dependency`` follows a Playwright run that the sandbox stopped on a
+verified missing seeder: it pauses the issue (→ cleanup) or, when the
+prerequisite belongs to the change itself, returns to the shared retry budget.
+
+``cleanup`` is reached from ``commit``, ``failure``, ``pause_dependency`` and a
+refused ``setup``, so the tempdir workspace is always removed regardless of
+outcome.
 """
 
 from langgraph.graph import StateGraph, END
@@ -39,16 +52,20 @@ from graph.nodes import (
     node_detect_stack,
     node_test, node_openapi_test,
     node_vitest_test, node_playwright_test,
+    node_pause_dependency,
     node_on_layer_failure,
     node_commit, node_failure, node_cleanup,
 )
 from graph.edges import (
+    route_after_setup,
     route_after_plan,
+    route_after_code,
     route_after_detect_stack,
     route_after_phpunit,
     route_after_openapi,
     route_after_vitest,
     route_after_playwright,
+    route_after_dependency_pause,
 )
 
 
@@ -66,6 +83,7 @@ def build_graph():
     g.add_node("openapi_test",      node_openapi_test)
     g.add_node("vitest_test",       node_vitest_test)
     g.add_node("playwright_test",   node_playwright_test)
+    g.add_node("pause_dependency",  node_pause_dependency)
     g.add_node("on_layer_failure",  node_on_layer_failure)
     g.add_node("commit",            node_commit)
     g.add_node("failure",           node_failure)
@@ -75,10 +93,8 @@ def build_graph():
     g.set_entry_point("setup")
 
     # ── Linear edges ──────────────────────────────────────────────────────
-    g.add_edge("setup",            "bootstrap")
     g.add_edge("bootstrap",        "load_skills")
     g.add_edge("load_skills",      "plan")
-    g.add_edge("code",             "detect_stack")
     g.add_edge("on_layer_failure", "code")     # loop back after any red gate
     g.add_edge("commit",           "cleanup")
     g.add_edge("failure",          "cleanup")
@@ -86,9 +102,23 @@ def build_graph():
 
     # ── Conditional edges ─────────────────────────────────────────────────
     g.add_conditional_edges(
+        "setup",
+        route_after_setup,
+        {"bootstrap": "bootstrap", "cleanup": "cleanup"},
+    )
+    g.add_conditional_edges(
         "plan",
         route_after_plan,
         {"code": "code", "failure": "failure"},
+    )
+    g.add_conditional_edges(
+        "code",
+        route_after_code,
+        {
+            "detect_stack":     "detect_stack",
+            "on_layer_failure": "on_layer_failure",
+            "failure":          "failure",
+        },
     )
     g.add_conditional_edges(
         "detect_stack",
@@ -133,8 +163,18 @@ def build_graph():
         route_after_playwright,
         {
             "commit":           "commit",
+            "pause_dependency": "pause_dependency",
             "on_layer_failure": "on_layer_failure",
             "failure":          "failure",
+        },
+    )
+    g.add_conditional_edges(
+        "pause_dependency",
+        route_after_dependency_pause,
+        {
+            "on_layer_failure": "on_layer_failure",
+            "failure":          "failure",
+            "cleanup":          "cleanup",
         },
     )
 
