@@ -167,7 +167,7 @@ on the "{_DEFAULT_BRANCH}" branch.""",
 
 # ── Planning ───────────────────────────────────────────────────────────────────
 _PLAN_COMMON_STANDARDS = """\
-- Identify only the files that need to be created or modified, each with a clear reason.
+- Identify only the files that need to be created, modified or deleted, each with a clear reason.
 - Flag any ambiguities or risks explicitly.
 - If skill documentation is supplied in the prompt, incorporate its guidance into the plan and
   reference the source URL where relevant."""
@@ -178,6 +178,23 @@ _PLAN_BACKEND_STANDARDS = """\
 - For API work, state which `/api` routes are added or changed and what the OpenAPI document
   must contain after the change (Scramble derives it from FormRequest rules, JsonResource
   shapes, and PHPDoc)."""
+
+_SEEDER_REMOVAL_STANDARDS = """\
+SEEDER REMOVAL — only when the issue explicitly asks to remove an existing seeder:
+- Physically delete its PHP file using a DELETE directive, not a FILE block with empty,
+  no-op or replacement class content. Do not recreate it for PHPUnit or delete it at test time.
+- Remove the seeder's call/registration and unused import from DatabaseSeeder and other
+  callers, preserving unrelated seeding. Keep existing models, factories, API and migrations
+  unless the issue also requests changes to them.
+- Replace tests that invoke the removed seeder with PHPUnit removal coverage:
+  assertFileDoesNotExist for its conventional PHP path and assertFalse(class_exists(...))
+  using its fully qualified class name as a string, without importing or instantiating it.
+- Run DatabaseSeeder through $this->seed(DatabaseSeeder::class) on the isolated migrated
+  test database. Assert the affected table gets no rows from the removed seeder, while
+  preserving unrelated seed behavior. A retained registration must fail this test.
+- Test surviving API/factory behavior using the actual model/resource fields in the
+  repository; never invent an alternative boolean or response field.
+- A deletion still runs the normal PHPUnit gate; do not skip, weaken or mock it."""
 
 _PLAN_FRONTEND_STANDARDS = f"""\
 - For UI work, name the **PrimeVue components** to be used (by their PrimeVue {_PRIMEVUE_MAJOR} names)
@@ -234,7 +251,7 @@ _PLAN_STRUCTURE = {
     "backend": (
         "Objective – one sentence",
         'Database changes – migrations (table/columns/indexes), factories, seeders; "none" if not needed',
-        "Backend files to create/modify – path + purpose (model, FormRequest, controller, resource, route)",
+        "Backend files to create/modify/delete – path + purpose (model, FormRequest, controller, resource, route)",
         'API surface – each /api route: method, URI, request shape, response shape; "none" if not needed',
         "Implementation steps per file (method names, logic, data flow)",
         "Test cases that must pass (PHPUnit; OpenAPI when /api routes change) – file + test names",
@@ -242,7 +259,7 @@ _PLAN_STRUCTURE = {
     ),
     "frontend": (
         "Objective – one sentence",
-        "Frontend files to create/modify – path + which PrimeVue components are used",
+        "Frontend files to create/modify/delete – path + which PrimeVue components are used",
         'Backend used as it is – the existing routes and response shapes the UI calls; "none" if not needed',
         "Implementation steps per file (props, events, state, data flow)",
         "Test cases that must pass (Vitest / Playwright) – file + test names, and where the E2E data comes from",
@@ -251,9 +268,9 @@ _PLAN_STRUCTURE = {
     "fullstack": (
         "Objective – one sentence",
         'Database changes – migrations (table/columns/indexes), factories, seeders; "none" if not needed',
-        "Backend files to create/modify – path + purpose (model, FormRequest, controller, resource, route)",
+        "Backend files to create/modify/delete – path + purpose (model, FormRequest, controller, resource, route)",
         'API surface – each /api route: method, URI, request shape, response shape; "none" if not needed',
-        "Frontend files to create/modify – path + which PrimeVue components are used",
+        "Frontend files to create/modify/delete – path + which PrimeVue components are used",
         "Implementation steps per file (method names, logic, data flow)",
         "Test cases per layer that must pass (PHPUnit / OpenAPI / Vitest / Playwright) – file + test names",
         "Risks or ambiguities",
@@ -336,6 +353,8 @@ PRIMEVUE FRONTEND (Vue 3):
 - Edit the entry file or the Blade view only from its complete body quoted under Existing
   Repository State, emitting the whole file with your change. If that body is named as omitted,
   never reconstruct it from a fragment or replace the boot code by guess; state the assumption.
+- An explicit element choice in the issue takes precedence over the PrimeVue preference;
+  for example, a requested native input type="date" must stay a native date input.
 - Components live in resources/js/components/<Name>.vue; Vitest specs in
   resources/js/components/__tests__/<Name>.test.js; Playwright specs in e2e/<feature>.spec.js.
 - vite.config.js, vitest.config.js, playwright.config.js and package.json already exist. You
@@ -349,9 +368,9 @@ PRIMEVUE FRONTEND (Vue 3):
   Keep component specs to behaviour the issue actually names."""
 
 _TEST_PHPUNIT = """\
-- PHPUnit (`php artisan test`) runs whenever the change touches PHP, so every PHP change ships a
-  Feature or Unit test. Migrations are executed before the suite: a broken migration fails the
-  layer.
+- PHPUnit (`php artisan test`) runs whenever the change creates, modifies or deletes PHP, so
+  every PHP change ships a Feature or Unit test. Migrations are executed before the suite:
+  a broken migration fails the layer.
 - The OpenAPI layer runs when the change touches routes/api.php, app/Http/Controllers,
   app/Http/Resources, or app/Http/Requests."""
 
@@ -404,20 +423,30 @@ _TEST_SCOPE_NOTE = {
 }
 
 _CODE_OUTPUT_FORMAT = """\
-OUTPUT FORMAT – use this exact format for every file you produce:
+OUTPUT FORMAT – use these exact forms for every affected file:
 
+To create or modify a file:
 ### FILE: <relative/path/to/file.ext>
 ```<language>
 <complete file content>
 ```
 
-- One FILE block per file. Paths are relative to the repository root.
-- Produce every affected file in full – no placeholders like "// rest unchanged"."""
+To physically remove a file, emit one standalone line with no code fence or body:
+### DELETE: <relative/path/to/file.ext>
+
+- One FILE block or DELETE directive per path; never both. Paths stay inside the repository.
+- FILE bodies must be complete — no placeholders like "// rest unchanged".
+- DELETE removes the file before tests; an empty FILE body does not delete it.
+- Delete only files whose removal the issue/plan requires. Never delete migrations,
+  directories, symlinks or .git metadata.
+- On every retry re-emit the complete set of FILE blocks AND DELETE directives, including
+  files already absent from a previous attempt. An omitted deletion is restored from HEAD."""
 
 _CODE_TEST_INSTRUCTIONS = {
     "backend": """\
 - Include a PHPUnit Feature or Unit test for every behaviour the plan changes.
-- Include the migration, factory and seeder when the plan lists database changes.
+- Include a new migration, factory or seeder only when the plan requires creating it;
+  a removal uses DELETE and its removal tests, never a replacement seeder.
 - Add or extend the Feature test that proves each new or changed /api route responds as
   documented.""",
     "frontend": """\
@@ -426,7 +455,8 @@ _CODE_TEST_INSTRUCTIONS = {
     "fullstack": """\
 - Include the test files for every layer the plan touches (PHPUnit for PHP,
   Vitest + Playwright for Vue.js). Skip the layers the plan does not touch.
-- Include the migration, factory and seeder when the plan lists database changes.
+- Include a new migration, factory or seeder only when the plan requires creating it;
+  a removal uses DELETE and its removal tests, never a replacement seeder.
 - Add or extend the Feature test that proves each new or changed /api route responds as
   documented.""",
 }
@@ -477,7 +507,7 @@ def _planning_system_prompt(scope: str, documentation: str) -> str:
     """The planning system prompt for *scope* (already normalised)."""
     standards = [_PLAN_COMMON_STANDARDS]
     if scope != "frontend":
-        standards.append(_PLAN_BACKEND_STANDARDS)
+        standards += [_PLAN_BACKEND_STANDARDS, _SEEDER_REMOVAL_STANDARDS]
     if scope != "backend":
         standards.append(_PLAN_FRONTEND_STANDARDS)
     standards.append(_PLAN_TEST_STANDARDS[scope])
@@ -496,7 +526,7 @@ def _planning_system_prompt(scope: str, documentation: str) -> str:
 
 def _coding_system_prompt(scope: str, documentation: str) -> str:
     """The coding system prompt for *scope* (already normalised)."""
-    testing = ["TESTING (the layers that run are chosen from the files you write):"]
+    testing = ["TESTING (layers follow the files you create, modify or delete):"]
     if scope != "frontend":
         testing.append(_TEST_PHPUNIT)
     if scope != "backend":
@@ -508,7 +538,7 @@ def _coding_system_prompt(scope: str, documentation: str) -> str:
         sections.append(_DATABASE_POLICY)
     sections.append(_CODING_STANDARDS)
     if scope != "frontend":
-        sections.append(_BACKEND_STANDARDS)
+        sections += [_BACKEND_STANDARDS, _SEEDER_REMOVAL_STANDARDS]
     if scope != "backend":
         sections.append(_FRONTEND_STANDARDS)
     sections.append("\n".join(testing))
@@ -860,8 +890,8 @@ GitLab Issue #{issue_id}: {subject}
 {catalog_section}{retrieved_section}{episodes_section}{skills_section}
 ## Instructions
 Implement the approved plan above:
-- Produce every code and test file the plan lists, using the FILE format. A file outside
-  TASK SCOPE stays out even when the plan lists it.
+- Produce every code and test file the plan lists using FILE blocks, and every physical
+  removal using DELETE directives. A file outside TASK SCOPE stays out even when the plan lists it.
 - Files must be complete and immediately deployable.
 {_CODE_TEST_INSTRUCTIONS[scope]}
 {_CODE_REPOSITORY_RULE[scope]}\

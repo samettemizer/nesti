@@ -22,6 +22,10 @@ prompt work happens: a greenfield repository is scaffolded, an existing Laravel
 app is topped up, and a foreign PHP project raises rather than being
 overwritten.
 
+``code`` reaches ``detect_stack`` only after accepted file operations.
+Unapplied responses route directly to generation feedback or exhaustion;
+they cannot start a test layer or report a PHPUnit failure.
+
 ``detect_stack`` picks the entry layer: PHP-bearing stacks start at
 ``phpunit_test``; a frontend-only stack jumps straight to ``vitest_test`` so a
 repository without composer.json is never forced through PHPUnit.  Each layer
@@ -55,6 +59,7 @@ from graph.nodes import (
 from graph.edges import (
     route_after_setup,
     route_after_plan,
+    route_after_code,
     route_after_detect_stack,
     route_after_phpunit,
     route_after_openapi,
@@ -90,7 +95,6 @@ def build_graph():
     # ── Linear edges ──────────────────────────────────────────────────────
     g.add_edge("bootstrap",        "load_skills")
     g.add_edge("load_skills",      "plan")
-    g.add_edge("code",             "detect_stack")
     g.add_edge("on_layer_failure", "code")     # loop back after any red gate
     g.add_edge("commit",           "cleanup")
     g.add_edge("failure",          "cleanup")
@@ -106,6 +110,15 @@ def build_graph():
         "plan",
         route_after_plan,
         {"code": "code", "failure": "failure"},
+    )
+    g.add_conditional_edges(
+        "code",
+        route_after_code,
+        {
+            "detect_stack":     "detect_stack",
+            "on_layer_failure": "on_layer_failure",
+            "failure":          "failure",
+        },
     )
     g.add_conditional_edges(
         "detect_stack",

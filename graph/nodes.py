@@ -26,8 +26,8 @@ Error strategy per node
 • node_plan       – catches RuntimeError ("all planners failed"), leaves
                     ``plan`` empty; route_after_plan then routes to failure.
 • node_code       – catches RuntimeError ("all coders exhausted") and jumps
-                    ``attempt`` to ``max_attempts`` so route_after_phpunit
-                    routes straight to failure (Phase 1 aborted immediately too).
+                    ``attempt`` to ``max_attempts`` so route_after_code routes
+                    straight to failure. Unapplied code never starts a test layer.
 • node_commit     – tool failures reopen the issue + notify instead of raising,
                     so the commit → cleanup edge still runs.
 
@@ -69,6 +69,7 @@ resumed by TaskEngine's reconciliation only after that child's MR is merged.
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -127,13 +128,11 @@ _DOC_CHUNK_KEEP = 6
 # output would embed its first 512 tokens — installer chatter, not the error.
 _EPISODE_QUERY_CHARS = 1200
 
-# Fed into node_test's short-circuit when the coder produced no parseable
-# files; on_test_failure then appends it to the history, replacing Phase 1's
-# _NO_FILE_BLOCKS_FEEDBACK with the same corrective intent.
+# Corrective feedback for an unapplied coding response, before any test layer.
 _NO_FILE_BLOCKS_OUTPUT = (
-    "No files could be written or tested: the previous response did not "
-    "contain any '### FILE: <path>' blocks. Output every affected file in "
-    "full using the FILE format."
+    "No file changes could be applied or tested. Output each created or "
+    "modified file in full using '### FILE: <path>' blocks and each requested "
+    "physical removal using '### DELETE: <path>' directives."
 )
 
 # Reference-doc lanes per scope: (PrimeVue component docs, Laravel topic docs).
@@ -254,7 +253,7 @@ def _prune_stale_files(
     previous: list[str], current: list[str], repo_path: str
 ) -> list[str]:
     """
-    Revert files the previous attempt wrote that this attempt did not re-emit.
+    Revert file changes the previous attempt made that this attempt did not re-emit.
 
     The workspace persists across retries, so without this an attempt that
     renames a file leaves both versions behind.  For Laravel that is fatal
@@ -339,6 +338,7 @@ _INVENTORY_DIRS = (
     ("resources/js/components", 40),
     ("resources/views", 40),
     ("tests/Feature", 40),
+    ("e2e", 40),
 )
 
 # Route files are quoted rather than listed: the coder must see which URIs are
@@ -346,13 +346,10 @@ _INVENTORY_DIRS = (
 _INVENTORY_ROUTE_FILES = ("routes/api.php", "routes/web.php")
 _MAX_ROUTE_FILE_CHARS = 1500
 
-# Frontend and fullstack prompts also quote the files that decide whether a
-# component reaches the served page (the @vite entry, the Blade view, an SFC
-# root), the default seeder and the fixture manifest, then the build/test
-# configs — in this priority order.  Issue #12's coder never saw app.js or the
-# Blade view and shipped a component nothing mounted.  Only COMPLETE bodies are
-# quoted; a body over a budget or unreadable is named as omitted, so no prompt
-# presents a fragment as a file that is safe to rewrite.
+# Every scope quotes the default seeder so backend removals can preserve
+# unrelated registrations. Frontend/fullstack also quote the served entry
+# chain, fixture manifest and configs. Only COMPLETE bodies are quoted; an
+# oversized or unreadable body is named as omitted, never safe to rewrite.
 _INVENTORY_QUOTED_FILES = (
     ("resources/js/app.js", "js"),
     ("resources/js/app.ts", "ts"),
@@ -364,8 +361,11 @@ _INVENTORY_QUOTED_FILES = (
     ("vite.config.ts", "ts"),
     ("playwright.config.js", "js"),
     ("playwright.config.ts", "ts"),
+    ("vitest.config.js", "js"),
+    ("vitest.config.ts", "ts"),
+    ("package.json", "json"),
 )
-_MAX_QUOTED_FILE_CHARS = 6000
+_MAX_QUOTED_FILE_CHARS = 8000
 _MAX_QUOTED_TOTAL_CHARS = 16000
 
 
@@ -379,10 +379,17 @@ def _inventory_listing(directory: Path) -> list[str]:
     return sorted(names)
 
 
-def _quoted_entry_files(root: Path) -> list[str]:
-    """Quote complete entry bodies within the total section budget, never fragments."""
+def _quoted_entry_files(
+    root: Path, scope: str = "fullstack", referenced_files: list[tuple[str, str]] | None = None
+) -> list[str]:
+    """Quote complete task targets and entry bodies within one budget, never fragments."""
+    fixed_files = [
+        (relative, language) for relative, language in _INVENTORY_QUOTED_FILES
+        if scope != "backend" or relative == "database/seeders/DatabaseSeeder.php"
+    ]
+    files = dict.fromkeys((referenced_files or []) + fixed_files)
     entries: list[tuple[str | None, str]] = []
-    for relative, language in _INVENTORY_QUOTED_FILES:
+    for relative, language in files:
         path = root / relative
         if path.is_symlink():
             entries.append((None, f"\n{relative}: exists, body omitted (symbolic link)."))
@@ -422,7 +429,7 @@ def _quoted_entry_files(root: Path) -> list[str]:
     return sections
 
 
-def _repo_inventory(repo_path: str, scope: str = "fullstack") -> str:
+def _repo_inventory(repo_path: str, scope: str = "fullstack", task_text: str = "") -> str:
     """
     Describe what the cloned repository already contains, for the prompts.
 
@@ -433,9 +440,11 @@ def _repo_inventory(repo_path: str, scope: str = "fullstack") -> str:
     backend including a second ``create_tasks_table`` migration, and the PHP
     layer then failed with "table already exists" on every attempt.
 
-    Every scope gets the backend listing and the route files.  A frontend or
-    fullstack scope additionally gets the page-entry chain, the default seeder
-    and the fixture manifest quoted in full (see _INVENTORY_QUOTED_FILES).
+    Every scope gets the backend listing, route files and default seeder.
+    Files named by the issue or plan get complete bodies before fixed entry
+    files, so modifying an existing component does not require guessing its
+    implementation. Frontend/fullstack also get the served entry chain,
+    fixture manifest and configs within the same bounded quote section.
 
     Never raises: an unreadable workspace yields an empty string and the
     prompts are built without the section, exactly as before; one unreadable
@@ -447,6 +456,7 @@ def _repo_inventory(repo_path: str, scope: str = "fullstack") -> str:
             return ""
 
         lines: list[str] = []
+        referenced_files: list[tuple[str, str]] = []
         for relative, cap in _INVENTORY_DIRS:
             directory = root / relative
             if not directory.is_dir():
@@ -457,6 +467,13 @@ def _repo_inventory(repo_path: str, scope: str = "fullstack") -> str:
             shown = names[:cap]
             suffix = f" … (+{len(names) - cap} more)" if len(names) > cap else ""
             lines.append(f"- {relative}/: {', '.join(shown)}{suffix}")
+            for name in names:
+                path = f"{relative}/{name}"
+                basename = name.rsplit("/", 1)[-1]
+                pattern = rf"(?<![\w./-])(?:{re.escape(path)}|{re.escape(basename)})(?![\w./-])"
+                if task_text and re.search(pattern, task_text):
+                    language = Path(name).suffix.lstrip(".")
+                    referenced_files.append((path, language))
 
         for relative in _INVENTORY_ROUTE_FILES:
             route_file = root / relative
@@ -471,8 +488,7 @@ def _repo_inventory(repo_path: str, scope: str = "fullstack") -> str:
                 body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
             lines.append(f"\nCurrent {relative}:\n```php\n{body}\n```")
 
-        if scope != "backend":
-            lines += _quoted_entry_files(root)
+        lines += _quoted_entry_files(root, scope, referenced_files)
 
         if not lines:
             return (
@@ -492,13 +508,20 @@ def _repo_inventory(repo_path: str, scope: str = "fullstack") -> str:
 
 def _last_failure_output(state: IssueState) -> tuple[str, str]:
     """
-    Return ``(layer_label, output)`` for the test layer that ended the run.
+    Return ``(failure_kind, output)`` for generation rejection or the red test layer.
 
     Layers are checked newest-first (Playwright → Vitest → OpenAPI → PHPUnit)
     so the retry turn and the reopen note carry the failure the model actually
     has to fix.  Without this, a Vue-only issue would reopen with an empty
     note: PHPUnit never ran, so ``test_output`` is blank.
     """
+    if state.get("files_written") is False:
+        output = state.get("error") or _NO_FILE_BLOCKS_OUTPUT
+        response = state.get("code_response", "").strip()
+        if response and not state.get("error"):
+            output += f"\n\nCoder response:\n{condense(response, _MAX_NOTE_CHARS)}"
+        return "Code generation", output
+
     candidates = (
         ("Playwright (E2E tests)", state.get("playwright_passed", False),
          state.get("playwright_output", "")),
@@ -709,7 +732,7 @@ def node_plan(state: IssueState) -> dict:
         max_topic_docs=topics,
         max_practice_docs=1,
     )
-    repo_context = _repo_inventory(state.get("repo_path", ""), decision.scope)
+    repo_context = _repo_inventory(state.get("repo_path", ""), decision.scope, issue_text)
 
     # Phase 8 memory: how similar issues were solved before (Redis solution
     # cache) and the corpus passages the keyword catalog missed (Qdrant).
@@ -775,7 +798,7 @@ def node_plan(state: IssueState) -> dict:
 def node_code(state: IssueState) -> dict:
     """
     Generate code via LLM coder chain.
-    Writes FILE blocks into the repo. Appends code turns to the history.
+    Applies FILE blocks and DELETE directives. Appends code turns to the history.
     The prompt, its reference docs and its retrieved chunks follow ``scope``.
     """
     logger.debug("→ node_code")
@@ -806,7 +829,7 @@ def node_code(state: IssueState) -> dict:
     )
     # Rebuilt every attempt: the previous attempt's own files are part of the
     # repository now, and a retry must see them rather than re-inventing them.
-    repo_context = _repo_inventory(state.get("repo_path", ""), scope)
+    repo_context = _repo_inventory(state.get("repo_path", ""), scope, haystack)
 
     # Phase 8 memory.  A narrow scope filters the doc search from the first
     # attempt.  A fullstack scope falls back to the detected stack, and only
@@ -859,11 +882,8 @@ def node_code(state: IssueState) -> dict:
             messages=messages,
         )
     except RuntimeError as exc:
-        # Every reachable coder failed. Phase 1 aborted the retry loop
-        # immediately; jumping attempt to max_attempts makes route_after_phpunit
-        # deterministically route to node_failure (node_detect_stack keeps
-        # run_phpunit=True when no files were written, so that is the router
-        # this path reaches).
+        # Every reachable coder failed: exhaust the shared budget so
+        # route_after_code goes straight to failure without a test verdict.
         logger.error("All coding providers exhausted on attempt %d: %s", attempt, exc)
         logger.debug("← node_code (providers exhausted)")
         return {
@@ -883,13 +903,21 @@ def node_code(state: IssueState) -> dict:
     messages = _store.append(issue_id, "assistant", code_response)
 
     from docker_runner import DockerRunner
-    # write_files is a @staticmethod – call it on the class; instantiating
-    # DockerRunner would open a Docker socket that file writing doesn't need.
-    files_written, written = DockerRunner.write_files(code_response, state["repo_path"])
+    # Static file application needs neither a Docker client nor a container.
+    apply_error = ""
+    try:
+        files_written, written = DockerRunner.write_files(code_response, state["repo_path"])
+    except ValueError as exc:
+        files_written, written = False, []
+        apply_error = f"File changes rejected: {exc}"
+        logger.warning("%s", apply_error)
     if files_written:
-        logger.info("Wrote %d file(s): %s", len(written), ", ".join(written))
+        logger.info("Applied %d file change(s): %s", len(written), ", ".join(written))
     else:
-        logger.warning("No FILE blocks found in LLM output (attempt %d).", attempt)
+        logger.warning("No file changes applied (attempt %d).", attempt)
+        # A rejected/empty response must not lose earlier changes: the next
+        # valid complete response still needs to restore omitted deletions.
+        written = state.get("written_files") or []
 
     if files_written:
         pruned = _prune_stale_files(
@@ -908,6 +936,7 @@ def node_code(state: IssueState) -> dict:
         "files_written": files_written,
         "written_files": written,
         "attempt": attempt,
+        "error": apply_error,
         "coder_provider": attribution["provider"],
         "coder_model": attribution["model"],
         "coder_billing": attribution["billing"],
@@ -928,18 +957,7 @@ def node_detect_stack(state: IssueState) -> dict:
     """
     logger.debug("→ node_detect_stack")
 
-    # No parseable FILE blocks this attempt: there is nothing new to classify.
-    # Route to node_test anyway — its files_written guard turns the attempt
-    # into a failure with corrective feedback (Phase 1 behaviour, preserved).
-    if not state.get("files_written", False):
-        logger.debug("← node_detect_stack (no files written – deferring to node_test guard)")
-        return {
-            "has_vue_files": False,
-            "stack": "unknown",
-            "run_phpunit": True,
-            "run_frontend": False,
-            "run_openapi": False,
-        }
+    # route_after_code admits only responses with accepted file operations.
 
     result = tool_detect_stack(state["repo_path"], state.get("written_files"))
     if not result["success"]:
@@ -1026,21 +1044,6 @@ def node_test(state: IssueState) -> dict:
     """Run PHPUnit tests in the Docker sandbox."""
     logger.debug("→ node_test")
 
-    # Guard: if the last code response yielded no files, running the suite
-    # against the untouched clone would pass on the green baseline and lead
-    # to an empty Merge Request. Short-circuit as a failed attempt instead,
-    # with corrective output for the model (Phase 1 behaviour).
-    if not state.get("files_written", False):
-        logger.warning("Skipping test run – no files were written this attempt.")
-        _log_layer_verdict("PHPUnit", False, state, reason="no FILE blocks were produced")
-        logger.debug("← node_test (short-circuit)")
-        # When node_code hit "all coders exhausted" it stored the reason in
-        # state["error"]; surface that instead of the generic no-blocks
-        # message so node_failure's reopen note matches Phase 1's content.
-        return {
-            "test_passed": False,
-            "test_output": state.get("error") or _NO_FILE_BLOCKS_OUTPUT,
-        }
 
     logger.info("Running tests (attempt %d) …", state.get("attempt", 0))
     result = tool_docker_run_tests(state["repo_path"])
@@ -1245,9 +1248,8 @@ def node_on_layer_failure(state: IssueState) -> dict:
 
     The retry prompt must carry the standards of the layer that failed, so a
     red layer outside the scope widens it: a frontend scope whose change broke
-    PHPUnit becomes fullstack.  An attempt that wrote no FILE blocks reports
-    through the PHPUnit label but says nothing about the backend; it never
-    widens.
+    PHPUnit becomes fullstack. An unapplied coding response says nothing about
+    the backend or frontend and never widens the scope.
     """
     logger.debug("→ node_on_layer_failure")
 
@@ -1431,7 +1433,7 @@ def node_failure(state: IssueState) -> dict:
             f"❌ Issue <b>#{issue_id}</b> – <i>{subject}</i>\n"
             f"All code generation attempts exhausted. Reopening."
         )
-        logger.error("Tests failed after %d attempt(s). Reopening issue #%s.", attempts, issue_id)
+        logger.error("%s failed after %d attempt(s). Reopening issue #%s.", layer, attempts, issue_id)
 
     tool_issue_set_status(issue_id, "new", note=note)
 

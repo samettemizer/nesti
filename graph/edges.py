@@ -19,6 +19,9 @@ did not touch the API surface never pays for a Scramble export.  Every layer
 shares the same retry budget: ``attempt`` is incremented once per node_code
 run, not once per layer, and every red gate routes to the same escalation node.
 
+``route_after_code`` rejects unapplied responses before these layers, using
+the same retry budget without assigning a failed test verdict.
+
 Fixture dependencies
 ────────────────────
 ``route_after_playwright`` sends a verified missing-seeder report to
@@ -76,6 +79,13 @@ def route_after_plan(state: IssueState) -> str:
     return "failure"
 
 
+def route_after_code(state: IssueState) -> str:
+    """Reject unapplied code before stack detection or any test-layer verdict."""
+    if state.get("files_written", False):
+        return "detect_stack"
+    return _retry_or_fail(state, "on_layer_failure")
+
+
 def route_after_detect_stack(state: IssueState) -> str:
     """
     After node_detect_stack:
@@ -88,9 +98,6 @@ def route_after_detect_stack(state: IssueState) -> str:
     is True whenever the frontend layers do not run, so an unclassified change
     is still tested rather than waved through to commit.
 
-    node_detect_stack pins run_phpunit=True when no files were written, which
-    routes here to node_test's short-circuit guard — the attempt then fails
-    with corrective feedback exactly as it did before Phase 4.
     """
     if state.get("run_phpunit", True):
         logger.debug("route_after_detect_stack → phpunit_test (stack=%s)", state.get("stack"))

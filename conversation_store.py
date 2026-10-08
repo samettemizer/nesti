@@ -136,15 +136,15 @@ class ConversationStore:
         self, issue_id: int, test_output: str, layer: str = "PHPUnit"
     ) -> list[dict]:
         """
-        Append a user-role message describing a test-layer failure.
+        Append corrective feedback for generation rejection or a test-layer failure.
 
         This is what makes the LLM aware of WHY the previous attempt failed:
         the corrective turn is added to the shared history so the next
         generate_code() call sees the prior attempt and its failure reason.
 
-        ``layer`` names the gate that went red (PHPUnit, OpenAPI documentation,
-        Vitest, Playwright).  Every layer funnels through this one method, so
-        the 2000-char feedback budget is defined in exactly one place.
+        ``layer`` names Code generation or the gate that went red (PHPUnit,
+        OpenAPI documentation, Vitest, Playwright). All share this method and
+        its bounded feedback output.
         """
         content = (
             f"The {layer} layer FAILED for the code you generated.\n"

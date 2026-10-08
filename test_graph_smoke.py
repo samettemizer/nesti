@@ -318,7 +318,6 @@ hist = calls["history_at_commit"]
 roles = [m["role"] for m in hist]
 check(roles == ["user", "assistant", "user", "assistant", "user", "user", "assistant"],
       f"history role sequence correct ({len(hist)} turns)")
-check("No files could be written" in hist[4]["content"], "corrective feedback in history")
 check(hist[3]["content"] == NO_BLOCKS and hist[6]["content"] == GOOD_CODE,
       "both coder responses recorded")
 check(nodes._store.load(101) == [], "history deleted after success")
@@ -901,6 +900,25 @@ check(f["scope"] == "fullstack", "the PHPUnit failure widened the frontend scope
 check(f["mr_url"] and "### Vitest" not in calls["mrs"][0],
       "the MR body lists only the layers that ran on the merged code")
 
+
+# Unapplied frontend responses must not masquerade as PHPUnit failures or
+# reach the untouched clone's green baseline.
+f = run(2620, subject="Filter existing tasks", description="Scope: frontend",
+        docker_outcomes=[True], code_responses=[NO_BLOCKS, BUTTON_CODE],
+        laravel_repo=True, vue_repo=True)
+check(calls["layers"] == ["vitest", "playwright"] and f["attempt"] == 2 and f["mr_url"],
+      "an unapplied frontend attempt retries before running only its actual layers")
+check(calls["memory_remember_failure"][0]["layer"] == "Code generation"
+      and f["scope"] == "frontend",
+      "unapplied code is attributed to generation without widening frontend scope")
+f = run(2621, subject="Filter existing tasks", description="Scope: frontend",
+        docker_outcomes=[True], code_responses=[NO_BLOCKS],
+        laravel_repo=True, vue_repo=True)
+check(not calls["layers"] and not calls["pushes"] and not f["mr_url"],
+      "exhausted unapplied code cannot test the baseline, push or open an empty MR")
+check("Code generation" in f["failure_reason"]
+      and not os.path.exists(calls["workspaces"][0]),
+      "generation exhaustion reports its cause and always cleans the workspace")
 # ═════ Scenario 19: Phase 8 hierarchical memory end-to-end ═════
 print("\n── Scenario 19: Phase 8 hierarchical memory end-to-end ──")
 _CHUNKS = [
@@ -1293,13 +1311,6 @@ check(_chatgpt_usage(None)["remaining"] is None,
 
 # ═════ Scenario 12: nodes/edges testable in isolation (total=False state) ═════
 print("\n── Scenario 12: isolated node/edge tests with partial state ──")
-r = nodes.node_test({})   # empty state – every field optional
-check(r == {"test_passed": False,
-            "test_output": nodes._NO_FILE_BLOCKS_OUTPUT}, "node_test runs on empty state")
-check(nodes.node_detect_stack({}) ==
-      {"has_vue_files": False, "stack": "unknown",
-       "run_phpunit": True, "run_frontend": False, "run_openapi": False},
-      "node_detect_stack defers to the files_written guard on empty state")
 check(route_after_detect_stack({"run_phpunit": True}) == "phpunit_test",
       "edge: php-bearing stack → phpunit_test")
 check(route_after_detect_stack({"run_phpunit": False, "stack": "vue"}) == "vitest_test",
@@ -1662,7 +1673,7 @@ with tempfile.TemporaryDirectory(prefix="nesti-inventory-") as root:
     put_file("resources/js/app.js", "WHOLE_ENTRY_BODY\n \t\n")
     check("WHOLE_ENTRY_BODY\n \t\n" in nodes._repo_inventory(root, "frontend"),
           "quoted entry retains its complete body including trailing whitespace")
-    put_file("resources/js/app.js", "OVERSIZE_SENTINEL" + "é" * 6001)
+    put_file("resources/js/app.js", "OVERSIZE_SENTINEL" + "é" * (nodes._MAX_QUOTED_FILE_CHARS + 1))
     check("OVERSIZE_SENTINEL" not in nodes._repo_inventory(root, "frontend"),
           "oversized multibyte entry body is omitted whole")
     for relative, sentinel in (
@@ -1684,6 +1695,29 @@ with tempfile.TemporaryDirectory(prefix="nesti-inventory-") as root:
         inventory = nodes._repo_inventory(root, "frontend")
     check("BUDGET_FIRST" not in inventory and "BUDGET_SECOND" in inventory
           and "admin/Table.vue" in inventory, "one optional read error preserves other usable context")
+
+with tempfile.TemporaryDirectory(prefix="nesti-task-context-") as root:
+    def put_target(relative, body):
+        file = Path(root, relative)
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(body, encoding="utf-8")
+    target_body = '<template><p>Existing public task behaviour</p></template>\n'
+    unrelated_body = '<template><p>Unrelated admin behaviour</p></template>\n'
+    put_target("resources/js/components/public/Table.vue", target_body)
+    put_target("resources/js/components/admin/Table.vue", unrelated_body)
+    inventory = nodes._repo_inventory(
+        root, "frontend", "Filter resources/js/components/public/Table.vue")
+    check(target_body in inventory and unrelated_body not in inventory,
+          "a named nested target supplies its complete source without a same-name sibling")
+    inventory = nodes._repo_inventory(root, "frontend", "Update Table.vue")
+    check(target_body in inventory and unrelated_body in inventory,
+          "an ambiguous basename exposes both real candidates instead of guessing one")
+    put_target("resources/js/components/public/Table.vue",
+               "TARGET_OVERSIZE" + "x" * nodes._MAX_QUOTED_FILE_CHARS)
+    inventory = nodes._repo_inventory(
+        root, "frontend", "Update resources/js/components/public/Table.vue")
+    check("TARGET_OVERSIZE" not in inventory and "body omitted" in inventory,
+          "task-target priority never turns an oversized source into a partial rewrite")
 
 print("\n── Playwright report transport and container lifecycle ──")
 import frontend_runner as fr

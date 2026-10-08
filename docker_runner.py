@@ -20,6 +20,15 @@ import docker
 import requests
 
 logger = logging.getLogger(__name__)
+_FILE_CHANGE_PATTERN = re.compile(
+    r"^###[ \t]*(?:"
+    r"FILE:[ \t]*(?P<write>[^\r\n]+)\r?\n"
+    r"```[^\r\n]*\r?\n(?P<body>.*?)^```[ \t]*\r?$"
+    r"|DELETE:[ \t]*(?P<delete>[^\r\n]+)\r?$)",
+    re.MULTILINE | re.DOTALL,
+)
+_FILE_CHANGE_HEADER = re.compile(r"^###[ \t]*(?:FILE|DELETE):", re.MULTILINE)
+
 
 # ---------------------------------------------------------------------------
 # Sandbox command recipes.  Each is a list[str] (["bash", "-lc", <script>]) so
@@ -65,6 +74,8 @@ _TEST_COMMAND = [
         "php artisan migrate --force;",
         "php artisan test;",
         "else",
+        # to be on the safe side.
+        "composer dump-autoload;",
         "./vendor/bin/phpunit --testdox;",
         "fi",
     ]),
@@ -253,28 +264,54 @@ class DockerRunner:
 
     @staticmethod
     def write_files(llm_output: str, workspace_path: str) -> tuple[bool, list[str]]:
-        """
-        Parse the LLM output for ``### FILE: <path>`` blocks and write them
-        into *workspace_path*.
+        """Apply FILE bodies and explicit DELETE directives inside the workspace.
 
-        Returns the list of relative file paths that were written.
+        Return whether any operations were accepted and their repo-relative
+        paths, including deletions for test gates and retry restoration.
+        Validate the complete response before mutation; invalid declarations
+        raise ValueError. DELETE is idempotent but never removes directories,
+        symlinks, Git metadata or migrations.
         """
-        pattern = re.compile(
-            r"###\s*FILE:\s*(.+?)\n```(?:\w+)?\n(.*?)```",
-            re.DOTALL,
-        )
-        written: list[str] = []
-        for match in pattern.finditer(llm_output):
-            rel_path = match.group(1).strip()
-            content = match.group(2)
-            abs_path = Path(workspace_path) / rel_path
-            abs_path.parent.mkdir(parents=True, exist_ok=True)
-            abs_path.write_text(content, encoding="utf-8")
-            written.append(rel_path)
-            logger.debug("Wrote %s", rel_path)
-
-        if not written:
-            logger.warning("No FILE blocks found in LLM output.")
+        matches = list(_FILE_CHANGE_PATTERN.finditer(llm_output))
+        for header in _FILE_CHANGE_HEADER.finditer(llm_output):
+            if not any(match.start() <= header.start() < match.end() for match in matches):
+                raise ValueError("Malformed FILE block or DELETE directive.")
+        if not matches:
+            logger.warning("No FILE blocks or DELETE directives found in LLM output.")
             return False, []
 
-        return  True, written
+        root = Path(workspace_path).resolve(strict=True)
+        operations: dict[str, tuple[Path, str | None]] = {}
+        for match in matches:
+            deleting = match.group("delete") is not None
+            raw = (match.group("delete") if deleting else match.group("write")).strip()
+            relative = Path(raw.replace("\\", "/"))
+            if (relative.is_absolute() or not relative.parts
+                    or any(part in ("..", ".git") for part in relative.parts)):
+                raise ValueError(f"File change path must stay inside the repository: {raw!r}")
+            path = relative.as_posix()
+            if path in operations:
+                raise ValueError(f"Duplicate or conflicting file changes for {path}.")
+            if deleting and relative.parts[:2] == ("database", "migrations"):
+                raise ValueError(f"Migrations cannot be deleted: {path}.")
+            target = root
+            for part in relative.parts:
+                target /= part
+                if target.is_symlink():
+                    raise ValueError(f"File changes cannot traverse symlinks: {path}.")
+            if target.exists() and not target.is_file():
+                raise ValueError(f"File changes require a file, not a directory: {path}.")
+            operations[path] = (target, None if deleting else match.group("body"))
+
+        for path in operations:
+            if any(parent.as_posix() in operations for parent in Path(path).parents):
+                raise ValueError(f"Overlapping file change paths: {path}.")
+        for path, (target, content) in operations.items():
+            if content is None:
+                target.unlink(missing_ok=True)
+                logger.info("Deleted file: %s", path)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+                logger.debug("Wrote %s", path)
+        return True, list(operations)
