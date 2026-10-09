@@ -29,7 +29,7 @@ _DEFAULT_REDIS_URL = "redis://nesti-redis:6379/0"
 _DEFAULT_TTL_DAYS = 7
 _SOCKET_CONNECT_TIMEOUT = 3  # seconds
 _KEY_PREFIX = "ai-dev:issue:"
-_TEST_FAILURE_OUTPUT_LIMIT = 2000  # chars of *condensed* layer output fed back
+_TEST_FAILURE_OUTPUT_LIMIT = 4000  # chars of *condensed* layer output fed back
 
 
 class ConversationStore:

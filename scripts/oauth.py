@@ -1,5 +1,18 @@
 """
-scripts/oauth.py - Nesti OAuth CLI ("nesti /provider", "nesti /usage").
+scripts/oauth.py - Nesti provider CLI ("nesti /provider", "nesti /usage").
+
+OpenRouter model management:
+    nesti /provider models openrouter [search]
+    nesti /provider model openrouter [model-id|--reset]
+
+The public catalog lists text-input/text-output model IDs, context sizes and
+indicative USD prices per million tokens. It never makes an inference call.
+Model selection is shared by planning and coding, persists without a TTL at
+nesti:provider:model:openrouter, and overrides OPENROUTER_MODEL. A running
+orchestrator reads it on each OpenRouter call; --reset restores the environment
+setting. No implicit model is selected and no API enable flag is changed.
+If Redis cannot be read, inference fails closed rather than billing a different
+model. OAuth credentials and /usage remain consumer-subscription-only.
 
 Provider status as of 2026-09-20 (see RISK_NOTICES below for citations):
 
@@ -34,6 +47,7 @@ import secrets
 import sys
 import time
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional, Protocol
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -45,6 +59,9 @@ logger = logging.getLogger("oauth-cli")
 
 _DEFAULT_REDIS_URL = "redis://nesti-redis:6379/0"
 _OAUTH_PREFIX = "ai-dev:oauth:tokens:"
+_MODEL_PREFIX = "nesti:provider:model:"
+MODEL_ENV_VARS = {"openrouter": "OPENROUTER_MODEL"}
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 # Refresh an OAuth credential this many seconds before it actually expires, so
 # a long-running inference call never starts on a token that dies mid-flight.
@@ -910,6 +927,29 @@ PROVIDERS: Dict[str, ConsumerProvider] = {
 }
 
 
+def list_provider_models(provider_name: str, search: str = "") -> list[dict]:
+    """Fetch selectable text models from the provider's live public catalog."""
+    if provider_name not in MODEL_ENV_VARS:
+        raise ValueError(f"Model discovery is not supported for '{provider_name}'. Supported: openrouter")
+    response = requests.get(
+        f"{OPENROUTER_API_BASE}/models",
+        params={"output_modalities": "text", "input_modalities": "text"},
+        timeout=int(os.environ.get("OPENROUTER_TIMEOUT", "600")),
+    )
+    response.raise_for_status()
+    models = response.json()["data"]
+    if not isinstance(models, list):
+        raise ValueError("OpenRouter returned an invalid model catalog.")
+    query = search.casefold()
+    return [
+        model for model in models
+        if isinstance(model.get("id"), str)
+        and "text" in model.get("architecture", {}).get("input_modalities", [])
+        and "text" in model.get("architecture", {}).get("output_modalities", [])
+        and (not query or query in f"{model['id']} {model.get('name', '')}".casefold())
+    ]
+
+
 # ---------------------------------------------------------
 # Redis State Manager
 # ---------------------------------------------------------
@@ -973,6 +1013,36 @@ class TokenStore:
             return bool(self._redis.delete(key))
         return self._memory.pop(key, None) is not None
 
+    def get_model(self, provider_name: str) -> str | None:
+        """Read a model override independently of OAuth credentials."""
+        key = f"{_MODEL_PREFIX}{provider_name}"
+        return self._redis.get(key) if self._available else self._memory.get(key)
+
+    def save_model(self, provider_name: str, model_id: str) -> None:
+        """Store the common planner/coder model without changing API enable flags."""
+        key = f"{_MODEL_PREFIX}{provider_name}"
+        if self._available:
+            self._redis.set(key, model_id)
+        else:
+            self._memory[key] = model_id
+
+    def delete_model(self, provider_name: str) -> None:
+        """Remove the CLI override, restoring the environment model setting."""
+        key = f"{_MODEL_PREFIX}{provider_name}"
+        if self._available:
+            self._redis.delete(key)
+        else:
+            self._memory.pop(key, None)
+
+
+def configured_model(store: TokenStore, provider_name: str) -> str:
+    """Resolve CLI selection before environment; never guess during a Redis outage."""
+    if provider_name not in MODEL_ENV_VARS:
+        raise ValueError(f"Model selection is not supported for '{provider_name}'. Supported: openrouter")
+    if not store.available:
+        raise RuntimeError("Cannot read model selection: Redis is unavailable.")
+    return store.get_model(provider_name) or os.environ.get(MODEL_ENV_VARS[provider_name], "").strip()
+
 
 def fetch_usage(store: TokenStore, name: str, token_data: Dict[str, Any]) -> Dict[str, Any]:
     """Usage/quota for one stored session — the single entry point for usage reads.
@@ -998,12 +1068,67 @@ def fetch_usage(store: TokenStore, name: str, token_data: Dict[str, Any]) -> Dic
 # ---------------------------------------------------------
 
 def print_help() -> None:
-    print("Nesti OAuth CLI")
+    """Print the container-native provider commands."""
+    print("Nesti Provider CLI")
     print("Commands:")
-    print("  /provider               List available consumer providers")
-    print("  /provider login [name]  Initiate login for a provider")
-    print("  /provider logout [name] Log out of a provider")
-    print("  /usage                  Show usage/quota for authenticated providers")
+    print("  /provider                              List consumer and platform providers")
+    print("  /provider login <name>                 Log in to a consumer provider")
+    print("  /provider logout <name>                Log out of a consumer provider")
+    print("  /provider models <name> [search]       List text models and USD prices per 1M tokens")
+    print("  /provider model <name>                 Show the selected planner/coder model")
+    print("  /provider model <name> <model-id>      Persist a model selection (currently: openrouter)")
+    print("  /provider model <name> --reset        Restore the environment model setting")
+    print("  /usage                                 Show usage/quota for authenticated consumers")
+
+
+def _model_price(value: str | None) -> str:
+    try:
+        price = Decimal(str(value))
+    except InvalidOperation:
+        return "unknown"
+    if not price.is_finite() or price < 0:
+        return "variable"
+    return format(price * 1_000_000, ".6f").rstrip("0").rstrip(".")
+
+
+def _cmd_provider_models(provider_name: str, search: str = "") -> None:
+    models = list_provider_models(provider_name, search)
+    if not models:
+        print("No matching text models.")
+        return
+    width = max(len(model["id"]) for model in models)
+    print(f"{'Model ID':<{width}}  {'Context':>10}  {'Input $/1M':>12}  {'Output $/1M':>12}")
+    for model in models:
+        pricing = model.get("pricing") or {}
+        print(
+            f"{model['id']:<{width}}  {str(model.get('context_length') or 'unknown'):>10}  "
+            f"{_model_price(pricing.get('prompt')):>12}  "
+            f"{_model_price(pricing.get('completion')):>12}"
+        )
+    print("Catalog prices are indicative; routed provider pricing and availability may differ.")
+
+
+def _cmd_provider_model(store: TokenStore, provider_name: str, model_id: str | None) -> None:
+    current = configured_model(store, provider_name)
+    if model_id == "--reset":
+        store.delete_model(provider_name)
+        if store.get_model(provider_name) is not None:
+            raise RuntimeError("Model reset could not be verified.")
+    elif model_id is not None:
+        if not any(model["id"] == model_id for model in list_provider_models(provider_name)):
+            raise ValueError(
+                f"Unknown or non-text model '{model_id}'. "
+                f"Use 'nesti /provider models {provider_name}' for selectable IDs."
+            )
+        store.save_model(provider_name, model_id)
+        if store.get_model(provider_name) != model_id:
+            raise RuntimeError("Model selection could not be verified.")
+    else:
+        print(f"{provider_name}: {current or 'not selected'} (planner and coder)")
+        return
+    effective = configured_model(store, provider_name)
+    print(f"{provider_name}: {effective or 'not selected'} (planner and coder)")
+    print("Effective on the next provider call; API enable flags are unchanged.")
 
 
 def _cmd_provider_login(store: "TokenStore", provider_name: str) -> None:
@@ -1120,6 +1245,7 @@ def _format_usage_line(name: str, usage: Dict[str, Any]) -> str:
 
 
 def main() -> None:
+    """Dispatch provider operations without making inference calls."""
     if len(sys.argv) < 2:
         print_help()
         sys.exit(0)
@@ -1127,9 +1253,21 @@ def main() -> None:
     cmd = sys.argv[1]
     args = sys.argv[2:]
 
+    # The public catalog needs neither Redis nor a configured API key.
+    if cmd == "/provider" and args and args[0] == "models":
+        if len(args) not in (2, 3):
+            print_help()
+            sys.exit(1)
+        try:
+            _cmd_provider_models(args[1], args[2] if len(args) == 3 else "")
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            print(f"Error fetching models: {exc}")
+            sys.exit(1)
+        return
+
     store = TokenStore()
     if not store.available:
-        print("Error: cannot reach Redis — OAuth provider state cannot be read or saved.")
+        print("Error: cannot reach Redis — provider state cannot be read or saved.")
         sys.exit(1)
 
     if cmd == "/provider":
@@ -1140,12 +1278,27 @@ def main() -> None:
                 if p in RISK_NOTICES:
                     status += " [accepted-risk provider — 'login' prints why]"
                 print(f"  - {p}{status}")
+            for name in MODEL_ENV_VARS:
+                enabled = os.environ.get(f"{name.upper()}_API_ENABLED", "false").strip().lower() == "true"
+                has_key = bool(os.environ.get(f"{name.upper()}_API_KEY", "").strip())
+                model = configured_model(store, name) or "not selected"
+                print(
+                    f"  - {name} (platform API; {'enabled' if enabled else 'disabled'}; "
+                    f"key {'configured' if has_key else 'missing'}; model: {model})"
+                )
+        elif args[0] == "model" and len(args) in (2, 3):
+            try:
+                _cmd_provider_model(store, args[1], args[2] if len(args) == 3 else None)
+            except (requests.RequestException, redis.RedisError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+                print(f"Error selecting model: {exc}")
+                sys.exit(1)
         elif len(args) >= 2 and args[0] == "login":
             _cmd_provider_login(store, args[1])
         elif len(args) >= 2 and args[0] == "logout":
             _cmd_provider_logout(store, args[1])
         else:
             print_help()
+            sys.exit(1)
 
     elif cmd == "/usage":
         tokens = store.get_all_tokens()

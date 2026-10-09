@@ -11,8 +11,8 @@ deleted and re-indexed (a document that shrank leaves no orphan chunks), and a
 document that left the registry is removed.  Chunk ids are deterministic, so a
 re-run never duplicates points.
 
-Run manually after ``scripts/fetch_skills.py``; the orchestrator never blocks
-on ingestion::
+The orchestrator calls ``main([])`` before polling when memory is enabled.
+Run manually after ``scripts/fetch_skills.py`` when the poller is stopped::
 
     python scripts/index_skills.py [--force] [--recreate] [--only primevue|laravel]
 """

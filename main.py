@@ -4,6 +4,9 @@ main.py – entry point for the AI Developer orchestrator.
 Usage:
     python main.py            # process one issue and exit
     python main.py --loop     # keep polling until interrupted
+
+When memory is enabled, refresh the skill index before importing the engine;
+an indexing failure exits without polling GitLab.
 """
 
 import argparse
@@ -17,7 +20,10 @@ from dotenv import load_dotenv
 # Load .env before importing anything that reads environment variables
 load_dotenv()
 
-from task_engine import TaskEngine  # noqa: E402  (after load_dotenv)
+import requests  # noqa: E402
+
+logger = logging.getLogger(__name__)
+_QDRANT_STARTUP_TIMEOUT = 60
 
 
 def _setup_logging() -> None:
@@ -30,9 +36,28 @@ def _setup_logging() -> None:
     )
 
 
+def _wait_for_qdrant() -> None:
+    """Allow a fresh Qdrant service up to one minute to become ready."""
+    from vector_store import get_document_memory
+
+    url = f"{get_document_memory().url.rstrip('/')}/readyz"
+    api_key = os.environ.get("QDRANT_API_KEY")
+    headers = {"api-key": api_key} if api_key else {}
+    deadline = time.monotonic() + _QDRANT_STARTUP_TIMEOUT
+    logger.info("Waiting for Qdrant readiness before indexing skills.")
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            if requests.get(url, headers=headers, timeout=min(5, remaining)).status_code == 200:
+                return
+        except requests.RequestException:
+            pass
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    raise RuntimeError(f"Qdrant was not ready within {_QDRANT_STARTUP_TIMEOUT} seconds.")
+
+
 def main() -> None:
+    """Refresh enabled memory, then process issues once or in a polling loop."""
     _setup_logging()
-    logger = logging.getLogger(__name__)
 
     parser = argparse.ArgumentParser(
         description="AI Developer – autonomous PHP developer powered by Claude Sonnet."
@@ -50,6 +75,23 @@ def main() -> None:
         help="Seconds to wait between polls when --loop is active (default: 60).",
     )
     args = parser.parse_args()
+
+    from embedding import get_embedder
+
+    if get_embedder().enabled:
+        try:
+            _wait_for_qdrant()
+            from scripts.index_skills import main as index_skills
+
+            if index_skills([]) != 0:
+                raise RuntimeError("Skill indexing failed; refusing to poll GitLab.")
+        except Exception as exc:
+            logger.exception("Startup indexing failed: %s", exc)
+            sys.exit(1)
+    else:
+        logger.info("Vector memory disabled; skipping skill indexing.")
+
+    from task_engine import TaskEngine
 
     engine = TaskEngine()
 

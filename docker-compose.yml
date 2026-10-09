@@ -32,9 +32,7 @@ services:
     depends_on:
       nesti-redis:
         condition: service_healthy
-      # No healthcheck on nesti-qdrant (the image ships no curl/wget): vector
-      # memory is optional, so a Qdrant that is not ready yet must degrade
-      # retrieval to "no results", never block orchestrator startup.
+      # main.py waits briefly for Qdrant readiness, then indexes before polling.
       nesti-qdrant:
         condition: service_started
 
@@ -95,6 +93,28 @@ services:
     ports:
       # Localhost only, same rule as nesti-redis.
       - "127.0.0.1:6333:6333"
+
+  # Build with `up --build`, but leave sandbox containers to the test runners.
+  nesti-sandbox-php:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    image: ${DOCKER_SANDBOX_PHP_IMAGE:-nesti-sandbox-php}
+    scale: 0
+
+  nesti-sandbox-node:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox.node
+    image: ${DOCKER_SANDBOX_NODE_IMAGE:-nesti-sandbox-node}
+    scale: 0
+
+  nesti-sandbox-e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox.e2e
+    image: ${DOCKER_SANDBOX_E2E_IMAGE:-nesti-sandbox-e2e}
+    scale: 0
 
 volumes:
   # Survives `docker-compose stop` and `docker-compose down`.

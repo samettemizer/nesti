@@ -28,6 +28,7 @@ import tempfile
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ["ANTHROPIC_API_ENABLED"] = "true"
 os.environ["DEEPSEEK_API_ENABLED"] = "true"
+os.environ["OPENROUTER_API_ENABLED"] = "false"
 os.environ["LOCAL_LLM_ENABLED"] = "false"
 os.environ["HERMES3_LLM_ENABLED"] = "false"
 os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"   # unreachable → memory fallback
@@ -36,6 +37,7 @@ os.environ["NESTI_STACK"] = "auto"                   # exercise real detection
 os.environ.pop("TELEGRAM_BOT_TOKEN", None)
 os.environ.pop("TELEGRAM_CHAT_ID", None)
 os.environ.pop("DEEPSEEK_API_KEY", None)
+os.environ.pop("OPENROUTER_API_KEY", None)
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "DEBUG"),
                     format="%(levelname)s %(name)s – %(message)s")
@@ -1249,6 +1251,175 @@ with patch.dict(os.environ, {
     check(not DeepSeekLLMClient().available and not AnthropicLLMClient().available,
           "enabling a paid API without credentials cannot make it callable")
 
+# ═════ OpenRouter: live model selection, billing gates and failure cascade ═════
+print("\n── OpenRouter: model selection + paid fallback ──")
+import io  # noqa: E402
+from contextlib import redirect_stdout  # noqa: E402
+import scripts.oauth as _oauth  # noqa: E402
+from llm_client import OpenRouterLLMClient  # noqa: E402
+
+
+class _ModelRedis:
+    def __init__(self):
+        self.values = {}
+
+    def ping(self):
+        return True
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def set(self, key, value):
+        self.values[key] = value
+        return True
+
+    def delete(self, key):
+        return self.values.pop(key, None) is not None
+
+
+_model_redis = _ModelRedis()
+_text_model = {
+    "id": "vendor/model-a", "name": "Model A", "context_length": 100000,
+    "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+    "pricing": {"prompt": "0.0000001575", "completion": "0.000008"},
+}
+_catalog = [
+    _text_model,
+    {**_text_model, "id": "vendor/model-b", "name": "Model B"},
+    {**_text_model, "id": "vendor/image", "architecture": {
+        "input_modalities": ["text"], "output_modalities": ["image"],
+    }},
+]
+
+
+def _model_command(*args):
+    output = io.StringIO()
+    with patch.object(_oauth.sys, "argv", ["nesti", "/provider", *args]), redirect_stdout(output):
+        try:
+            _oauth.main()
+        except SystemExit as exc:
+            return exc.code, output.getvalue()
+    return 0, output.getvalue()
+
+
+with patch.dict(os.environ, {
+    "OPENROUTER_API_ENABLED": "false", "OPENROUTER_API_KEY": "openrouter-test-key",
+    "OPENROUTER_MODEL": "vendor/env-model", "DEEPSEEK_API_KEY": "deepseek-test-key",
+    "DEEPSEEK_API_ENABLED": "true", "ANTHROPIC_API_ENABLED": "false",
+}), patch("scripts.oauth.redis.from_url", return_value=_model_redis), \
+        patch("scripts.oauth.requests.get") as _catalog_http, \
+        patch("llm_client.requests.post") as _model_http, \
+        patch("llm_client.build_consumer_clients", return_value=[_StubCoder("Consumer")]):
+    _catalog_http.return_value.json.return_value = {"data": _catalog}
+    _store_for_models = _oauth.TokenStore()
+    _store_for_models.save_token("claude", {"access_token": "subscription"})
+    _exit, _output = _model_command("models", "openrouter", "MODEL A")
+    check(_exit == 0 and "vendor/model-a" in _output and "vendor/model-b" not in _output
+          and "0.1575" in _output and "8" in _output,
+          "model search matches names case-insensitively and converts per-token USD to per-million")
+    _exit, _output = _model_command("model", "openrouter", "vendor/model-a")
+    check(_exit == 0 and _oauth.TokenStore().get_model("openrouter") == "vendor/model-a"
+          and os.environ["OPENROUTER_API_ENABLED"] == "false",
+          "CLI selection persists across store instances without enabling billing")
+    for _invalid_model in ("vendor/absent", "vendor/image"):
+        _exit, _output = _model_command("model", "openrouter", _invalid_model)
+        check(_exit == 1 and _store_for_models.get_model("openrouter") == "vendor/model-a",
+              f"{_invalid_model} is rejected without overwriting the selected text model")
+    with patch("llm_client._token_store", return_value=_store_for_models):
+        _openrouter = OpenRouterLLMClient()
+        for _method in (_openrouter.generate_plan, _openrouter.generate_code):
+            try:
+                _method("s", "u")
+                _blocked = False
+            except RuntimeError:
+                _blocked = True
+            check(_blocked and not _model_http.called,
+                  "disabled OpenRouter rejects direct inference before contacting HTTP")
+        os.environ["OPENROUTER_API_ENABLED"] = " TrUe "
+        _openrouter_chain = LLMClient()
+        _openrouter_chain.generate_code("s", "u")
+        check(_openrouter_chain.last_coder_label == "Consumer"
+              and not _model_http.called,
+              "usable subscriptions still outrank an enabled OpenRouter API")
+        _openrouter_chain._coders[0].fail = True
+        _model_http.return_value.json.return_value = {
+            "choices": [{"message": {"content": "complete answer"}, "finish_reason": "stop"}],
+        }
+        _openrouter_chain.generate_plan("s", "u")
+        check(_model_http.call_args.kwargs["json"]["model"] == "vendor/model-a",
+              "planning uses the persisted choice instead of OPENROUTER_MODEL")
+        _model_command("model", "openrouter", "vendor/model-b")
+        _openrouter_chain.generate_code("s", "u")
+        check(_model_http.call_args.kwargs["json"]["model"] == "vendor/model-b"
+              and _openrouter_chain.last_coder_attribution() == {
+                  "provider": "OpenRouter", "model": "vendor/model-b", "billing": "platform API",
+              },
+              "an already-running cascade uses the next CLI model selection and attributes it")
+        _model_command("model", "openrouter", "vendor/model-a")
+        check(_openrouter_chain.last_coder_attribution()["model"] == "vendor/model-b",
+              "changing selection cannot relabel code produced by the preceding model")
+        _exit, _output = _model_command("model", "openrouter", "--reset")
+        check(_exit == 0 and _oauth.configured_model(_store_for_models, "openrouter") == "vendor/env-model"
+              and _store_for_models.get_token("claude") == {"access_token": "subscription"},
+              "reset restores the environment model without deleting subscription credentials")
+
+        _model_http.reset_mock()
+        os.environ["OPENROUTER_MODEL"] = ""
+        try:
+            _openrouter.generate_code("s", "u")
+            _missing_blocked = False
+        except RuntimeError:
+            _missing_blocked = True
+        check(_missing_blocked and not _model_http.called,
+              "no selected model never silently bills an arbitrary default")
+        os.environ["OPENROUTER_MODEL"] = "vendor/env-model"
+        for _bad_payload in (
+            {"error": {"code": 429, "message": "quota exhausted"}},
+            {"choices": [{"message": {"content": None}, "finish_reason": "stop"}]},
+            {"choices": [{"message": {"content": "partial file"}, "finish_reason": "length"}]},
+        ):
+            _model_http.return_value.json.return_value = _bad_payload
+            try:
+                _openrouter.generate_code("s", "u")
+                _bad_rejected = False
+            except RuntimeError:
+                _bad_rejected = True
+            check(_bad_rejected, "error, empty and truncated responses cannot count as generated code")
+
+        _transport_urls = []
+
+        def _openrouter_failure(url, **kwargs):
+            _transport_urls.append(url)
+            if url.startswith(_oauth.OPENROUTER_API_BASE):
+                raise _oauth.requests.Timeout("OpenRouter timed out")
+            response = _oauth.requests.Response()
+            response.status_code = 200
+            response._content = b'{"choices":[{"message":{"content":"fallback code"}}]}'
+            return response
+
+        _model_http.side_effect = _openrouter_failure
+        _openrouter_chain.reset_coder_tier()
+        _openrouter_chain.generate_code("s", "u")
+        check(_openrouter_chain.last_coder_attribution()["provider"] == "DeepSeek"
+              and _transport_urls == [
+                  f"{_oauth.OPENROUTER_API_BASE}/chat/completions",
+                  "https://api.deepseek.com/v1/chat/completions",
+              ],
+              "OpenRouter timeout falls through to the next paid tier in the same attempt")
+        _model_http.reset_mock()
+        _store_for_models._available = False
+        try:
+            _openrouter.generate_code("s", "u")
+            _outage_blocked = False
+        except RuntimeError:
+            _outage_blocked = True
+        check(_outage_blocked and not _model_http.called,
+              "unreadable selection never silently changes the billed model to the environment default")
+    with patch("scripts.oauth.TokenStore", side_effect=AssertionError("catalog must not need Redis")):
+        _exit, _output = _model_command("models", "openrouter", "model")
+    check(_exit == 0 and "vendor/image" not in _output,
+          "the public text model catalog works without Redis or an enabled API")
+
 # ═════ Scenario 23: ChatGPT subscription — Codex backend stream and quota ═════
 print("\n── Scenario 23: ChatGPT subscription (Codex backend) ──")
 import io  # noqa: E402
@@ -1679,12 +1850,12 @@ with tempfile.TemporaryDirectory(prefix="nesti-inventory-") as root:
     for relative, sentinel in (
         ("resources/js/app.js", "BUDGET_FIRST"), ("resources/js/app.ts", "BUDGET_SECOND"),
         ("resources/views/app.blade.php", "BUDGET_THIRD"), ("resources/js/App.vue", "BUDGET_FOURTH")):
-        put_file(relative, sentinel + "x" * (6000 - len(sentinel)))
+        put_file(relative, sentinel + "x" * (20000 - len(sentinel)))
     inventory = nodes._repo_inventory(root, "fullstack")
     check("BUDGET_FIRST" in inventory and "BUDGET_SECOND" in inventory
           and "BUDGET_THIRD" not in inventory and "BUDGET_FOURTH" not in inventory,
           "aggregate quote budget keeps priority complete bodies only")
-    check(len("\n\n".join(nodes._quoted_entry_files(Path(root)))) <= 16000,
+    check(len("\n\n".join(nodes._quoted_entry_files(Path(root)))) <= nodes._MAX_QUOTED_TOTAL_CHARS,
           "inventory headings and bodies together stay within aggregate budget")
     original_read = Path.read_text
     def unreadable(path, *args, **kwargs):
@@ -2275,5 +2446,17 @@ if os.path.isfile(_registry_path):
 else:
     print("  ⚠ SKIPPED registry static checks (corpus not generated)")
 
+print("\n── Output token configuration ──")
+import subprocess
+import sys
+
+token_config = subprocess.run(
+    [sys.executable, "-c",
+     "import json, llm_client; print(json.dumps(llm_client._DEFAULT_MAX_TOKENS))"],
+    env={**os.environ, "DEFAULT_MAX_TOKENS": "16000"},
+    capture_output=True, text=True, check=True,
+)
+check(json.loads(token_config.stdout) == 16000,
+      "configured output tokens are a JSON number, not a rejected API string")
 
 print(f"\nALL {passed_checks} CHECKS PASSED ✅")
