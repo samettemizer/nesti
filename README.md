@@ -16,7 +16,6 @@ GitLab issue (labelled, opt-in)
   → claim issue            independently verified lock, or stop before cloning
   → bootstrap             scaffold or top-up the Laravel app
   → load skills            vendored corpus + URLs from the issue
-  → decide scope           [backend | frontend | fullstack]  issue text, confirmed by the planner
   → generate plan          [Local LLM → DeepSeek → Claude Sonnet]
   → generate code          [Local LLM → DeepSeek → Claude Sonnet]
   → detect layers          from the files the change touched
@@ -36,22 +35,6 @@ Playwright, also in a Laravel repository; a change touching both sides
 touching neither side (a README only) runs PHPUnit, so nothing reaches commit
 untested. A repository with no PHP at all always runs Vitest → Playwright.
 Vue-only issues are ordinary work.
-
-The **scope** (`backend`, `frontend`, `fullstack`) is decided offline from the
-issue text, then confirmed or corrected by the planner on line 1 of its plan.
-It narrows the prompts and reference documents to the side the issue is about;
-it never gates a test layer. When a layer outside the scope fails, the retry
-widens the scope to `fullstack`. Uncertain issues land on `fullstack`, the
-prompt every issue received before scopes existed. An issue can pin its scope
-with a `Scope: frontend` line. Every run logs one line:
-
-```
-SCOPE: frontend · GitLab issue #42 · issue text: frontend (frontend signals: button, colour) · planner: frontend
-```
-
-```bash
-docker-compose logs -f nesti-orchestrator | grep 'SCOPE:'
-```
 
 ### Documentation files
 
@@ -211,15 +194,10 @@ injected are dropped. Hits below the cosine floors (`NESTI_SOLUTION_MIN_SCORE`
 0.80, `NESTI_EPISODE_MIN_SCORE` 0.60) are never injected. Episodes are deleted
 when their issue finishes.
 
-Memory is optional and never raises: an unreachable Qdrant, a pre-8 Redis or a
-missing embedder degrades retrieval to "no results", and
-`NESTI_MEMORY_ENABLED=false` runs the pipeline exactly as before. Index the
-corpus with Redis/Qdrant available before starting the poller, and after
-`fetch_skills.py`; changing the embedding model requires `--recreate`:
-
-```bash
-docker-compose run --rm --no-deps --entrypoint python nesti-orchestrator scripts/index_skills.py
-```
+Memory retrieval degrades to "no results" if unavailable. Set
+`NESTI_MEMORY_ENABLED=false` to disable it. Startup indexes the bundled corpus
+before polling and skips unchanged documents; indexing failure stops startup.
+Changing the embedding model requires `scripts/index_skills.py --recreate`.
 
 The seven `memory_*` MCP tools expose the same stores.
 
@@ -253,8 +231,6 @@ declared fixture preparation. Only then do the build and browser tests run.
 The helper refuses a declared model using another database before migrating
 or seeding. Scope never controls data preparation.
 
-Set `NESTI_STACK` to `php`, `vue`, or `fullstack` to pin the detection if your
-repository layout misleads it; the default `auto` is right for most projects.
 
 ### Served-page integration
 
@@ -426,76 +402,29 @@ ISSUE_GUIDELINE.md         <- how to write effective GitLab issues
 
 ## Installation
 
-**1. Clone and configure**
+Configure `.env`, then start:
 ```bash
 cp .env.example .env
-# Edit .env — at minimum: GITLAB_URL, GITLAB_TOKEN,
-#   GITLAB_PROJECT_PATH, GITLAB_ISSUE_LABEL, plus an enabled API key
-#   or a consumer subscription login.
+# Set GitLab access and an API key or consumer subscription.
+docker-compose up -d --build
+```
+Sandbox images are built and skills indexed automatically before polling.
+
+Optional corpus refresh (container-local; indexed on the next restart):
+```bash
+docker exec nesti-orchestrator python scripts/fetch_skills.py
+```
+A rebuild uses the repository's corpus, not the container-local refresh.
+
+Optional preflight (creates and closes a GitLab probe issue):
+```bash
+docker exec nesti-orchestrator python scripts/preflight.py
 ```
 
-**2. Build the sandbox images** (one per test layer)
+Optional Claude Code MCP connection:
 ```bash
-docker build -t nesti-sandbox-php  -f Dockerfile.sandbox      .
-docker build -t nesti-sandbox-node -f Dockerfile.sandbox.node .
-docker build -t nesti-sandbox-e2e  -f Dockerfile.sandbox.e2e  .
-```
-Only `nesti-sandbox-php` is needed for backend-only projects; build the other
-two to enable Vue.js testing.
-
-**3. Verify the skill corpus**
-
-The `skills/` directory ships committed. If you need to regenerate it:
-```bash
-python scripts/fetch_skills.py
-```
-
-**4. Run preflight checks**
-```bash
-python scripts/preflight.py
-```
-Verifies config, the GitLab Issues lifecycle (creates a throwaway probe issue
-and drives lock → unlock → close), the GitLab repo, Anthropic, Redis
-(warn-only), Docker + the three sandbox images, and the vendored corpus.
-
-**5. Build, index, then start**
-```bash
-docker-compose build nesti-orchestrator nesti-mcp
-docker-compose up -d nesti-redis nesti-qdrant
-docker-compose run --rm --no-deps --entrypoint python nesti-orchestrator scripts/index_skills.py
-docker-compose up --build -d
-docker-compose logs -f nesti-orchestrator
-```
-
-This starts four containers: `nesti-orchestrator`, `nesti-redis`,
-`nesti-mcp` and `nesti-qdrant`. Redis and Qdrant persist across restarts via
-the named `nesti_redis_data` and `nesti_qdrant_data` volumes.
-
-When a practice instruction changes, **index before starting the poller**:
-
-```bash
-docker-compose stop nesti-orchestrator
-docker-compose build nesti-orchestrator nesti-mcp
-docker-compose up -d nesti-redis nesti-qdrant
-docker-compose run --rm --no-deps --entrypoint python nesti-orchestrator scripts/index_skills.py --only practices
-docker-compose up --build -d
-```
-
-Verify `DocumentMemory.indexed_doc_hashes()["practices/frontend-design.md"]`
-matches SHA-256 of the deployed file. An indexing failure with memory enabled
-must not restart polling with stale instructions. Skip indexing only when
-`NESTI_MEMORY_ENABLED=false` was already the operator's configuration.
-
-**6. Connect the MCP server (optional)**
-```bash
-# Claude Code CLI:
 claude mcp add nesti docker exec -i nesti-mcp python -m mcp_server.server
-
-# Verify:
-claude mcp list
 ```
-VS Code users: the bundled `.vscode/mcp.json` registers the same server for
-the Claude extension automatically.
 
 ---
 
@@ -528,14 +457,29 @@ Dependency: `mcp>=1.0.0,<2`. The MCP SDK renamed `FastMCP` to `MCPServer` in
 
 ---
 
-## Consumer Subscriptions & Quota
-
-`scripts/oauth.py` is the container's `nesti` command. It logs consumer
-subscriptions in and out (`nesti /provider login|logout <name>` for `claude`,
-`antigravity`, `chatgpt-plus`, `copilot`) and shows their remaining quota:
+## Platform Gateway APIs
+CLI command named `nesti` in `orchestration` container. It lists platform providers and their models.
 
 ```bash
-docker exec -it nesti-orchestrator nesti /usage
+/provider                              List consumer and platform providers
+/provider login <name>                 Log in to a consumer provider
+/provider logout <name>                Log out of a consumer provider
+/provider models <name> [search]       List text models and USD prices per 1M tokens
+/provider model <name>                 Show the selected planner/coder model
+/provider model <name> <model-id>      Persist a model selection (currently: openrouter)
+/provider model <name> --reset         Restore the environment model setting
+/usage                                 Show usage/quota for authenticated consumers
+```
+
+---
+
+## Consumer Subscriptions & Quota
+
+`nesti` command also logs consumer subscriptions in and out `nesti /provider login|logout <name>` 
+for `claude`, `antigravity`, `chatgpt-plus`, `copilot` and shows their remaining quota:
+
+```bash
+nesti /usage
 ```
 
 ```

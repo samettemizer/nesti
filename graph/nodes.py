@@ -365,8 +365,8 @@ _INVENTORY_QUOTED_FILES = (
     ("vitest.config.ts", "ts"),
     ("package.json", "json"),
 )
-_MAX_QUOTED_FILE_CHARS = 8000
-_MAX_QUOTED_TOTAL_CHARS = 16000
+_MAX_QUOTED_FILE_CHARS = 24000
+_MAX_QUOTED_TOTAL_CHARS = 48000
 
 
 def _inventory_listing(directory: Path) -> list[str]:
@@ -404,6 +404,10 @@ def _quoted_entry_files(
                 "Do not recreate it."))
             continue
         if len(body) > _MAX_QUOTED_FILE_CHARS:
+            telegram_notify(
+                f"⚠️ Nodes :: _MAX_QUOTED_FILE_CHARS limit:{_MAX_QUOTED_FILE_CHARS} exceeded: <b>{len(body)}</b>"
+                f"\nF:{relative}"
+            )
             entries.append((None,
                 f"\n{relative}: exists, body omitted ({len(body)} characters, over the "
                 f"{_MAX_QUOTED_FILE_CHARS}-character quote limit). Do not recreate it from memory."))
@@ -981,7 +985,7 @@ def node_detect_stack(state: IssueState) -> dict:
     run_openapi = detected["run_openapi"]
 
     logger.info(
-        "Stack detected: %s (%s) – PHPUnit: %s, OpenAPI: %s, frontend layers: %s%s",
+        "Repository stack: %s (%s) – PHPUnit: %s, OpenAPI: %s, frontend layers: %s%s",
         stack,
         detected["source"],
         "yes" if run_phpunit else "skipped",

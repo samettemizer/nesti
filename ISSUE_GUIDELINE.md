@@ -102,20 +102,13 @@ title, so keep it concise and descriptive.
 
 ### Description
 
-The description consists of two required sections, one strongly recommended,
-and one optional:
+A short, unambiguous request is enough; no section headings are required.
+For larger tasks, use **Context**, **Requirements** and **Acceptance Criteria**
+to explain the current situation, the changes and the expected result.
+Reference URLs are optional and may appear anywhere.
 
-1. **Context** *(required)* — What is the current situation? Why is this
-   feature needed?
-2. **Requirements** *(required)* — What changes must be made? What behaviour
-   is expected? Name concrete files, methods, and endpoints where you can.
-3. **Acceptance Criteria** *(strongly recommended)* — Testable assertions
-   describing the finished behaviour. Each criterion becomes a test; issues
-   without them force the model to invent its own test scope, and retries
-   lose precision (see [How Retries Work](#how-retries-work)).
-4. **Skill URLs** *(optional)* — URLs of reference documents. They can appear
-   anywhere in the description; the system detects them automatically. A
-   dedicated heading is not required.
+Scope is detected automatically unless you specify `Scope: backend`,
+`Scope: frontend` or `Scope: fullstack` (case-insensitive).
 
 ---
 
@@ -199,17 +192,9 @@ to the correct v5 documentation** — but prefer the v5 name in new issues:
 | `Calendar` | `DatePicker` | Both resolve to the DatePicker doc |
 | `OrgChart` | `OrganizationChart` | Import path: `primevue/organizationchart` |
 
-### Scope and test layers
+### Test layers
 
-Nesti decides a **scope** — `backend`, `frontend` or `fullstack` — from the
-issue text before planning, and the planner confirms or corrects it. The scope
-narrows the prompts and reference documents to the side the issue is about;
-an uncertain issue lands on `fullstack`. To state it explicitly, add a line
-`Scope: backend`, `Scope: frontend` or `Scope: fullstack`, or write
-"frontend-only change" / "no backend changes". A negated mention
-("Do NOT change the database schema") is not read as a signal.
-
-The scope never gates a test. The layers follow the files the change touched:
+Test layers follow the files the change touched, not the declared scope:
 
 | The change touches | Layers that run |
 |--------------------|-----------------|
@@ -365,6 +350,11 @@ the coding prompt as well.
 Regardless of the flag, the coding prompt always contains the system prompt,
 the issue description, the approved plan, and — on retries — the previous
 attempt together with its failure output.
+
+Existing-file quotes are limited to 24,000 characters per file and 48,000 total;
+oversized bodies are omitted, not cut. `DEFAULT_MAX_TOKENS` limits provider
+output to 16,000 tokens by default; the ChatGPT subscription backend does not
+use this setting. Tokens and characters are different units.
 
 ---
 
@@ -540,8 +530,7 @@ Acceptance Criteria:
 | Mistake | Why it fails | How to fix |
 |---------|-------------|------------|
 | Title too generic (`"bug fix"`, `"feature"`) | The model cannot determine what to do | Use verb + object format |
-| Only outcomes stated, no requirements | Unclear which layers must change | Fill in Context + Requirements sections |
-| No acceptance criteria | The model invents its own test scope; retry feedback loses precision | Write testable acceptance criteria |
+| Ambiguous requested change | The model must guess the intended behaviour | State the exact change; headings are optional |
 | Missing the `nesti` label | Nesti will never see the issue | Add the opt-in label before or after creating the issue |
 | Editing an issue after `nesti::in-progress` appears | The run captured the text at pickup; later edits are invisible to it | Wait for the result, fix the issue text, and let the next poll retry it |
 | Adding/removing `nesti::in-progress` by hand | Breaks the lock protocol | Let Nesti manage the lock label |

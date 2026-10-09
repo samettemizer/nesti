@@ -8,7 +8,7 @@ Provider roles
              │     Flat-rate capacity that is already paid for, so it is
              │     spent before anything that bills per token or per call.
   Local      │   → Ollama (Hermes-3 planner / Qwen3 coder), when enabled.
-  Paid API   │   → DeepSeek API, then the Anthropic API (ANTHROPIC_API_KEY)
+  Paid API   │   → OpenRouter, DeepSeek, then Anthropic (ANTHROPIC_API_KEY)
              │     as the last resort — reached only once every consumer
              │     session in the chain has failed or is logged out.
 
@@ -35,12 +35,14 @@ from abc import ABC, abstractmethod
 import anthropic
 import requests
 
-from scripts.oauth import PROVIDERS, TokenStore
+from scripts.oauth import (
+    OPENROUTER_API_BASE, PROVIDERS, TokenStore, configured_model,
+)
 from telegram_notifier import notify as telegram_notify
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_TOKENS = 8096
+_DEFAULT_MAX_TOKENS = int(os.environ.get("DEFAULT_MAX_TOKENS", "16000"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -226,8 +228,90 @@ class QwenLLMClient(_OllamaBase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DeepSeek API  (OpenAI-compatible)
+# OpenRouter and DeepSeek APIs  (OpenAI-compatible)
 # ─────────────────────────────────────────────────────────────────────────────
+
+class OpenRouterLLMClient(BaseLLMClient):
+    """OpenRouter paid API with a live, shared planner/coder model selection."""
+
+    name = "OpenRouter"
+
+    def __init__(self) -> None:
+        self.api_key: str = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        self.timeout: int = int(os.environ.get("OPENROUTER_TIMEOUT", "600"))
+
+    @property
+    def available(self) -> bool:
+        return (
+            os.environ.get("OPENROUTER_API_ENABLED", "false").strip().lower() == "true"
+            and bool(self.api_key)
+        )
+
+    def _call(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        messages: list[dict] | None = None,
+    ) -> str:
+        if not self.available:
+            raise RuntimeError(
+                "OpenRouter API is disabled or unconfigured "
+                "(OPENROUTER_API_ENABLED must be true and OPENROUTER_API_KEY set)."
+            )
+        model = configured_model(_token_store(), "openrouter")
+        if not model:
+            raise RuntimeError(
+                "No OpenRouter model selected. Run "
+                "'nesti /provider model openrouter <model-id>' or set OPENROUTER_MODEL."
+            )
+        payload_messages = messages if messages else [{"role": "user", "content": user_prompt}]
+        if not any(message.get("role") == "system" for message in payload_messages):
+            payload_messages = [{"role": "system", "content": system_prompt}] + payload_messages
+        logger.info("Requesting response from OpenRouter (%s) …", model)
+        try:
+            response = requests.post(
+                f"{OPENROUTER_API_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": payload_messages, "max_tokens": _DEFAULT_MAX_TOKENS},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("error"):
+                raise RuntimeError(f"OpenRouter API error: {data['error']}")
+            choice = data["choices"][0]
+            if choice.get("finish_reason") in ("length", "error", "content_filter"):
+                raise RuntimeError(f"OpenRouter did not complete the response: {choice['finish_reason']}")
+            text = choice["message"]["content"]
+            if not isinstance(text, str) or not text.strip():
+                raise RuntimeError("OpenRouter returned no text output.")
+        except requests.RequestException as exc:
+            raise RuntimeError(f"OpenRouter API error: {exc}") from exc
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise RuntimeError("OpenRouter returned an invalid completion response.") from exc
+        # Snapshot the model actually requested, not a later CLI selection:
+        # logs and MR attribution describe the output that just succeeded.
+        self.model = model
+        return text
+
+    def generate_plan(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        messages: list[dict] | None = None,
+    ) -> str:
+        """Generate a plan using the current OpenRouter model selection."""
+        return self._call(system_prompt, user_prompt, messages)
+
+    def generate_code(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        messages: list[dict] | None = None,
+    ) -> str:
+        """Generate complete FILE blocks using the current model selection."""
+        return self._call(system_prompt, user_prompt, messages)
+
 
 class DeepSeekLLMClient(BaseLLMClient):
     """DeepSeek API – mid-tier paid fallback for both planning and coding."""
@@ -906,7 +990,7 @@ class LLMClient:
               already paid for, so they are spent first and one failing
               subscription simply hands over to the next one;
         then  the local Ollama tier, when enabled;
-        then  DeepSeek, then the Anthropic API key — the per-token billed
+        then  OpenRouter, DeepSeek, then the Anthropic API key — per-token billed
               channels, reached only when every consumer session ahead of
               them is logged out or failing.
 
@@ -935,16 +1019,15 @@ class LLMClient:
     """
 
     def __init__(self) -> None:
-        # Instantiate providers once; the consumer clients, DeepSeek and
-        # Claude are shared across both chains to avoid duplicate client
-        # objects (and, for the consumer tier, duplicate token lookups).
+        # Share the consumer and paid clients across both chains.
         consumers = build_consumer_clients()
         hermes = HermesLLMClient()
         qwen = QwenLLMClient()
+        openrouter = OpenRouterLLMClient()
         deepseek = DeepSeekLLMClient()
         claude = AnthropicLLMClient()
 
-        # ── Planner chain: consumers → Hermes-3 → DeepSeek → Claude API ──
+        # ── Planner chain: consumers → Hermes-3 → OpenRouter → DeepSeek → Claude API ──
         self._planners: list[BaseLLMClient] = [*consumers]
         if hermes.available:
             self._planners.append(hermes)
@@ -955,9 +1038,9 @@ class LLMClient:
             )
         # Keep paid tiers even when disabled: available is re-checked before
         # every call, so a flag change cannot strand a constructed client.
-        self._planners.extend((deepseek, claude))
+        self._planners.extend((openrouter, deepseek, claude))
 
-        # ── Coder chain: consumers → Qwen → DeepSeek → Claude API ────────
+        # ── Coder chain: consumers → Qwen → OpenRouter → DeepSeek → Claude API ──
         self._coders: list[BaseLLMClient] = [*consumers]
         if qwen.available:
             self._coders.append(qwen)
@@ -966,7 +1049,7 @@ class LLMClient:
                 "Qwen3 not enabled (LOCAL_LLM_URL / LOCAL_LLM_MODEL missing) "
                 "– excluded from coder chain."
             )
-        self._coders.extend((deepseek, claude))
+        self._coders.extend((openrouter, deepseek, claude))
 
         # Minimum coder tier; raised by escalate_coder() after test failures
         self._min_coder_tier: int = 0

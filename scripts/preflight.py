@@ -5,11 +5,11 @@ scripts/preflight.py – verify every external dependency before a live run.
 Prints one line per check and exits non-zero on the first HARD failure, so a
 live run is never started against a half-configured environment.  Checks are
 ordered cheapest-first: configuration, then GitLab Issues, then the GitLab
-repository, then the paid LLM call, then the local Docker/corpus state.
+repository, then a consumer-first LLM probe, then the local Docker/corpus state.
 
 Usage:
     python scripts/preflight.py                 # everything
-    python scripts/preflight.py --skip-llm      # no paid Anthropic call
+    python scripts/preflight.py --skip-llm      # no inference call
     python scripts/preflight.py --skip-docker   # no Docker daemon needed
 """
 
@@ -40,7 +40,6 @@ _REQUIRED_VARS = (
     "GITLAB_URL",
     "GITLAB_TOKEN",
     "GITLAB_PROJECT_PATH",
-    "ANTHROPIC_API_KEY",
 )
 
 _SANDBOX_IMAGE_VARS = (
@@ -91,10 +90,18 @@ def check_configuration() -> None:
         shown = value if name.endswith(("URL", "PATH", "PROJECT_ID")) else f"set ({len(value)} chars)"
         _ok(name, shown)
 
-    if os.environ.get("DEEPSEEK_API_KEY", "").strip():
-        _ok("DEEPSEEK_API_KEY", "mid-tier coder available")
-    else:
-        _warn("DEEPSEEK_API_KEY", "absent – escalation jumps straight to Claude")
+    for provider, default in (("OPENROUTER", "false"), ("DEEPSEEK", "true"), ("ANTHROPIC", "false")):
+        if os.environ.get(f"{provider}_API_ENABLED", default).strip().lower() != "true":
+            _ok(f"{provider} API", "disabled")
+            continue
+        key_name = f"{provider}_API_KEY"
+        key = os.environ.get(key_name, "").strip()
+        if not key:
+            _warn(key_name, "absent; this API tier will be skipped")
+            continue
+        if _is_placeholder(key):
+            _fail(key_name, "enabled API still has a placeholder key")
+        _ok(key_name, "configured; used only after consumer and local tiers")
 
 
 
@@ -210,21 +217,19 @@ def check_gitlab() -> None:
     _ok("Token may push", f"access_level {best}")
 
 
-def check_anthropic() -> None:
-    print("\n── Anthropic ──")
-    model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-    try:
-        import anthropic
+def check_llm() -> None:
+    """Probe the configured cascade, never a hard-wired billed provider."""
+    from llm_client import LLMClient
 
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        message = client.messages.create(
-            model=model,
-            max_tokens=1,
-            messages=[{"role": "user", "content": "ping"}],
-        )
+    print("\n── LLM cascade ──")
+    try:
+        client = LLMClient()
+        result = client.generate_plan("Reply only OK.", "Connectivity check. Reply OK.")
+        if not result.strip():
+            raise RuntimeError("The provider returned no text.")
     except Exception as exc:  # pylint: disable=broad-except
-        _fail(f"Anthropic {model} reachable", f"{type(exc).__name__}: {exc}")
-    _ok("Anthropic model", message.model)
+        _fail("LLM reachable", f"{type(exc).__name__}: {exc}")
+    _ok("LLM reachable", client.last_planner_label)
 
 
 def check_redis() -> None:
@@ -338,7 +343,7 @@ def check_vector_memory() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-llm", action="store_true",
-                        help="skip the paid 1-token Anthropic call")
+                        help="skip the consumer-first inference probe (may use a billed fallback)")
     parser.add_argument("--skip-docker", action="store_true",
                         help="skip the Docker daemon and sandbox-image checks")
     args = parser.parse_args()
@@ -348,9 +353,9 @@ def main() -> int:
     check_issues()
     check_gitlab()
     if args.skip_llm:
-        print("\n── Anthropic ──\n  SKIP  --skip-llm")
+        print("\n── LLM cascade ──\n  SKIP  --skip-llm")
     else:
-        check_anthropic()
+        check_llm()
     check_redis()
     if args.skip_docker:
         print("\n── Docker ──\n  SKIP  --skip-docker")
