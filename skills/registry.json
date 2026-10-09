@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-05T08:15:30Z",
+  "generated_at": "2026-10-09T02:59:33Z",
   "primevue": {
     "version": "5.0.1",
     "source_pattern": "https://primevue.dev/llms/components/{slug}.md",
@@ -1129,7 +1129,7 @@
           "route model binding"
         ],
         "path": "laravel/routing.md",
-        "chars": 40420,
+        "chars": 40714,
         "branch": "13.x"
       },
       {
@@ -1154,7 +1154,7 @@
           "redirect"
         ],
         "path": "laravel/responses.md",
-        "chars": 33210,
+        "chars": 33697,
         "branch": "13.x"
       },
       {
@@ -1427,7 +1427,7 @@
           "job batch"
         ],
         "path": "laravel/queues.md",
-        "chars": 138434,
+        "chars": 139617,
         "branch": "13.x"
       },
       {
@@ -1440,7 +1440,7 @@
           "event subscriber"
         ],
         "path": "laravel/events.md",
-        "chars": 44187,
+        "chars": 44544,
         "branch": "13.x"
       },
       {
@@ -1453,7 +1453,7 @@
           "database notification"
         ],
         "path": "laravel/notifications.md",
-        "chars": 75561,
+        "chars": 76022,
         "branch": "13.x"
       },
       {
@@ -1504,7 +1504,7 @@
           "csrf token"
         ],
         "path": "laravel/csrf.md",
-        "chars": 8021,
+        "chars": 8030,
         "branch": "13.x"
       },
       {
@@ -1594,7 +1594,7 @@
           "recurring job"
         ],
         "path": "laravel/scheduling.md",
-        "chars": 29112,
+        "chars": 29504,
         "branch": "13.x"
       },
       {
@@ -1797,7 +1797,7 @@
           "algolia"
         ],
         "path": "laravel/scout.md",
-        "chars": 49943,
+        "chars": 50000,
         "branch": "13.x"
       },
       {
@@ -1849,7 +1849,7 @@
           "llm agent"
         ],
         "path": "laravel/ai-sdk.md",
-        "chars": 123057,
+        "chars": 126300,
         "branch": "13.x"
       }
     ]
