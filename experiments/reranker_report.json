@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "kind": "reranker_implementation_verification",
+  "reference_plan": ".private/PLAN_NESTI_PYTORCH_DOCUMENTATION.md",
+  "branch": "feat/pytorch-documentation-reranker",
+  "decision": "not approved for activation",
+  "production_changed": false,
+  "model_download_authorized": false,
+  "real_model_inference_performed": false,
+  "live_capture_performed": false,
+  "model_quality_measurements": null,
+  "deployment_resource_measurements": null,
+  "validated_cpu_dependency_lock": null,
+  "verification": [
+    {
+      "runtime": "host virtualenv Python 3.11.2",
+      "command": ".venv/bin/python test_graph_smoke.py",
+      "checks_passed": 502,
+      "exit_code": 0
+    },
+    {
+      "runtime": "existing nesti-orchestrator:latest image, Python 3.12.15",
+      "command": "python -m unittest test_reranker test_reranker_evaluation",
+      "network": "none",
+      "root_filesystem": "read-only",
+      "cpu_limit": 1,
+      "memory_limit": "1g",
+      "tests_passed": 19,
+      "exit_code": 0
+    },
+    {
+      "runtime": "Python 3.12.15 container with network disabled",
+      "scenario": "CLI compare with two synthetic result artifacts",
+      "observed": [
+        "JSON and Markdown reports created",
+        "not approved for activation",
+        "output file permissions 0600",
+        "existing output rejected without modification",
+        "different fixture hashes rejected without output",
+        "smoke with missing local model rejected",
+        "no torch or graph.nodes import in comparison process"
+      ],
+      "exit_code": 0,
+      "quality_evidence": false
+    }
+  ],
+  "blockers": [
+    "Operator selected no model downloads; no prepared local artifacts were available.",
+    "No sanitized real query groups, relevance judgments, frozen development/heldout dataset or independent recall universe was available.",
+    "The production poller was running and was not stopped; no live capture was attempted.",
+    "No operator-approved deployment resource ceilings or canary authorization was supplied.",
+    "Sentence Transformers 5.4.1 from upstream artifact provenance is affected by CVE-2026-68770. The scorer rejects versions below 5.6.0; a safe CPU framework combination has not been validated or frozen."
+  ],
+  "conditional_steps_not_started": [
+    "Production graph and prompt-order integration",
+    "Killable production worker and fallback lifecycle",
+    "Runtime environment settings and image artifact provisioning",
+    "Canary and activation"
+  ],
+  "security_reference": "https://osv.dev/vulnerability/GHSA-jhr6-gm9c-rqjv"
+}
