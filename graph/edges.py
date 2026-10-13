@@ -4,7 +4,7 @@ graph/edges.py – conditional routing logic.
 Each function inspects the current state and returns a string matching a key
 of the corresponding ``add_conditional_edges`` mapping in graph/builder.py.
 
-Test layering (Phase 4 + 5)
+Test layering
 ───────────────────────────
 ``route_after_test`` was replaced by one router per layer:
 

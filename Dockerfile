@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Phase 8: bake the ~65 MB ONNX embedding model into the image so the first
+# bake the ~65 MB ONNX embedding model into the image so the first
 # issue of a fresh deployment never stalls on a silent download in node_plan.
 ENV FASTEMBED_CACHE_PATH=/opt/fastembed
 RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')"

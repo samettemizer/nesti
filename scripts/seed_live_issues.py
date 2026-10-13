@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/seed_live_issues.py – create the three Phase 5 live-run issues.
+scripts/seed_live_issues.py – create the three live-run issues.
 
 The issues drive one full pass of the Laravel + PrimeVue pipeline:
 

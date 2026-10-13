@@ -5,9 +5,9 @@ Each node is a function ``(state: IssueState) -> dict`` returning a *partial
 state update* — only the fields it changes.  LangGraph merges the update into
 the running state.
 
-Conversation semantics (Phase 1 preserved)
+Conversation semantics
 ──────────────────────────────────────────
-Nodes call the same ConversationStore as Phase 1 and keep its ordering:
+Nodes call the same ConversationStore and keep its ordering:
 
     append(user turn) → LLM call with the updated history → append(assistant turn)
 
@@ -31,7 +31,7 @@ Error strategy per node
 • node_commit     – tool failures reopen the issue + notify instead of raising,
                     so the commit → cleanup edge still runs.
 
-Test layering (Phase 4 + 5)
+Test layering
 ───────────────────────────
 node_bootstrap runs right after node_setup and guarantees the clone is a
 Laravel application; node_detect_stack then runs between node_code and the
@@ -118,7 +118,7 @@ _MAX_MR_OPENAPI_PATHS = 40
 # Fallback when the initial state somehow lacks max_attempts (unit tests).
 _ENV_MAX_ATTEMPTS = int(os.environ.get("MAX_CODE_RETRIES", "2")) + 1
 
-# Phase 8 retrieval sizes. Qdrant is asked for more chunks than a prompt keeps
+# retrieval sizes. Qdrant is asked for more chunks than a prompt keeps
 # so that dropping the passages the keyword catalog already injected still
 # leaves a full set of complementary ones.
 _DOC_CHUNK_SEARCH_LIMIT = 8
@@ -659,12 +659,12 @@ def node_load_skills(state: IssueState) -> dict:
     """Fetch skill documentation URLs found in the issue."""
     logger.debug("→ node_load_skills")
     issue_id = state["issue_id"]
-    logger.info("Phase 0 – Loading skill URLs for issue #%s …", issue_id)
+    logger.info("Loading skill URLs for issue #%s …", issue_id)
 
     result = tool_skill_fetch(state["issue"])
     skills = result.get("result", []) if result["success"] else []
     if not result["success"]:
-        # Phase 1 parity: unexpected skill-loading errors are reported but
+        # parity: unexpected skill-loading errors are reported but
         # never block the pipeline.
         logger.warning(
             "Skill loading failed for issue #%s: %s", issue_id, result["error"]
@@ -693,7 +693,7 @@ def node_load_skills(state: IssueState) -> dict:
             "Prompts will carry no Laravel/PrimeVue reference documentation."
         )
 
-    logger.info("Phase 0 – Loaded %d skill(s) for issue #%s.", len(skills), issue_id)
+    logger.info("Loaded %d skill(s) for issue #%s.", len(skills), issue_id)
     logger.debug("← node_load_skills")
     return {"skills": skills}
 
@@ -723,7 +723,7 @@ def node_plan(state: IssueState) -> dict:
     """
     logger.debug("→ node_plan")
     issue_id = state["issue_id"]
-    logger.info("Phase 1 – Generating plan for issue #%s …", issue_id)
+    logger.info("Step 1 – Generating plan for issue #%s …", issue_id)
 
     subject = state.get("subject", "")
     description = state["issue"].get("description", "") or ""
@@ -738,7 +738,7 @@ def node_plan(state: IssueState) -> dict:
     )
     repo_context = _repo_inventory(state.get("repo_path", ""), decision.scope, issue_text)
 
-    # Phase 8 memory: how similar issues were solved before (Redis solution
+    # memory: how similar issues were solved before (Redis solution
     # cache) and the corpus passages the keyword catalog missed (Qdrant).
     past = tool_memory_find_similar(issue_text, limit=2)
     if not past["success"]:
@@ -811,7 +811,7 @@ def node_code(state: IssueState) -> dict:
     max_attempts = state.get("max_attempts", _ENV_MAX_ATTEMPTS)
     scope = state.get("scope", "fullstack")
     logger.info(
-        "Phase 2 – Generating code (attempt %d/%d, scope: %s, provider: %s) …",
+        "Step 2 – Generating code (attempt %d/%d, scope: %s, provider: %s) …",
         attempt,
         max_attempts,
         scope,
@@ -835,7 +835,7 @@ def node_code(state: IssueState) -> dict:
     # repository now, and a retry must see them rather than re-inventing them.
     repo_context = _repo_inventory(state.get("repo_path", ""), scope, haystack)
 
-    # Phase 8 memory.  A narrow scope filters the doc search from the first
+    # memory.  A narrow scope filters the doc search from the first
     # attempt.  A fullstack scope falls back to the detected stack, and only
     # from attempt 2: before node_detect_stack has run, ``stack`` is merely the
     # seeded default ("php"), and filtering on it would hide every PrimeVue doc
@@ -966,7 +966,7 @@ def node_detect_stack(state: IssueState) -> dict:
     result = tool_detect_stack(state["repo_path"], state.get("written_files"))
     if not result["success"]:
         # Detection is advisory: a scan error must never strand an issue.
-        # Fall back to the pre-Phase-4 behaviour and run the PHP layer.
+        # Fall back to previous behaviour and run the PHP layer.
         logger.warning("Stack detection failed: %s – assuming 'php'.", result["error"])
         logger.debug("← node_detect_stack (scan error)")
         return {
@@ -1326,7 +1326,7 @@ def node_commit(state: IssueState) -> dict:
         state["repo_path"], state["branch_name"], commit_message
     )
     if not pushed["success"]:
-        # Unexpected git error – Phase 1's outer handler would have reopened
+        # Unexpected git error – outer handler would have reopened
         # the issue; do the same here so the cleanup edge still runs.
         reason = f"Commit/push failed: {pushed['error']}"
         logger.error("%s (issue #%s)", reason, issue_id)
@@ -1339,7 +1339,7 @@ def node_commit(state: IssueState) -> dict:
         return {"failure_reason": reason, "error": pushed["error"]}
 
     if not pushed["result"]["pushed"]:
-        # Nothing was staged – Phase 1 reopened with the same note.
+        # Nothing was staged – reopened with the same note.
         logger.warning("Nothing was pushed for issue #%s.", issue_id)
         tool_issue_set_status(issue_id, "new", note="AI Developer: no files were generated.")
         logger.debug("← node_commit (nothing pushed)")
@@ -1371,7 +1371,7 @@ def node_commit(state: IssueState) -> dict:
         ),
     )
     if not mr["success"]:
-        # Phase 1 parity: MR failure is logged and run_once returns False;
+        # parity: MR failure is logged and run_once returns False;
         # the issue stays in-progress for a human to inspect.
         logger.error("MR creation failed for issue #%s: %s", issue_id, mr["error"])
         logger.debug("← node_commit (MR failed)")
@@ -1381,7 +1381,7 @@ def node_commit(state: IssueState) -> dict:
     tool_issue_set_status(
         issue_id, "closed", note=f"AI Developer opened MR: {mr_url}"
     )
-    # Phase 8 self-updating loop: the plan that produced this MR becomes the
+    # self-updating loop: the plan that produced this MR becomes the
     # next similar issue's "past experience".  Episodes die with the run —
     # a reopened issue reusing this iid must not recall them as its own.
     remembered = tool_memory_remember_solution(
@@ -1441,9 +1441,9 @@ def node_failure(state: IssueState) -> dict:
 
     tool_issue_set_status(issue_id, "new", note=note)
 
-    # Phase 1 dropped the history after exhausted coding attempts (the issue
+    # dropped the history after exhausted coding attempts (the issue
     # is retried fresh); after a planning failure no new turns were persisted
-    # by that run, so the history is kept, matching Phase 1.
+    # by that run, so the history is kept, matching.
     if attempts > 0:
         _store.delete(issue_id)
         tool_memory_forget_episodes(issue_id)

@@ -1,5 +1,5 @@
 """
-task_engine.py – thin wrapper around the LangGraph pipeline (Phase 2).
+task_engine.py – thin wrapper around the LangGraph pipeline.
 
 All flow control now lives in graph/builder.py:
 

@@ -1,7 +1,7 @@
 """
 test_graph_smoke.py – verifies the LangGraph pipeline against the acceptance
-checklists of Phase 2 (core loop), Phase 4 (layered frontend testing) and
-Phase 5 (Laravel bootstrap + Scramble OpenAPI gate), with all external
+checklists of core loop, layered frontend testing and
+Laravel bootstrap + Scramble OpenAPI gate, with all external
 services (GitLab Issues, GitLab, Docker, LLM providers) monkeypatched at the
 node/tool seam.
 
@@ -65,7 +65,7 @@ VUE_CODE = (
 )
 FULLSTACK_CODE = PHP_CODE + "\n" + VUE_CODE
 
-# Phase 5 fixtures: a real Laravel change (backend + API surface) and the same
+# fixtures: a real Laravel change (backend + API surface) and the same
 # change with a PrimeVue component on top.
 LARAVEL_CODE = (
     "Implementation below.\n\n"
@@ -83,7 +83,7 @@ LARAVEL_VUE_CODE = LARAVEL_CODE + (
     "### FILE: resources/js/components/__tests__/TaskTable.test.js\n```js\n// vitest\n```\n\n"
     "### FILE: e2e/tasks.spec.js\n```js\n// playwright\n```\n"
 )
-GOOD_CODE = PHP_CODE          # Phase 2 scenarios stay backend-only
+GOOD_CODE = PHP_CODE
 NO_BLOCKS = "Here is a prose description of the change instead of files."
 
 calls: dict = {}
@@ -139,7 +139,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     False on purpose: dropping a composer.json into every fake clone would turn
     the Vue-only scenario into "fullstack" and silently void that regression.
 
-    The Phase 8 memory fixtures default to empty, so every scenario that does
+    The memory fixtures default to empty, so every scenario that does
     not ask for memory runs against a degraded (empty) memory layer — the
     regression net for graceful degradation.  ``memory_error`` makes every
     memory tool report a genuine failure instead.
@@ -238,7 +238,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             "paths": [], "undocumented": ["POST /api/tasks"]}}
     nodes.tool_openapi_export = fake_openapi
 
-    # Phase 8 memory fakes – record every call, return the fixtures.
+    # memory fakes – record every call, return the fixtures.
     def _memory(key, record, result):
         calls[key].append(record)
         if memory_error:
@@ -364,7 +364,7 @@ check(f["mr_url"] == "" and f["attempt"] == 3, "attempt jumped to max → failur
 check(calls["docker"] == 0, "no sandbox run for exhausted providers")
 reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
 check("All coding providers exhausted." in reopen[0][1],
-      "reopen note carries provider-exhaustion reason (Phase 1 parity)")
+      "reopen note carries provider-exhaustion reason")
 check(not os.path.exists(calls["workspaces"][0]), "cleanup ran")
 
 # ═════ Scenario 5: PHP-only issue skips both frontend layers ═════
@@ -377,7 +377,7 @@ check(calls["vitest"] == 0 and calls["playwright"] == 0,
       "vitest_test and playwright_test never entered")
 check(f["mr_url"] == "https://gitlab.example/mr/105", "went straight to commit")
 
-# ═════ Scenario 6: Vue-only issue skips PHPUnit (the Phase 4 fix) ═════
+# ═════ Scenario 6: Vue-only issue skips PHPUnit ═════
 print("\n── Scenario 6: Vue-only issue → PHPUnit skipped ──")
 f = run(106, docker_outcomes=[False], code_responses=[VUE_CODE])
 check(f["stack"] == "vue", "stack detected as vue (no PHP anywhere)")
@@ -921,8 +921,8 @@ check(not calls["layers"] and not calls["pushes"] and not f["mr_url"],
 check("Code generation" in f["failure_reason"]
       and not os.path.exists(calls["workspaces"][0]),
       "generation exhaustion reports its cause and always cleans the workspace")
-# ═════ Scenario 19: Phase 8 hierarchical memory end-to-end ═════
-print("\n── Scenario 19: Phase 8 hierarchical memory end-to-end ──")
+# ═════ Scenario 19: hierarchical memory end-to-end ═════
+print("\n── Scenario 19: hierarchical memory end-to-end ──")
 _CHUNKS = [
     {"doc_title": "Database: Migrations", "heading": "Creating Tables",
      "doc_url": "https://raw.githubusercontent.com/laravel/docs/13.x/migrations.md",
@@ -999,8 +999,8 @@ _kept = nodes._retrieve_chunks("x", [Skill(
 check([c["doc_title"] for c in _kept] == ["Database: Migrations", "HTTP Tests"],
       "_retrieve_chunks keeps a passage of a catalog document that lies past its cap")
 
-# ═════ Scenario 20: Phase 8 memory unavailable ═════
-print("\n── Scenario 20: Phase 8 memory unavailable → pipeline unchanged ──")
+# ═════ Scenario 20: memory unavailable ═════
+print("\n── Scenario 20: memory unavailable → pipeline unchanged ──")
 f = run(1200, docker_outcomes=[False, False, True], code_responses=[GOOD_CODE],
         doc_chunks=_CHUNKS, similar_solutions=_SOLUTIONS, recalled=_RECALLED,
         memory_error="Qdrant and Redis are down")
@@ -1017,8 +1017,8 @@ check(all("## Retrieved Reference Snippets" not in p and "## Past Nesti Experien
 check(len(calls["memory_remember_failure"]) == 2,
       "a failing episodic write never blocks the retry loop")
 
-# ═════ Scenario 21: Phase 8 pure-function checks (no Redis, no Qdrant) ═════
-print("\n── Scenario 21: Phase 8 formatters, chunker and degradation ──")
+# ═════ Scenario 21: pure-function checks (no Redis, no Qdrant) ═════
+print("\n── Scenario 21: formatters, chunker and degradation ──")
 import prompt_builder as _pb  # noqa: E402
 _url_x = "https://example/x.md"
 _catalog_rendered = "### Skill: X\nSource: " + _url_x + "\n\n# X\n\n## H\n\nalready injected body\n"

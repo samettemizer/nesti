@@ -38,7 +38,7 @@ services:
 
   nesti-redis:
     # Redis 8 Open Source ships the query engine (FT.CREATE, FLAT/HNSW vector
-    # indexing) in the core image — semantic_cache.py needs it for the Phase 8
+    # indexing) in the core image — semantic_cache.py needs it for the
     # solution cache and episodic memory. Redis 7 has no such command, and
     # semantic memory then silently disables itself. A Redis 7 AOF loads in
     # Redis 8, so nesti_redis_data survives the upgrade.
@@ -82,7 +82,7 @@ services:
         condition: service_started
 
   nesti-qdrant:
-    # Phase 8 long-term memory: the skills/ corpus, chunked and embedded by
+    # long-term memory: the skills/ corpus, chunked and embedded by
     # scripts/index_skills.py. The tag is coupled to the qdrant-client pin in
     # requirements.txt — bump both together.
     image: qdrant/qdrant:v1.19.1

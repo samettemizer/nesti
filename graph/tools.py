@@ -8,7 +8,7 @@ Design rules (MCP compatibility):
   4. No global state — all dependencies come from environment variables or
      arguments.  Clients are constructed per call (they are cheap: a
      requests.Session / docker handle), which keeps every tool stateless and
-     directly exposable as an MCP tool in Phase 3.
+     directly exposable as an MCP tool.
 
 Return shape convention (all tools follow this):
 
@@ -1019,7 +1019,7 @@ def tool_skill_catalog_status() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Hierarchical vector memory (Phase 8)
+# Hierarchical vector memory
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # Disabled memory is not an error.  When a backing store reports

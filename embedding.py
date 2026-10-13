@@ -1,5 +1,5 @@
 """
-embedding.py – shared fastembed text embedder (Phase 8).
+embedding.py – shared fastembed text embedder.
 
 Both vector indices — the Qdrant document memory (``vector_store.py``) and the
 Redis semantic cache (``semantic_cache.py``) — embed through this one module,
@@ -18,7 +18,7 @@ Resilience:
     a load failure (package missing, weights not downloadable) is logged once
     and latched, after which ``available`` is False and every embed returns
     ``[]`` — the memory layer then degrades to "no results" and the pipeline
-    runs exactly as it did before Phase 8.
+    runs exactly as it did before.
 """
 
 import logging

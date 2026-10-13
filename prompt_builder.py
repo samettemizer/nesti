@@ -44,7 +44,7 @@ Context budget strategy
   The coding-phase issue-URL budget is evaluated at call time — not at import
   time — so .env loading order never causes a stale value.
 
-  Phase 8 memory sections (additive, and empty whenever memory is off):
+  memory sections (additive, and empty whenever memory is off):
     • Retrieved Reference Snippets — Qdrant chunks of the vendored corpus,
       minus any passage the keyword catalog already injected verbatim.  The
       test is on content, not on the document URL: the catalog injects only
@@ -749,10 +749,10 @@ def build_plan_prompt(
         a second `create_<table>_table` migration then fails the PHP layer
         with "table already exists" on every attempt.
     retrieved_chunks:
-        Qdrant chunks of the vendored corpus (Phase 8); injected within
+        Qdrant chunks of the vendored corpus; injected within
         _QDRANT_PLAN_BUDGET, minus passages the catalog section already holds.
     past_solutions:
-        Similar merged issues from the Redis solution cache (Phase 8);
+        Similar merged issues from the Redis solution cache;
         injected within _SOLUTION_PLAN_BUDGET above the reference docs,
         because they are about this project and the docs are generic.
     scope:
@@ -842,10 +842,10 @@ def build_code_prompt(
         build_plan_prompt; the coding phase needs it most, because it is the
         phase that would otherwise emit a duplicate migration.
     retrieved_chunks:
-        Qdrant chunks of the vendored corpus (Phase 8); injected within
+        Qdrant chunks of the vendored corpus; injected within
         _QDRANT_CODE_BUDGET, minus passages the catalog section already holds.
     recalled_failures:
-        Older failed attempts of this issue from episodic memory (Phase 8);
+        Older failed attempts of this issue from episodic memory;
         injected within _EPISODE_CODE_BUDGET, last before the instructions,
         where the model is told to correct itself.
     scope:
