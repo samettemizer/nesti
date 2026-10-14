@@ -24,13 +24,9 @@ from prompt_builder import (
     _format_catalog_section, _format_retrieved_section, chunk_body, drop_injected_chunks,
 )
 from skill_loader import Skill
+import reranker
 
 logger = logging.getLogger(__name__)
-MODEL_REVISIONS = {
-    "cross-encoder/ettin-reranker-150m-v1": "025501c4e0f9bbeb4c5b198318e0089ff061cc14",
-    "cross-encoder/ettin-reranker-68m-v1": "d166fa88ddde3c42bc3ee92f7df476d941c8204a",
-    "cross-encoder/ms-marco-MiniLM-L6-v2": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
-}
 POLICIES = ("merged_lane", "dense_order", "reranked", "legacy", "expanded_dense", "expanded_reranked")
 METRICS = ("ndcg5", "mrr5", "success5", "ndcg6")
 CONFIG_KEYS = ("model_id", "revision", "batch_size", "max_length", "threads")
@@ -88,24 +84,6 @@ def _allocation(hardware: dict) -> float:
     return count
 
 
-def validate_artifact(model_dir: str, model_id: str, revision: str) -> dict:
-    """Require the explicitly pinned local artifact identity; never download it."""
-    if MODEL_REVISIONS.get(model_id) != revision:
-        raise ValueError("model_id/revision is not one of the pinned experiment artifacts")
-    root = Path(model_dir)
-    if not root.is_dir():
-        raise ValueError("local model directory is missing")
-    manifest = json.loads((root / "reranker-artifact.json").read_text())
-    if not isinstance(manifest, dict) or manifest.get("model_id") != model_id or manifest.get("revision") != revision:
-        raise ValueError("local artifact identity differs from requested model/revision")
-    required = ["config.json", "tokenizer.json", "tokenizer_config.json", "model.safetensors"]
-    if "ettin" in model_id:
-        required += ["modules.json", "config_sentence_transformers.json", "1_Pooling/config.json"]
-        for module in ("2_Dense", "3_LayerNorm", "4_Dense"):
-            required += [f"{module}/config.json", f"{module}/model.safetensors"]
-    if any(not (root / name).is_file() for name in required):
-        raise ValueError("local artifact is incomplete: tokenizer, weights or modular head files are missing")
-    return manifest
 
 
 def _require(condition: bool, query_id: str, message: str) -> None:
@@ -428,7 +406,7 @@ def _selected_records(records: list[dict], manifest: dict, config: dict) -> list
 def evaluate(args: object) -> dict:
     """Evaluate one pinned configuration in a fresh process, without retrieval."""
     config = _config(args)
-    artifact = validate_artifact(args.model_dir, args.model_id, args.revision)
+    artifact = reranker.validate_artifact(args.model_dir, args.model_id, args.revision, args.max_length)
     records, manifest, hashes = _load_fixture(args.fixture)
     selected = _selected_records(records, manifest, config)
     if not selected:
@@ -535,7 +513,7 @@ def _validate_result(result: dict) -> None:
         if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise ValueError(f"evaluation result missing valid {key}")
     config = result["config"]
-    if MODEL_REVISIONS.get(config.get("model_id")) != config.get("revision"):
+    if reranker.MODEL_REVISIONS.get(config.get("model_id")) != config.get("revision"):
         raise ValueError("result uses an unpinned model")
     measurements = result["measurements"]
     if measurements.get("warmup_count") != 1 or measurements.get("replay_passes") != 3:
@@ -630,7 +608,7 @@ def compare(args: object) -> dict:
         reasons.append("Fewer than 100 heldout labeled query records.")
     if not reference["dataset"].get("evaluated_heldout"):
         reasons.append("Heldout has not been evaluated after frozen development selection.")
-    if set(selected_results) != set(MODEL_REVISIONS):
+    if set(selected_results) != set(reranker.MODEL_REVISIONS):
         reasons.append("Missing resource-eligible measured configurations for all three comparison models.")
     if any(_resource_failures(result) for result in results):
         reasons.append("Some configurations lack approved ceilings or exceed them; excluded from development selection.")

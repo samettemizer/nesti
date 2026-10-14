@@ -72,6 +72,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import git
@@ -123,6 +124,7 @@ _ENV_MAX_ATTEMPTS = int(os.environ.get("MAX_CODE_RETRIES", "2")) + 1
 # leaves a full set of complementary ones.
 _DOC_CHUNK_SEARCH_LIMIT = 8
 _DOC_CHUNK_KEEP = 6
+_DOC_RERANK_SEARCH_LIMIT = 20
 # The failure text used to query episodic memory is condensed exactly like the
 # stored episodes (semantic_cache._EPISODE_OUTPUT_LIMIT); embedding the raw
 # output would embed its first 512 tokens — installer chatter, not the error.
@@ -215,6 +217,8 @@ def _retrieve_chunks(
     chars, and its passages past the cap must stay retrievable.  Memory is
     optional: an unavailable store yields ``[]`` silently (the tool reports
     success with an empty list); only a genuine error is logged.
+    Opt-in reranking expands candidates only after retaining the exact dense
+    baseline, which is returned unchanged whenever expansion or scoring fails.
     """
     result = tool_memory_search_docs(text, stack=stack, limit=limit)
     if not result["success"]:
@@ -228,6 +232,47 @@ def _retrieve_chunks(
             f" (stack={stack})" if stack else "",
             ", ".join(f"{c['doc_title']} — {c['heading']}" for c in chunks),
         )
+    if os.environ.get("NESTI_RERANKER_ENABLED", "").strip().lower() not in {
+        "true", "1", "yes", "on",
+    }:
+        return chunks
+
+    started = time.monotonic()
+    candidate_count = 0
+    reason = "baseline_empty"
+    if chunks:
+        try:
+            reason = "expansion_error"
+            expanded = tool_memory_search_docs(
+                text, stack=stack, limit=_DOC_RERANK_SEARCH_LIMIT
+            )
+            if not expanded["success"]:
+                raise ValueError("Expansion failed")
+            reason = "expansion_malformed"
+            candidates = expanded["result"]
+            if not isinstance(candidates, list) or not all(
+                isinstance(c, dict) and isinstance(c.get("text"), str)
+                for c in candidates
+            ):
+                raise ValueError("Malformed expansion")
+            candidates = drop_injected_chunks(candidates, injected)
+            candidate_count = len(candidates)
+            reason = "expansion_empty"
+            if candidates:
+                reason = "adapter_unavailable"
+                from reranker import rerank_candidates
+
+                slots = [c["stack"] for c in chunks]
+                selected = rerank_candidates(text, candidates, slots)
+                return chunks if selected is None else selected
+        except Exception as exc:
+            # Memory enrichment must never fail the issue or expose its text.
+            reason = f"{reason}:{type(exc).__name__}"
+    logger.info(
+        "RERANK candidates=%d scored=0 selected=%d model=unknown revision=unknown "
+        "elapsed_ms=%.1f fallback=%s",
+        candidate_count, len(chunks), (time.monotonic() - started) * 1000, reason,
+    )
     return chunks
 
 

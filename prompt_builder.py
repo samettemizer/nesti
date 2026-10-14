@@ -56,6 +56,7 @@ Context budget strategy
   than _CATALOG_CODE_BUDGET: the catalog is the proven source.
 """
 
+import math
 import os
 
 from issue_scope import SCOPES, documentation_request
@@ -612,7 +613,7 @@ def _format_retrieved_section(
     exclude_text: str = "",
 ) -> str:
     """
-    Render Qdrant document chunks as a prompt section, best score first.
+    Render chunks in coherent rerank order, otherwise best dense score first.
 
     A chunk whose passage already appears verbatim in ``exclude_text`` — the
     rendered catalog section of the same prompt — is dropped before any budget
@@ -621,13 +622,23 @@ def _format_retrieved_section(
     """
     if not chunks:
         return ""
+    model = chunks[0].get("rerank_model")
+    try:
+        reranked = isinstance(model, str) and bool(model.strip()) and all(
+            c.get("rerank_model") == model
+            and isinstance(c.get("rerank_score"), (int, float))
+            and not isinstance(c["rerank_score"], bool)
+            and math.isfinite(c["rerank_score"])
+            for c in chunks
+        )
+    except OverflowError:
+        reranked = False
+    eligible = drop_injected_chunks(chunks, exclude_text)
+    if not reranked:
+        eligible = sorted(eligible, key=lambda c: c.get("score", 0.0), reverse=True)
     blocks: list[str] = []
     used = 0
-    for chunk in sorted(
-        drop_injected_chunks(chunks, exclude_text),
-        key=lambda c: c.get("score", 0.0),
-        reverse=True,
-    ):
+    for chunk in eligible:
         url = chunk.get("doc_url", "")
         title = chunk.get("doc_title", "")
         heading = chunk.get("heading", "")

@@ -138,7 +138,8 @@ def capture(args: argparse.Namespace) -> tuple[list[dict], dict]:
     from vector_store import get_document_memory
     from skill_catalog import select_skills
     from prompt_builder import _format_catalog_section, _CATALOG_PLAN_BUDGET, _CATALOG_CODE_BUDGET
-    from experiments.reranker_evaluation import MODEL_REVISIONS, runtime_provenance
+    from experiments.reranker_evaluation import runtime_provenance
+    from reranker import MODEL_REVISIONS
 
     memory = get_document_memory()
     status = memory.status()
@@ -199,8 +200,8 @@ def capture(args: argparse.Namespace) -> tuple[list[dict], dict]:
 def smoke(args: argparse.Namespace) -> dict:
     """Exercise a complete local artifact with real inference, not mock scores."""
     from copy import deepcopy
-    from experiments.reranker_evaluation import validate_artifact, runtime_provenance
-    from reranker import score_candidates, scoring_details
+    from experiments.reranker_evaluation import runtime_provenance
+    from reranker import score_candidates, scoring_details, validate_artifact
 
     artifact = validate_artifact(args.model_dir, args.model_id, args.revision)
     candidates = [

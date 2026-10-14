@@ -1,16 +1,20 @@
 """Deterministic synthetic benchmark contracts; not model quality evidence."""
 from copy import deepcopy
+import hashlib
+from io import BytesIO
 import json
 import math
 from pathlib import Path
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from experiments import reranker_evaluation as evaluation
 from experiments import reranker_poc as cli
 from prompt_builder import _format_retrieved_section
+import reranker
 
 
 def candidate(text: str, stack: str = "php", score: float = .5) -> dict:
@@ -42,7 +46,7 @@ def fixture(path: Path, rows: list[dict], metadata: dict | None = None) -> None:
 def result(model_id: str = "cross-encoder/ettin-reranker-68m-v1") -> dict:
     row = evaluation._quality(record(), [0., 1., 2.])
     row["observations"] = [{"scoring_seconds": .1}] * 3
-    return dict(schema_version=1, kind="reranker_evaluation", config=dict(model_id=model_id, revision=evaluation.MODEL_REVISIONS[model_id],
+    return dict(schema_version=1, kind="reranker_evaluation", config=dict(model_id=model_id, revision=reranker.MODEL_REVISIONS[model_id],
                 batch_size=2, max_length=512, threads=1),
                 hashes={key: "a" * 64 for key in ("fixture_sha256", "manifest_sha256", "split_sha256", "candidates_sha256")},
                 runtime={"fixture": "synthetic"},
@@ -155,15 +159,15 @@ class EvaluationTests(unittest.TestCase):
 
     def test_artifact_identity_and_complete_head_are_required(self):
         model_id = "cross-encoder/ettin-reranker-150m-v1"
-        revision = evaluation.MODEL_REVISIONS[model_id]
+        revision = reranker.MODEL_REVISIONS[model_id]
         with tempfile.TemporaryDirectory() as name:
             path = Path(name) / "reranker-artifact.json"
             path.write_text(json.dumps({"model_id": model_id, "revision": "wrong"}))
             with self.assertRaisesRegex(ValueError, "identity differs"):
-                evaluation.validate_artifact(name, model_id, revision)
+                reranker.validate_artifact(name, model_id, revision)
             path.write_text(json.dumps({"model_id": model_id, "revision": revision}))
             with self.assertRaisesRegex(ValueError, "incomplete"):
-                evaluation.validate_artifact(name, model_id, revision)
+                reranker.validate_artifact(name, model_id, revision)
 
     def test_bootstrap_resamples_issue_groups_deterministically(self):
         rows = [evaluation._quality(record(), [0., 1., 2.])]
@@ -192,6 +196,140 @@ class EvaluationTests(unittest.TestCase):
             del other["hashes"]["split_sha256"]
             with self.assertRaisesRegex(ValueError, "split_sha256"):
                 evaluation._validate_result(other)
+
+
+class PreparationTests(unittest.TestCase):
+    def setUp(self):
+        self.model_id = "cross-encoder/ettin-reranker-150m-v1"
+        self.hub = SimpleNamespace(HfApi=MagicMock(), snapshot_download=MagicMock(side_effect=self._download))
+        self.hub.HfApi.return_value.model_info.return_value = SimpleNamespace(
+            sha=reranker.MODEL_REVISIONS[self.model_id], card_data={"license": "apache-2.0"},
+        )
+        modules = patch.dict(sys.modules, {"huggingface_hub": self.hub})
+        modules.start()
+        self.addCleanup(modules.stop)
+        license_response = patch("scripts.prepare_reranker.urlopen", return_value=BytesIO(b"Apache License\nVersion 2.0\n"))
+        self.license_response = license_response.start()
+        self.addCleanup(license_response.stop)
+
+    def _download(self, **kwargs):
+        from test_reranker import synthetic_artifact
+        root = kwargs["local_dir"]
+        synthetic_artifact(root, model_id=kwargs["repo_id"], revision=kwargs["revision"])
+        (root / "reranker-artifact.json").unlink()
+        (root / "reranker-profile.json").unlink()
+        (root / ".cache").mkdir()
+        (root / ".cache" / "download-metadata").write_text("not a deployable model file")
+        return str(root)
+
+    def test_existing_artifact_is_never_overwritten(self):
+        from scripts.prepare_reranker import prepare
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            weights = directory / "model.safetensors"
+            weights.write_bytes(b"operator-owned-model")
+            with self.assertRaises(ValueError):
+                prepare(directory, "cross-encoder/ettin-reranker-150m-v1")
+            self.assertEqual(weights.read_bytes(), b"operator-owned-model")
+            self.assertEqual(list(directory.iterdir()), [weights])
+
+    def test_unexpected_upstream_revision_or_license_cannot_publish_artifact(self):
+        from scripts.prepare_reranker import prepare
+        model_id = "cross-encoder/ettin-reranker-150m-v1"
+        for revision, license_name in [("wrong", "apache-2.0"), (reranker.MODEL_REVISIONS[model_id], "unknown")]:
+            with self.subTest(revision=revision, license=license_name), tempfile.TemporaryDirectory() as name:
+                output = Path(name) / "model"
+                with patch("huggingface_hub.HfApi") as api:
+                    api.return_value.model_info.return_value = SimpleNamespace(sha=revision, card_data={"license": license_name})
+                    with self.assertRaises(ValueError):
+                        prepare(output, model_id)
+                self.assertFalse(output.exists())
+
+    def test_pinned_complete_artifact_without_profile(self):
+        from scripts.prepare_reranker import prepare
+        with tempfile.TemporaryDirectory() as name:
+            output = Path(name) / "model"
+            manifest = prepare(output, self.model_id)
+            revision = reranker.MODEL_REVISIONS[self.model_id]
+            self.hub.HfApi.return_value.model_info.assert_called_once_with(self.model_id, revision=revision)
+            download = self.hub.snapshot_download.call_args.kwargs
+            self.assertEqual((download["repo_id"], download["revision"]), (self.model_id, revision))
+            self.assertIn("*.safetensors", download["allow_patterns"])
+            self.assertNotIn("*.py", download["allow_patterns"])
+            self.assertEqual(reranker.validate_artifact(output, self.model_id, revision), manifest)
+            self.assertFalse((output / "reranker-profile.json").exists())
+            self.assertFalse((output / ".cache").exists())
+            self.assertEqual(json.loads((output / "reranker-artifact.json").read_text()), manifest)
+            self.assertIn("4_Dense/model.safetensors", manifest["files_sha256"])
+            self.assertIn("LICENSE", manifest["files_sha256"])
+            for filename, checksum in manifest["files_sha256"].items():
+                self.assertEqual(hashlib.sha256((output / filename).read_bytes()).hexdigest(), checksum)
+            self.assertEqual(list(Path(name).iterdir()), [output])
+
+    def test_optional_profile_controls_identity_and_is_validated(self):
+        from scripts.prepare_reranker import prepare
+        from test_reranker import synthetic_artifact
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            model_id = "cross-encoder/ettin-reranker-68m-v1"
+            profile = synthetic_artifact(root / "fixture", model_id=model_id, revision=reranker.MODEL_REVISIONS[model_id])
+            profile_path = root / "fixture" / "reranker-profile.json"
+            self.hub.HfApi.return_value.model_info.return_value.sha = profile["revision"]
+            output = root / "model"
+            prepare(output, self.model_id, profile_path)
+            self.assertEqual(reranker.validate_profile(output / "reranker-profile.json"), profile)
+            self.assertEqual(self.hub.snapshot_download.call_args.kwargs["repo_id"], model_id)
+            profile["threads"] = 0
+            profile_path.write_text(json.dumps(profile))
+            self.license_response.return_value = BytesIO(b"Apache License\nVersion 2.0\n")
+            with self.assertRaisesRegex(ValueError, "threads"):
+                prepare(root / "invalid", self.model_id, profile_path)
+            self.assertFalse((root / "invalid").exists())
+            self.assertFalse(list(root.glob(".nesti-reranker-*")))
+
+    def test_failed_download_or_incomplete_artifact_is_not_published(self):
+        from scripts.prepare_reranker import prepare
+        for failure in ("download", "incomplete", "license", "profile", "symlink"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                output = root / "model"
+                def download(**kwargs):
+                    self._download(**kwargs)
+                    directory = kwargs["local_dir"]
+                    if failure == "download":
+                        raise OSError("interrupted download")
+                    if failure == "incomplete":
+                        (directory / "4_Dense/model.safetensors").unlink()
+                    if failure == "profile":
+                        (directory / "reranker-profile.json").write_text("{}")
+                    if failure == "symlink":
+                        (directory / "external.json").symlink_to(root / "outside.json")
+                self.hub.snapshot_download.side_effect = download
+                self.license_response.return_value = BytesIO(
+                    b"unexpected source" if failure == "license" else b"Apache License\nVersion 2.0\n"
+                )
+                with self.assertRaises((OSError, ValueError)):
+                    prepare(output, self.model_id)
+                self.assertFalse(output.exists())
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_invalid_local_inputs_fail_before_downloading(self):
+        from scripts.prepare_reranker import prepare
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            output = root / "model"
+            output.symlink_to(root / "missing")
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                prepare(output, self.model_id)
+            self.assertTrue(output.is_symlink())
+            profile = root / "profile.json"
+            profile.write_text(json.dumps({"model_id": self.model_id, "revision": "main"}))
+            with self.assertRaisesRegex(ValueError, "revision"):
+                prepare(root / "fresh", self.model_id, profile)
+            with self.assertRaisesRegex(ValueError, "model_id"):
+                prepare(root / "fresh", "untrusted/model")
+            self.hub.HfApi.assert_not_called()
+            self.hub.snapshot_download.assert_not_called()
 
 
 class CaptureTests(unittest.TestCase):
