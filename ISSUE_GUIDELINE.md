@@ -392,30 +392,22 @@ the project setup before filing issues.
 
 **Title:**
 ```
-Add a paginated /api/tasks endpoint backed by a tasks table
+Add task storage and API
 ```
 
 **Description:**
 ```
-Context: the application has no task storage yet.
+Add task storage with a new migration: `id`, `title` string, nullable
+`description` text, `is_done` boolean default false, nullable `due_date` date,
+and timestamps. Include `Task` with `$fillable`/`$casts`, `TaskFactory`,
+and `TaskSeeder` creating 15 tasks via Faker.
 
-Requirements:
-- New migration creating a `tasks` table: `id`, `title` string, `description`
-  text nullable, `is_done` boolean default false, `due_date` date nullable,
-  timestamps.
-- `Task` model with `$fillable` and `$casts`.
-- `TaskFactory`.
-- `TaskSeeder` seeding 15 tasks via Faker.
-- `GET /api/tasks` paginated 10 per page, returning a `TaskResource` collection.
-- `POST /api/tasks` validated by `StoreTaskRequest`: `title` required string
-  max 255, `description` nullable string, `due_date` nullable date.
-- Feature tests for both routes.
-
-Acceptance Criteria:
-- `GET /api/tasks` returns 200 with `data` and `meta.per_page = 10`.
-- `POST /api/tasks` with an empty title returns 422.
-- The created task appears in the database.
-- Both routes appear in the generated OpenAPI document.
+- GET /api/tasks: `TaskResource` collection, 10 per page.
+- POST /api/tasks: `StoreTaskRequest` validates title (required, string, max
+  255), description (nullable string), and due_date (nullable date).
+- PHPUnit: GET returns 200 with data and meta.per_page = 10; POST saves a
+  valid task and returns 422 for an empty title.
+- OpenAPI: both routes are documented.
 ```
 
 ---
@@ -426,27 +418,19 @@ Acceptance Criteria:
 
 **Title:**
 ```
-Show the task list with a PrimeVue DataTable component
+Add a searchable task table
 ```
 
 **Description:**
 ```
-Context: the task API exists but nothing renders it.
+Show the existing GET /api/tasks on `/` in
+`resources/js/components/TaskTable.vue`. Use PrimeVue DataTable + Column
+for title, due_date, and is_done, with sorting and client-side search.
+Wire into the served entry/view; preserve PrimeVue/Aura. No backend changes.
 
-Requirements:
-- `resources/js/components/TaskTable.vue` fetching `GET /api/tasks`.
-- PrimeVue `DataTable` + `Column` for `title`, `due_date` and `is_done`.
-- Sortable columns.
-- A search input filtering rows client-side.
-- Mounted on `/` through the existing served entry/view, preserving PrimeVue/Aura.
-
-https://primevue.dev/llms/components/datatable.md
-
-Acceptance Criteria:
-- The table renders the three columns.
-- Clicking the `title` header sorts the rows.
-- Typing in the search box filters rows without a reload.
-- The component accepts a `tasks` prop and emits `refresh`.
+- Vitest: verify columns, the `tasks` prop, and the `refresh` event.
+- Playwright: create tasks through the existing API, then verify visible
+  rows, title sorting, and search without a reload.
 ```
 
 ---
@@ -461,28 +445,19 @@ Acceptance Criteria:
 
 **Title:**
 ```
-Add a PrimeVue Dialog form that creates a task
+Add a task creation dialog
 ```
 
 **Description:**
 ```
-Context: tasks can be listed but not created from the UI.
+Add `resources/js/components/TaskCreateDialog.vue` to the existing task page
+using PrimeVue Dialog, InputText, DatePicker, Button, and Message.
+Submit to the existing POST /api/tasks; no backend changes.
 
-Requirements:
-- `resources/js/components/TaskCreateDialog.vue` using PrimeVue `Dialog`,
-  `InputText`, `DatePicker` and `Button`.
-- Posts to `POST /api/tasks`.
-- Shows the 422 validation messages inline with PrimeVue `Message`.
-- Emits `created` and refreshes the table.
-- A Playwright spec covering the happy path and the empty-title error.
-
-https://primevue.dev/llms/components/dialog.md
-
-Acceptance Criteria:
-- Clicking "New task" opens the dialog.
-- Submitting an empty title shows the validation message.
-- Submitting a valid title closes the dialog and the new row appears in the
-  table.
+- "New task" opens the dialog; show 422 validation messages inline.
+- On success, emit `created`, close the dialog, and refresh the table.
+- Vitest: verify validation messages and the `created` event.
+- Playwright: verify an empty-title error and a new row after valid submission.
 ```
 
 ---
@@ -493,35 +468,61 @@ Acceptance Criteria:
 
 **Title:**
 ```
-Fix incorrect total price calculation when a discount coupon is applied
+Fix coupon discount rounding
+```
+
+**Description:**
+```
+Applying SAVE10 (10%) to a $19.99 item gives $18.00 instead of $17.99.
+Fix `app/Services/CartService.php` → `applyDiscount()` using cents or bcmath;
+do not change the database schema.
+
+PHPUnit: verify applyDiscount(19.99, 10) = 17.99, (0.00, 10) = 0.00,
+and (5.00, 100) = 0.00.
+```
+
+---
+
+### 5. Bulk Task Completion (all four test layers)
+
+**Title:**
+```
+Add bulk task completion
 ```
 
 **Description:**
 ```
 Context:
-When a percentage discount coupon is applied to a cart that contains items
-with fractional prices, the final total is sometimes off by 1 cent due to
-a floating-point rounding issue in CartService::applyDiscount().
-
-Steps to reproduce:
-1. Add an item priced at $19.99 to the cart.
-2. Apply coupon "SAVE10" (10% discount).
-3. Expected total: $17.99.  Actual total: $18.00.
+Users can create and list their own tasks, but must complete them one at a
+time. The authenticated task API and TaskTable.vue already exist.
 
 Requirements:
-- Fix the rounding logic in app/Services/CartService.php, method:
-  applyDiscount() — use integer arithmetic (work in cents, convert at the
-  end) or PHP's bcmath functions.
-- Do NOT change the database schema.
-- Add a PHPUnit Feature test that covers the exact scenario above and at
-  least two additional edge cases (e.g. coupon value exceeds item price,
-  zero-value cart).
+- Add POST /api/tasks/complete → TaskController::complete using existing auth.
+  CompleteTasksRequest validates task_ids as a required, nonempty array of
+  distinct integer IDs that exist. Return updated tasks through TaskResource.
+- Only allow the current user's tasks. Reject the entire request with 403
+  if any task belongs to another user; otherwise update all tasks atomically.
+  Already-completed tasks remain unchanged. No schema changes.
+- In resources/js/components/TaskTable.vue, add PrimeVue DataTable row
+  selection and a "Complete selected" Button, disabled when nothing is
+  selected. Show failures with Message; preserve selection on failure.
+  On success, refresh the table and clear selection.
 
 Acceptance Criteria:
-- applyDiscount(19.99, 10) returns 17.99.
-- applyDiscount(0.00, 10) returns 0.00.
-- applyDiscount(5.00, 100) returns 0.00 (100% discount).
+- PHPUnit: selected tasks become done; unselected tasks stay unchanged.
+  Invalid IDs return 422, unauthenticated requests return 401, and mixed
+  ownership returns 403 without changing any task. Repeating a valid request
+  succeeds without further changes.
+- OpenAPI: document the new route, task_ids, and response shape.
+- Vitest: verify button state, selection reset, and visible error messages.
+- Playwright: create tasks through the existing authenticated API, select
+  two on the real task page, complete them, and verify their status persists
+  after reload while an unselected task remains open.
 ```
+
+We recommend this structured format when a request has detailed requirements
+or interacting constraints. For simple tasks, a short, clear description is
+enough; these headings are optional.
 
 ---
 
