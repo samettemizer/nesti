@@ -1,7 +1,7 @@
 """
 test_graph_smoke.py – verifies the LangGraph pipeline against the acceptance
-checklists of Phase 2 (core loop), Phase 4 (layered frontend testing) and
-Phase 5 (Laravel bootstrap + Scramble OpenAPI gate), with all external
+checklists of core loop, layered frontend testing and
+Laravel bootstrap + Scramble OpenAPI gate, with all external
 services (GitLab Issues, GitLab, Docker, LLM providers) monkeypatched at the
 node/tool seam.
 
@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import tempfile
+from unittest.mock import patch
 
 # ── Environment before any project import ────────────────────────────────────
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
@@ -34,6 +35,7 @@ os.environ["HERMES3_LLM_ENABLED"] = "false"
 os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"   # unreachable → memory fallback
 os.environ["MAX_CODE_RETRIES"] = "2"                 # → max_attempts = 3
 os.environ["NESTI_STACK"] = "auto"                   # exercise real detection
+os.environ["NESTI_RERANKER_ENABLED"] = "false"
 os.environ.pop("TELEGRAM_BOT_TOKEN", None)
 os.environ.pop("TELEGRAM_CHAT_ID", None)
 os.environ.pop("DEEPSEEK_API_KEY", None)
@@ -65,7 +67,7 @@ VUE_CODE = (
 )
 FULLSTACK_CODE = PHP_CODE + "\n" + VUE_CODE
 
-# Phase 5 fixtures: a real Laravel change (backend + API surface) and the same
+# fixtures: a real Laravel change (backend + API surface) and the same
 # change with a PrimeVue component on top.
 LARAVEL_CODE = (
     "Implementation below.\n\n"
@@ -83,7 +85,7 @@ LARAVEL_VUE_CODE = LARAVEL_CODE + (
     "### FILE: resources/js/components/__tests__/TaskTable.test.js\n```js\n// vitest\n```\n\n"
     "### FILE: e2e/tasks.spec.js\n```js\n// playwright\n```\n"
 )
-GOOD_CODE = PHP_CODE          # Phase 2 scenarios stay backend-only
+GOOD_CODE = PHP_CODE
 NO_BLOCKS = "Here is a prose description of the change instead of files."
 
 calls: dict = {}
@@ -130,7 +132,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
                 laravel_repo: bool = False, bootstrap_created: bool = False,
                 vue_repo: bool = False, plan_text: str = "",
                 doc_chunks=(), similar_solutions=(), recalled=(),
-                memory_error: str = ""):
+                memory_error: str = "", expanded_doc_chunks=None):
     """
     Install fakes on graph.nodes (node functions resolve names at call time).
 
@@ -139,7 +141,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     False on purpose: dropping a composer.json into every fake clone would turn
     the Vue-only scenario into "fullstack" and silently void that regression.
 
-    The Phase 8 memory fixtures default to empty, so every scenario that does
+    The memory fixtures default to empty, so every scenario that does
     not ask for memory runs against a degraded (empty) memory layer — the
     regression net for graceful degradation.  ``memory_error`` makes every
     memory tool report a genuine failure instead.
@@ -238,7 +240,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             "paths": [], "undocumented": ["POST /api/tasks"]}}
     nodes.tool_openapi_export = fake_openapi
 
-    # Phase 8 memory fakes – record every call, return the fixtures.
+    # memory fakes – record every call, return the fixtures.
     def _memory(key, record, result):
         calls[key].append(record)
         if memory_error:
@@ -246,7 +248,8 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
         return {"success": True, "result": result}
 
     nodes.tool_memory_search_docs = lambda text, stack="", limit=6: _memory(
-        "memory_search", {"text": text, "stack": stack, "limit": limit}, list(doc_chunks))
+        "memory_search", {"text": text, "stack": stack, "limit": limit},
+        list(expanded_doc_chunks if limit == 20 and expanded_doc_chunks is not None else doc_chunks))
     nodes.tool_memory_find_similar = lambda text, limit=2: _memory(
         "memory_similar", text, list(similar_solutions))
     nodes.tool_memory_recall_failures = lambda issue_id, text, attempt, limit=2: _memory(
@@ -364,7 +367,7 @@ check(f["mr_url"] == "" and f["attempt"] == 3, "attempt jumped to max → failur
 check(calls["docker"] == 0, "no sandbox run for exhausted providers")
 reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
 check("All coding providers exhausted." in reopen[0][1],
-      "reopen note carries provider-exhaustion reason (Phase 1 parity)")
+      "reopen note carries provider-exhaustion reason")
 check(not os.path.exists(calls["workspaces"][0]), "cleanup ran")
 
 # ═════ Scenario 5: PHP-only issue skips both frontend layers ═════
@@ -377,7 +380,7 @@ check(calls["vitest"] == 0 and calls["playwright"] == 0,
       "vitest_test and playwright_test never entered")
 check(f["mr_url"] == "https://gitlab.example/mr/105", "went straight to commit")
 
-# ═════ Scenario 6: Vue-only issue skips PHPUnit (the Phase 4 fix) ═════
+# ═════ Scenario 6: Vue-only issue skips PHPUnit ═════
 print("\n── Scenario 6: Vue-only issue → PHPUnit skipped ──")
 f = run(106, docker_outcomes=[False], code_responses=[VUE_CODE])
 check(f["stack"] == "vue", "stack detected as vue (no PHP anywhere)")
@@ -921,8 +924,8 @@ check(not calls["layers"] and not calls["pushes"] and not f["mr_url"],
 check("Code generation" in f["failure_reason"]
       and not os.path.exists(calls["workspaces"][0]),
       "generation exhaustion reports its cause and always cleans the workspace")
-# ═════ Scenario 19: Phase 8 hierarchical memory end-to-end ═════
-print("\n── Scenario 19: Phase 8 hierarchical memory end-to-end ──")
+# ═════ Scenario 19: hierarchical memory end-to-end ═════
+print("\n── Scenario 19: hierarchical memory end-to-end ──")
 _CHUNKS = [
     {"doc_title": "Database: Migrations", "heading": "Creating Tables",
      "doc_url": "https://raw.githubusercontent.com/laravel/docs/13.x/migrations.md",
@@ -999,8 +1002,171 @@ _kept = nodes._retrieve_chunks("x", [Skill(
 check([c["doc_title"] for c in _kept] == ["Database: Migrations", "HTTP Tests"],
       "_retrieve_chunks keeps a passage of a catalog document that lies past its cap")
 
-# ═════ Scenario 20: Phase 8 memory unavailable ═════
-print("\n── Scenario 20: Phase 8 memory unavailable → pipeline unchanged ──")
+# Opt-in retrieval preserves the exact legacy baseline and both final prompts.
+import prompt_builder as _pb  # noqa: E402
+_dense = [
+    {**_CHUNKS[0], "doc_title": "Dense PHP first", "text": "baseline php first", "score": 0.9},
+    {**_CHUNKS[1], "doc_title": "Dense practice", "text": "baseline practice",
+     "stack": "practice", "score": 0.8},
+    {**_CHUNKS[0], "doc_title": "Dense PHP last", "text": "baseline php last", "score": 0.7},
+]
+_expanded = [
+    {**_dense[2], "doc_title": "Reranked PHP first", "text": "reranked php first", "extra": "kept"},
+    {**_dense[1], "doc_title": "Reranked practice", "text": "reranked practice"},
+    {**_dense[0], "doc_title": "Reranked PHP last", "text": "reranked php last"},
+]
+_ranked = [
+    {**c, "rerank_score": score, "rerank_model": "test-model@pinned"}
+    for c, score in zip(_expanded, [3.0, 1.0, 2.0])
+]
+_rerank_kw = dict(docker_outcomes=[True], code_responses=[GOOD_CODE],
+                  doc_chunks=_dense, expanded_doc_chunks=_expanded)
+with patch.dict("sys.modules", {"reranker": None}):
+    for _disabled in ("false", "0", "no", "off", "", "enabled"):
+        with patch.dict(os.environ, {"NESTI_RERANKER_ENABLED": _disabled}):
+            reset_calls(1192)
+            patch_tools(**_rerank_kw)
+            _actual = nodes._retrieve_chunks("same query", [], stack="php")
+            check(_actual == _dense and all(a is b for a, b in zip(_actual, _dense))
+                  and calls["memory_search"] == [
+                      {"text": "same query", "stack": "php", "limit": 8}],
+                  f"disabled flag {_disabled!r} returns identical dictionaries without importing reranker")
+    run(1192, **_rerank_kw)
+_baseline_prompts = (list(calls["plan_prompts"]), list(calls["code_prompts"]))
+with patch.dict(os.environ, {"NESTI_RERANKER_ENABLED": "true"}):
+    with patch("reranker.rerank_candidates", return_value=_ranked) as _adapter:
+        f = run(1192, **_rerank_kw)
+        check(_adapter.call_count == 2 and all(
+            c.args[1:] == (_expanded, ["php", "practice", "php"])
+            for c in _adapter.call_args_list),
+            "both graph phases rerank expanded candidates against unchanged baseline lanes")
+        check([c["limit"] for c in calls["memory_search"]] == [8, 20, 8, 20]
+              and all(calls["memory_search"][i]["text"] == calls["memory_search"][i + 1]["text"]
+                      and calls["memory_search"][i]["stack"] == calls["memory_search"][i + 1]["stack"]
+                      for i in (0, 2)),
+              "expansion keeps each phase query and stack filter")
+        check(all(p.index("### Reranked PHP first") < p.index("### Reranked practice")
+                  < p.index("### Reranked PHP last")
+                  for p in calls["plan_prompts"] + calls["code_prompts"])
+              and f["retrieved_chunks"] == 3,
+              "final plan and code prompts retain lane replay order rather than dense or global rerank sort")
+    for _failure in (None, RuntimeError("synthetic adapter failure")):
+        with patch("reranker.rerank_candidates",
+                   **({"side_effect": _failure} if isinstance(_failure, Exception)
+                      else {"return_value": None})):
+            run(1192, **_rerank_kw)
+            check((calls["plan_prompts"], calls["code_prompts"]) == _baseline_prompts,
+                  "failed reranking produces byte-identical baseline plan and code prompts")
+    for _response in (
+        {"success": False, "error": "synthetic expansion failure"},
+        {"success": True, "result": []},
+        {"success": True, "result": None},
+        {"success": True, "result": ["malformed"]},
+        {"success": True, "result": [{"text": None}]},
+        RuntimeError("synthetic search failure"),
+    ):
+        with patch.object(nodes, "tool_memory_search_docs", side_effect=[
+            {"success": True, "result": _dense}, _response,
+        ]), patch("reranker.rerank_candidates") as _adapter:
+            _actual = nodes._retrieve_chunks("same query", [], stack="php", limit=7)
+            check(_actual == _dense and all(a is b for a, b in zip(_actual, _dense))
+                  and not _adapter.called,
+                  "invalid expansion returns the whole untouched baseline without scoring")
+    with patch.object(nodes, "tool_memory_search_docs", return_value={
+        "success": True, "result": [],
+    }) as _search, patch("reranker.rerank_candidates") as _adapter:
+        check(nodes._retrieve_chunks("empty", []) == []
+              and _search.call_count == 1 and not _adapter.called,
+              "empty baseline never widens retrieval or starts scoring")
+    _catalog = [Skill(title="Catalog", url=_dense[0]["doc_url"],
+                      content=_dense[0]["text"])]
+    with patch.object(nodes, "tool_memory_search_docs", side_effect=[
+        {"success": True, "result": _dense},
+        {"success": True, "result": [_dense[0], *_expanded]},
+    ]), patch("reranker.rerank_candidates", return_value=None) as _adapter:
+        check(nodes._retrieve_chunks("same query", _catalog) == _dense[1:]
+              and _adapter.call_args.args[1:] == (_expanded, ["practice", "php"]),
+              "both searches exclude catalog bodies but retain distinct passages sharing its URL")
+    import reranker as _reranker  # noqa: E402
+    _profile = {"model_id": "cross-encoder/ettin-reranker-150m-v1", "revision": "a" * 40}
+    with patch.object(_reranker._runtime, "profile", _profile), patch.object(
+        _reranker._runtime, "score", return_value=([2.0, 9.0, 2.0], "")
+    ):
+        reset_calls(1193)
+        patch_tools(**_rerank_kw)
+        _actual = nodes._retrieve_chunks("same query", [], stack="php")
+        check([{k: v for k, v in c.items() if k not in {"rerank_score", "rerank_model"}}
+               for c in _actual] == _expanded
+              and [c["rerank_score"] for c in _actual] == [2.0, 9.0, 2.0]
+              and all(c["rerank_model"] == _profile["model_id"] + "@" + _profile["revision"]
+                      for c in _actual)
+              and all("rerank_score" not in c for c in _expanded + _dense),
+              "real adapter keeps stable ties within lanes, dense scores and all metadata without mutation")
+    with patch.object(_reranker._runtime, "score") as _score:
+        with patch.object(nodes, "tool_memory_search_docs", side_effect=[
+            {"success": True, "result": _dense},
+            {"success": True, "result": [_expanded[0], _expanded[2]]},
+        ]):
+            _actual = nodes._retrieve_chunks("same query", [])
+            check(_actual == _dense and all(a is b for a, b in zip(_actual, _dense))
+                  and not _score.called,
+                  "missing practice lane returns complete baseline before scoring")
+    for _enabled in ("1", "YES", " on "):
+        with patch.dict(os.environ, {"NESTI_RERANKER_ENABLED": _enabled}), patch.object(
+            nodes, "tool_memory_search_docs", side_effect=[
+                {"success": True, "result": _dense * 3},
+                {"success": True, "result": _expanded * 3},
+            ]
+        ) as _search, patch("reranker.rerank_candidates", return_value=None) as _adapter:
+            check(nodes._retrieve_chunks("custom limit", [], stack="vue", limit=7) == _dense * 2
+                  and _search.call_args_list[0].kwargs == {"stack": "vue", "limit": 7}
+                  and _search.call_args_list[1].kwargs == {"stack": "vue", "limit": 20}
+                  and _adapter.call_args.args[2] == ["php", "practice", "php"] * 2,
+                  "recognized enable values preserve the custom first limit and six baseline slots")
+
+_dense_rendered = _pb._format_retrieved_section(_expanded, 6000)
+for _bad_marker in (
+    {}, {"rerank_score": float("nan")}, {"rerank_score": float("inf")},
+    {"rerank_score": True}, {"rerank_score": "3"}, {"rerank_score": None},
+    {"rerank_score": 10**1000},
+    {"rerank_model": ""}, {"rerank_model": " "}, {"rerank_model": None},
+    {"rerank_model": "other@revision"}, {"rerank_model": 7},
+):
+    _mixed = [dict(c) for c in _ranked]
+    if _bad_marker:
+        _mixed[1].update(_bad_marker)
+    else:
+        _mixed[1].pop("rerank_score")
+    check(_pb._format_retrieved_section(_mixed, 6000) == _dense_rendered,
+          "incomplete or incoherent rerank markers preserve the exact legacy formatter")
+    check(_pb._format_retrieved_section(_mixed, 6000, _mixed[1]["text"])
+          == _pb._format_retrieved_section(_expanded, 6000, _mixed[1]["text"]),
+          "marker coherence is checked before excluding the malformed row")
+_oversized = {**_ranked[0], "text": "oversized-" * 800}
+for _budget in (5000, 6000):
+    _packed = _pb._format_retrieved_section(
+        [_oversized, _ranked[1], _ranked[2]], _budget, _ranked[1]["text"]
+    )
+    check("oversized-" not in _packed and "### Reranked practice" not in _packed
+          and "### Reranked PHP last" in _packed
+          and _packed.count("\nSource: ") == 1,
+          "reranked blocks retain catalog exclusion and whole-block skip at both prompt budgets")
+_budget_catalog = [Skill(title="Catalog", url=_ranked[1]["doc_url"],
+                         content=_ranked[1]["text"])]
+for _builder, _args in (
+    (_pb.build_plan_prompt, (initial(1194)["issue"],)),
+    (_pb.build_code_prompt, (initial(1194)["issue"], "Implement the thing")),
+):
+    _, _prompt = _builder(
+        *_args, retrieved_chunks=[_oversized, _ranked[1], _ranked[2]],
+        catalog_skills=_budget_catalog,
+    )
+    check("oversized-" not in _prompt and "### Reranked practice" not in _prompt
+          and "### Reranked PHP last" in _prompt,
+          "actual plan/code builders exclude catalog bodies and skip oversized reranked blocks")
+
+# ═════ Scenario 20: memory unavailable ═════
+print("\n── Scenario 20: memory unavailable → pipeline unchanged ──")
 f = run(1200, docker_outcomes=[False, False, True], code_responses=[GOOD_CODE],
         doc_chunks=_CHUNKS, similar_solutions=_SOLUTIONS, recalled=_RECALLED,
         memory_error="Qdrant and Redis are down")
@@ -1017,8 +1183,8 @@ check(all("## Retrieved Reference Snippets" not in p and "## Past Nesti Experien
 check(len(calls["memory_remember_failure"]) == 2,
       "a failing episodic write never blocks the retry loop")
 
-# ═════ Scenario 21: Phase 8 pure-function checks (no Redis, no Qdrant) ═════
-print("\n── Scenario 21: Phase 8 formatters, chunker and degradation ──")
+# ═════ Scenario 21: pure-function checks (no Redis, no Qdrant) ═════
+print("\n── Scenario 21: formatters, chunker and degradation ──")
 import prompt_builder as _pb  # noqa: E402
 _url_x = "https://example/x.md"
 _catalog_rendered = "### Skill: X\nSource: " + _url_x + "\n\n# X\n\n## H\n\nalready injected body\n"

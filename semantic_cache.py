@@ -1,5 +1,5 @@
 """
-semantic_cache.py – Redis-backed short-term vector memory (Phase 8).
+semantic_cache.py – Redis-backed short-term vector memory.
 
 Two vector indices on Redis 8's built-in query engine (``FT.CREATE``):
 

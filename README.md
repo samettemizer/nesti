@@ -1,113 +1,78 @@
 # Nesti — autonomous developer
 
-## Goal
-
-A self-contained orchestrator that reads GitLab issues, generates a Laravel 13 +
-PrimeVue 5 implementation through a cascading LLM pipeline, validates it across
-four test layers in Docker sandboxes, and opens GitLab Merge Requests — without
-a human writing a single line of code.
+Nesti turns opted-in GitLab issues into Laravel 13 + PrimeVue 5 Merge Requests.
+It plans and generates code through an LLM cascade, then runs the applicable
+PHPUnit, OpenAPI, Vitest and Playwright gates in ephemeral Docker sandboxes.
 
 ---
 
 ## How it works
 
-```
-GitLab issue (labelled, opt-in)
-  → claim issue            independently verified lock, or stop before cloning
-  → bootstrap             scaffold or top-up the Laravel app
-  → load skills            vendored corpus + URLs from the issue
-  → generate plan          [Local LLM → DeepSeek → Claude Sonnet]
-  → generate code          [Local LLM → DeepSeek → Claude Sonnet]
-  → detect layers          from the files the change touched
-  → run the applicable test layers, sequential gates:
-        PHPUnit → OpenAPI → Vitest → Playwright
-  → all green: commit + push + GitLab MR (body: Closes #<iid>) + close issue
-  → red layer: escalate provider, retry (shared budget: MAX_CODE_RETRIES + 1)
-  → verified missing E2E fixture: pause, open one backend dependency, wait for its MR merge
-  → all retries exhausted: remove lock label, comment failure, return to pending
+```mermaid
+flowchart LR
+    A[Claim issue] --> B[Bootstrap, skills and plan]
+    B --> C[Generate code]
+    C --> D[Test gates]
+    D -->|Pass| E[Commit, push and open MR]
+    D -->|Retry| C
 ```
 
-Test layers follow the files the attempt wrote — not the repository, not the
-scope. A PHP-only change runs PHPUnit (→ OpenAPI when it touches the `/api`
-surface); a **frontend-only change skips PHPUnit** and runs Vitest →
-Playwright, also in a Laravel repository; a change touching both sides
-(a Blade view or `routes/web.php` counts as both) runs all four; a change
-touching neither side (a README only) runs PHPUnit, so nothing reaches commit
-untested. A repository with no PHP at all always runs Vitest → Playwright.
-Vue-only issues are ordinary work.
+Provider order: consumer subscriptions → optional local Ollama →
+OpenRouter → DeepSeek → Anthropic API. Unavailable providers are skipped;
+paid APIs require explicit configuration. See [provider setup](#platform-gateway-apis).
+
+Note: The local LLM tiers are disabled by default because they require dedicated strong GPU/hardware.
+
+Test gates run in order: **PHPUnit → OpenAPI → Vitest → Playwright**.
+Changed files, not the declared issue scope, determine which gates run:
+
+- PHP-only: PHPUnit, plus OpenAPI when the API surface changes.
+- Frontend-only in a Vue repository: Vitest and Playwright, even in Laravel.
+- Both sides (including Blade or `routes/web.php`): backend and frontend
+  gates; OpenAPI still depends on API changes.
+- Neither side: PHPUnit. Repositories without PHP use the frontend gates.
+
+Redis preserves each issue's conversation and failure output. Failed gates
+escalate the coder, with up to `MAX_CODE_RETRIES` extra attempts. Retries remove
+stale new files and restore previously edited committed files from `HEAD`.
 
 ### Documentation files
 
-`README.md`, `CHANGELOG.md` and anything under `docs/` change only when the
-issue asks for it — name the file. Otherwise the prompt forbids touching them,
-even when a plan or a past solution lists them; the `/api` contract is
-documented by Scramble from the code. The scaffold bootstrap no longer copies
-Laravel's skeleton `README.md` over the project's, and a retry that drops a
-committed file restores its original content instead of deleting it.
-
-Conversation history is stored in Redis per issue. When tests fail and the
-pipeline retries, the model sees its previous attempt and the failure output.
-Retries prune stale files: a file the previous attempt created and the new
-attempt does not re-emit is deleted, and a committed file it edited is
-restored from `HEAD`, so a renamed migration cannot leave two
-`create_<table>_table` migrations behind.
+Name `README.md`, `CHANGELOG.md` or a `docs/` file in the issue if it should
+change; otherwise Nesti leaves it untouched.
 
 ---
 
 ## Issue Intake (GitLab Issues)
 
-Intake is **opt-in by label**. Only open issues carrying the label configured
-in `GITLAB_ISSUE_LABEL` (default `nesti`) are picked up.
+Write the issue in English and add `GITLAB_ISSUE_LABEL` (default `nesti`).
+See [ISSUE_GUIDELINE.md](ISSUE_GUIDELINE.md) for short examples and detailed
+request guidance. Issue numbers are project-scoped IIDs, such as `#7`.
 
-GitLab issues have only `opened` and `closed`; intake state lives in labels
-and trusted dependency notes:
+| State | Condition |
+|-------|-----------|
+| Pending | Open, opted in, no control label or unresolved dependency record |
+| In progress | `<label>::in-progress` |
+| Paused | `<label>::pause` or an active dependency record |
+| Done | Closed |
 
-| State       | Condition |
-|-------------|-----------|
-| **pending** | open, has `<label>`, neither control label, no active or malformed dependency record |
-| **in progress** | open, has `<label>::in-progress` (the lock Nesti owns) |
-| **paused** | open, has `<label>::pause` or an active dependency record |
-| **done** | closed |
-
-Scoped labels (the `::` form) are mutually exclusive within their scope in
-GitLab, which is what makes the lock single-valued. Every mutation is verified
-by reading the issue back; a lock or unlock that did not apply is a loud error.
-
-**Success:** Nesti removes the lock label, closes the issue, and comments the
-MR URL. The MR description starts with `Closes #<iid>`, so issue and MR are
-natively cross-linked.
-
-**Failure (retries exhausted):** Nesti removes the lock label and comments the
-failure, returning the issue to the pending pool so it can be retried.
-
-Human closures and opt-outs are never reversed. A manual pause is not removed
-by dependency reconciliation. `"new"` status refuses paused or unresolved
-dependency issues; it only unlocks an issue still open and opted in.
-
-Issue numbers are the project-scoped `iid` (what `#7` means in the project UI).
-
-See [`ISSUE_GUIDELINE.md`](ISSUE_GUIDELINE.md) for the full issue format and
-examples. Any HTTP/HTTPS URL in the issue subject or description is fetched
-automatically and injected into the planning prompt as context.
+Nesti verifies label changes by reading the issue back; a rejected claim
+stops before cloning. Success removes the lock and posts the MR URL
+(`Closes #<iid>`); exhausted retries remove the lock and post the failure.
+Human closures, opt-outs and manual pauses are not reversed. Unresolved or
+malformed dependency records block intake; do not bypass them by stripping labels.
 
 ---
 
 ## Laravel 13 + PrimeVue 5 Role
 
-The planner and coder operate as a **Laravel 13 architect + PrimeVue 5 frontend
-architect**. Database work is allowed and expected:
-
-- New migrations under `database/migrations` (both `up()` and `down()`).
-- Model factories (`database/factories`) and seeders (`database/seeders`) with
-  Faker — never hand-written `INSERT` statements.
-- Schema builder / Blueprint API only — no raw DDL, because the test suite runs
-  on SQLite and vendor-specific SQL breaks it.
-- Never `migrate:fresh`, `migrate:reset`, `db:wipe`, or truncate tables.
-- Never edit, rename, or delete an existing migration.
+Database work uses new reversible Schema-builder migrations and Faker-backed
+factories/seeders. Existing migrations are never edited, renamed or deleted;
+raw DDL, destructive reset commands and table truncation are forbidden.
 
 ### Bootstrap node
 
-A `bootstrap` graph node runs right after `setup`:
+Before planning, Nesti checks the target repository:
 
 | Repository state | Mode | Behaviour |
 |------------------|------|-----------|
@@ -119,126 +84,80 @@ A `bootstrap` graph node runs right after `setup`:
 
 ## OpenAPI Layer
 
-The OpenAPI test layer uses [Scramble](https://scramble.dedoc.co/) to validate
-that every `/api` route is documented:
+[Scramble](https://scramble.dedoc.co/) exports `openapi.json`, which is
+committed with the change. Nesti compares it with `php artisan route:list
+--json` and fails if any `/api` route is missing. `scramble:analyze` is advisory.
 
-1. `php artisan scramble:export --path=openapi.json` — exports the document.
-2. `php artisan route:list --json` — lists registered routes.
-3. The layer compares the two and **fails the attempt when any `/api` route is
-   missing** from the exported document.
-
-`openapi.json` is a committed deliverable (not git-ignored).
-`scramble:analyze` is advisory only — it exits non-zero on any unresolved type
-anywhere in the application, so the layer runs it with `|| echo` and never
-gates on it.
-
-The layer runs only when the attempt touched `routes/api.php`,
-`app/Http/Controllers`, `app/Http/Resources`, or `app/Http/Requests`. A pure
-`.vue` or migration-only change does not pay for a Scramble export.
+This gate runs for changes to `routes/api.php`, `app/Http/Controllers`,
+`app/Http/Resources` or `app/Http/Requests`, not pure Vue or migration changes.
 
 ---
 
 ## Vendored Skill Corpus
 
-The `skills/` directory holds a vendored, offline documentation corpus:
+[`skills/`](skills/) contains offline PrimeVue 5, Laravel 13 and engineering
+practice docs. `skill_catalog.py` selects them by issue wording and aliases;
+**no skill URL is needed for bundled documentation**. URLs in the issue are
+fetched separately for additional context.
 
-| Category | Count | Source |
-|----------|-------|--------|
-| PrimeVue 5 component docs | 92 | `primevue.dev/llms` |
-| PrimeVue 5 guide pages | 15 | `primevue.dev/llms` |
-| Laravel topic docs | 66 | `laravel/docs` 13.x |
-| Practice docs | 4 | curated, see below |
-
-`primevue/`, `laravel/` and `registry.json` are generated **only** by
-`scripts/fetch_skills.py` and committed to the repository. Never hand-edit a
-vendored document.
-
-The practice tier (`skills/practices/`) is the exception: Nesti-maintained
-adaptations of upstream engineering skills that shape the code Nesti writes —
-test-driven development for the PHPUnit / Vitest / Playwright gates, Laravel +
-Vue application security, and visual/UI direction on PrimeVue 5. Each carries
-its provenance and licence in its front matter (licence texts in
-`skills/practices/licenses/`). After editing one, re-index it offline:
+Regenerate `primevue/`, `laravel/` and `registry.json` with
+`scripts/fetch_skills.py`; do not hand-edit them. Only `skills/practices/` is
+hand-maintained, with provenance and licences included. After editing a practice:
 
 ```bash
 python scripts/fetch_skills.py --only practices
 ```
 
-`skill_catalog.py` selects docs **deterministically and offline** per issue by
-alias and trigger matching — e.g. "Dropdown" maps to the PrimeVue 5 `Select`
-doc, "OrgChart" maps to `organizationchart`, "migration" maps to the Laravel
-migrations topic. Each document is capped at 7 000 chars before the
-prompt-level budget. Practice docs rank last and are capped at one per prompt:
-API documentation always outranks general guidance.
-
-The only run-time fetch left is URLs the issue itself contains, handled by
-`skill_loader.py`.
+Deploy the updated corpus and restart to index it before polling.
 
 ---
 
 ## Hierarchical Vector Memory
 
-Semantic retrieval on top of the keyword skill catalog, in two tiers that share
-one embedder (`embedding.py`: `BAAI/bge-small-en-v1.5`, 384 dims, fastembed on
-the CPU — offline, no API cost, weights baked into the images):
+Semantic retrieval supplements the keyword catalog with:
 
-| Tier | Store | Contents | Written by | Read by |
-|------|-------|----------|------------|---------|
-| Long-term docs | Qdrant (`nesti-qdrant`, collection `nesti_docs`) | the `skills/` corpus, chunked and embedded | `scripts/index_skills.py` | `plan`, `code` (filtered by the issue's scope) |
-| Solution cache | Redis 8 query engine (`nesti_solution_idx`) | subject, stack, MR URL and plan of every merged issue; TTL 90 days | `commit` | `plan` |
-| Episodic memory | Redis 8 query engine (`nesti_episode_idx`) | condensed output of each failed attempt of the issue in flight | `on_layer_failure` | `code` (older attempts only) |
+- **Qdrant:** relevant passages from the bundled documentation.
+- **Redis 8:** past solution plans and failed-attempt context; episodes are
+  deleted when their issue finishes.
 
-The vector index reaches passages past the catalog's 7 000-char cap and
-documents whose name the issue never mentions; chunks the catalog already
-injected are dropped. Hits below the cosine floors (`NESTI_SOLUTION_MIN_SCORE`
-0.80, `NESTI_EPISODE_MIN_SCORE` 0.60) are never injected. Episodes are deleted
-when their issue finishes.
+Document retrieval has two stages:
 
-Memory retrieval degrades to "no results" if unavailable. Set
-`NESTI_MEMORY_ENABLED=false` to disable it. Startup indexes the bundled corpus
-before polling and skips unchanged documents; indexing failure stops startup.
-Changing the embedding model requires `scripts/index_skills.py --recreate`.
+- **BGE + FastEmbed** (`BAAI/bge-small-en-v1.5`, 384 dimensions) embeds
+  documents and queries on the CPU; Qdrant finds candidate passages.
+- **Ettin + PyTorch** (`cross-encoder/ettin-reranker-150m-v1`) scores
+  query–passage pairs in that small candidate pool to select more relevant
+  passages. It reranks retrieval results rather than replacing the embedder.
 
-The seven `memory_*` MCP tools expose the same stores.
+Runtime memory failures degrade to no results. Disable retrieval with
+`NESTI_MEMORY_ENABLED=false`.
+
+Startup indexes changed documents before polling; indexing failure stops
+startup. Changing the embedding model requires
+`python scripts/index_skills.py --recreate` and matching vector dimensions.
 
 ---
 
 ## Frontend Testing
 
-When the change touches the frontend in a repository with Vue, two extra layers
-run (rules in [How it works](#how-it-works)):
+| Layer | Sandbox image | Runtime |
+|-------|---------------|---------|
+| PHPUnit | `nesti-sandbox-php` | PHP 8.3 + Composer |
+| Vitest + Vue Test Utils | `nesti-sandbox-node` | Node 22 |
+| Playwright | `nesti-sandbox-e2e` | Playwright 1.50.0 + Node 22 + PHP 8.3 |
 
-| Layer | Image | Base | What it covers |
-|-------|-------|------|----------------|
-| Vitest + Vue Test Utils | `nesti-sandbox-node` | `node:22-alpine` | Component units: props, events, computed values, slots |
-| Playwright | `nesti-sandbox-e2e` | `mcr.microsoft.com/playwright:v1.50.0-noble` + Node 22 | Full user flows in headless Chromium against `php artisan serve` on a migrated + seeded database |
+Keep `@playwright/test` pinned exactly to the E2E image version.
+Exclude `e2e/**` from Vitest so it does not collect Playwright specs.
 
-The PHPUnit sandbox (`nesti-sandbox-php`) uses `php:8.3-cli` as its base.
-
-**`@playwright/test` is pinned exactly `1.50.0`** — never with a caret. The pin
-and the E2E image's base tag are one coupled setting; changing either without the
-other breaks the layer.
-
-`vitest.config.js` must exclude `e2e/**` so Vitest does not try to collect the
-Playwright specs — Vitest's default include glob matches `e2e/*.spec.js` and
-dies with a Playwright error. The Node sandbox CMD also passes
-`--exclude 'e2e/**'`.
-
-For Laravel, the E2E sandbox exports `APP_ENV=testing` and pins SQLite to the
-recreated workspace `database/database.sqlite`. After Composer/config setup,
-the image-owned `scripts/e2e_fixtures.php` runs migrations, default seeding and
-declared fixture preparation. Only then do the build and browser tests run.
-The helper refuses a declared model using another database before migrating
-or seeding. Scope never controls data preparation.
-
+Laravel E2E runs use `APP_ENV=testing` and a recreated workspace SQLite
+database. Migrations, default seeding and declared fixtures run before the
+build and browser tests, regardless of issue scope. Fixture models pointing
+to another database are refused.
 
 ### Served-page integration
 
-A component test does not prove the component is served. Follow the existing
-route → Blade view → Vite entry → Vue root. For an in-DOM root, preserve
-PrimeVue/Aura/plugins, register the feature before `app.mount('#app')`, and
-place its explicit kebab-case tag in the served Blade view. An unused
-`App.vue` is not a page. Preserve an existing SFC-root architecture.
+Verify the actual route → Blade → Vite → Vue entry chain, not just an isolated
+component. Preserve PrimeVue/Aura/plugins and the existing root architecture;
+register before mount and use explicit kebab-case closing tags in Blade.
 
 ## Fixture dependencies
 
@@ -249,48 +168,36 @@ real-data prerequisite for an existing unauthenticated GET collection:
 {"version":1,"fixtures":[{"endpoint":"/api/tasks","model":"App\\Models\\Task","seeder":"Database\\Seeders\\TaskSeeder"}]}
 ```
 
-The UTF-8 manifest is limited to 32 KiB and 16 unique requirements, with
-exact fields and local `/api/...` paths. Empty states, mocked tests and specs
-that create data through existing UI/API routes need no manifest. A retry
-must re-emit a still-required manifest or deliberately emit `fixtures: []`;
-normal stale-file pruning is unchanged.
+Use the manifest only for hard nonempty prerequisites, not valid empty states,
+mocks or specs that create their own data through existing UI/API routes.
+It accepts up to 16 unique requirements in 32 KiB, with exact fields and local
+`/api/...` paths. Retries must re-emit required fixtures or emit `fixtures: []`.
 
-The helper probes the real HTTP kernel after default seeding. A nonempty
-collection is already satisfied; otherwise it requires an empty model table
-and an endpoint SELECT on that table, then runs an existing declared seeder
-once. Default-seeded rows are not duplicated. This is test setup, not a
-silent change to production `DatabaseSeeder`.
+After default seeding, the helper checks the endpoint. If already nonempty,
+it does nothing; otherwise it verifies an empty backing table and runs the
+declared seeder once. This does not modify production `DatabaseSeeder`.
 
-Only a seeder whose class **and** conventional PHP file are absent can
-produce exit 78 and a matching bounded atomic report at
-`/nesti-results/fixtures.json`. The browser never started: the verdict is
-`Playwright BLOCKED`, not FAILED or PASSED. Timeouts, HTTP/auth/JSON errors,
-unconfirmed mapping, existing filtered-out rows, broken/no-op/throwing
-seeders and unrelated seed errors remain ordinary failures.
+Only a missing seeder class **and** conventional PHP file can produce exit 78
+with the matching `/nesti-results/fixtures.json` report: `Playwright BLOCKED`.
+Timeouts, HTTP/auth/JSON errors, unverified model mappings, filtered-out rows
+and broken or ineffective seeders remain failures, not dependency requests.
 
-For an unchanged HEAD-backed API/model and no coder-authored backend files,
-Nesti saves trusted intent in GitLab, verifies `nesti::pause`, and creates
-one English `Scope: backend` issue. Declare the applicable existing seeder,
-or the conventional missing `<Model>Seeder` in JSON without adding or
-registering a nonexistent class in the frontend parent. New backend work
-must ship its own factory/seeder and uses the normal retry path instead.
+For an unchanged HEAD-backed API/model with no coder-authored backend changes,
+Nesti records intent, verifies the pause and opens one backend dependency.
+Declare a missing `<Model>Seeder` in JSON without creating or registering it
+in the frontend parent. New backend work must include its own factory/seeder.
 
-Dependency truth is the latest non-system
-`NESTI_FIXTURE_DEPENDENCIES_V1` note authored by the configured token's user
-(`GET /user`). A canonical key binds project, parent IID, target branch and
-requirement; the child carries `NESTI_FIXTURE_CHILD_V1` ownership metadata.
-Redis history is not dependency state. Intent/submission/link/merge/release
-writes are read back independently; foreign or malformed metadata cannot
-release a parent, and stale writes are refused.
+Trusted GitLab notes (`NESTI_FIXTURE_DEPENDENCIES_V1` and child ownership
+`NESTI_FIXTURE_CHILD_V1`), not Redis, bind the dependency to its project,
+parent, target branch and fixture. Foreign, malformed or stale records cannot
+release a parent.
 
-Every poll reconciles before selecting work. A closed child or an open MR is
-not completion: an independently read related MR must start with exactly
-`Closes #<child>`, be merged with `merged_at`, and target the recorded project
-and configured `GITLAB_DEFAULT_BRANCH`. Only all merged items release the
-parent; normal setup then claims it. No parent LLM/escalation/commit runs
-while waiting. Later reconciliation never clears a released parent's live
-lock or a later manual pause. A merged-but-still-unsatisfied requirement
-blocks for an operator without opening a second child.
+Polling reconciles dependencies before selecting work. Release requires all
+related MRs to start with `Closes #<child>` and be verified merged into the
+recorded project/target; closing a child or opening an MR is insufficient.
+The parent makes no LLM calls or retries while waiting. Reconciliation
+preserves later locks/manual pauses. A merged but still-unsatisfied fixture
+requires operator recovery, not a second child.
 
 ### Operator recovery
 
@@ -326,77 +233,21 @@ Restart only after independently verifying the intended note and labels.
 
 ---
 
-## Example Topology
-
-| Service | Addr | Role |
-|---------|------|------|
-| GitLab | `https://gitlab.yourdomain.com` | Repository + merge requests + issue intake |
-| Local LLM (optional) | your Ollama host | Local planner / coder tiers |
-| Redis 8 | `nesti-redis:6379` | Conversation history, OAuth sessions, solution + episode cache |
-| Qdrant | `nesti-qdrant:6333` | Long-term document memory (vector index) |
-| Nesti MCP | stdio via `docker exec` | Tools for Claude Code / IDEs |
-| DeepSeek API | `api.deepseek.com` | Mid-tier paid fallback |
-| Claude (Sonnet) | `api.anthropic.com` | Last-resort fallback |
-
-The optional local LLM tiers are disabled by default because they require dedicated strong GPU/hardware.
-
----
-
 ## Architecture
 
-```
-main.py                    <- CLI entry point (--loop / single-run)
-task_engine.py             <- invokes the LangGraph pipeline
-graph/
-  state.py                 <- IssueState TypedDict
-  tools.py                 <- atomic issue/GitLab/sandbox/skill/memory/quota functions
-  nodes.py                 <- LangGraph nodes
-  edges.py                 <- conditional routing, one router per test layer
-  builder.py               <- compiled StateGraph
-mcp_server/
-  server.py                <- MCP stdio server (FastMCP), 25 tools
-  tools/                   <- issues, GitLab, sandbox, skill, memory, quota MCP tools
-  Dockerfile               <- standalone nesti-mcp container
-conversation_store.py      <- Redis-backed per-issue message history
-llm_client.py              <- provider cascade with multi-turn support
-issue_scope.py             <- backend/frontend/fullstack scope of an issue + documentation-request check
-e2e_fixtures.py            <- manifest, sandbox-report and durable dependency contracts
-issue_dependencies.py      <- verified pause/child/merge/release workflow, no LLM
-prompt_builder.py          <- scope-composed system + user prompts with a TASK SCOPE block
-skill_loader.py            <- URL extraction + markdown fetching from issue text
-skill_catalog.py           <- deterministic offline skill selection from vendored corpus
-embedding.py               <- shared fastembed embedder for both memory tiers
-vector_store.py            <- Qdrant document memory (long-term)
-semantic_cache.py          <- Redis 8 solution cache + episodic memory (short-term)
-gitlab_issues_client.py    <- issue intake and lifecycle (label-based locking)
-gitlab_client.py           <- clone, branch, commit, push, MR
-docker_runner.py           <- PHPUnit sandbox execution + FILE-block writing
-frontend_runner.py         <- Vitest + Playwright sandbox execution
-telegram_notifier.py       <- failure alerts (optional)
-skills/                    <- vendored PrimeVue + Laravel documentation corpus
-templates/laravel/         <- bootstrap templates (vite.config.js, routes, views, tests)
-scripts/
-  fetch_skills.py          <- regenerates the vendored corpus in skills/
-  index_skills.py          <- chunks + embeds skills/ into Qdrant
-  oauth.py                 <- `nesti` CLI: provider login / logout + /usage
-  preflight.py             <- pre-run config + lifecycle + Docker verification
-  seed_live_issues.py      <- creates demo issues with the opt-in label
-  e2e_fixtures.php          <- image-owned isolated Laravel fixture preparation
-test_graph_smoke.py        <- offline smoke tests for the LangGraph pipeline
-test_live_laravel.py       <- opt-in integration tests (Docker + network)
-```
+| Area | Entry points |
+|------|--------------|
+| Orchestration | `main.py`, `task_engine.py`, `graph/` (LangGraph) |
+| Providers and prompts | `llm_client.py`, `prompt_builder.py`, `issue_scope.py` |
+| GitLab and dependencies | `gitlab_issues_client.py`, `gitlab_client.py`, `issue_dependencies.py` |
+| Sandboxes and fixtures | `docker_runner.py`, `frontend_runner.py`, `e2e_fixtures.py` |
+| Context and memory | `skill_catalog.py`, `skill_loader.py`, `conversation_store.py`, `vector_store.py`, `semantic_cache.py` |
+| Interactive tools | `mcp_server/` (FastMCP), `scripts/oauth.py` (`nesti` CLI) |
 
-Supporting files:
-```
-Dockerfile                 <- orchestrator container (Python 3.12-slim)
-Dockerfile.sandbox         <- PHPUnit sandbox (php:8.3-cli + Composer)
-Dockerfile.sandbox.node    <- Vitest sandbox (node:22-alpine)
-Dockerfile.sandbox.e2e     <- Playwright sandbox (playwright:v1.50.0-noble + Node 22)
-docker-compose.yml         <- nesti-orchestrator + nesti-redis + nesti-mcp + nesti-qdrant
-.vscode/mcp.json.example   <- registers the nesti MCP server for VS Code Claude extension
-.env / .env.example        <- all configuration (shared by orchestrator and MCP server)
-ISSUE_GUIDELINE.md         <- how to write effective GitLab issues
-```
+[`docker-compose.yml`](docker-compose.yml) runs the orchestrator, MCP server,
+Redis and Qdrant; sandbox containers are created per test run and removed
+afterwards. Dependencies and image versions live in
+[`requirements.txt`](requirements.txt) and the Dockerfiles.
 
 ---
 
@@ -421,140 +272,81 @@ Optional preflight (creates and closes a GitLab probe issue):
 docker exec nesti-orchestrator python scripts/preflight.py
 ```
 
-Optional Claude Code MCP connection:
-```bash
-claude mcp add nesti docker exec -i nesti-mcp python -m mcp_server.server
-```
-
 ---
 
 ## MCP Server
 
-`nesti-mcp` exposes the public issue/GitLab/Docker/skill/memory/quota layer —
-**25 tools** — over the Model Context Protocol (stdio transport).
-Any MCP-compatible client — Claude Code CLI, VS Code Claude extension, Cursor —
-can drive the same GitLab/Docker toolchain the orchestrator uses, e.g.:
+`nesti-mcp` exposes the shared issue, GitLab, sandbox, skill, memory and quota
+tools over stdio. It runs alongside the orchestrator and makes no LLM calls.
 
-```
-@nesti issue_list_pending
-@nesti detect_stack /tmp/ai-dev-241-xyz/repo
-@nesti laravel_bootstrap /tmp/ai-dev-241-xyz/repo
-@nesti docker_run_phpunit /tmp/ai-dev-241-xyz/repo
-@nesti openapi_export /tmp/ai-dev-241-xyz/repo
-@nesti docker_run_vitest /tmp/ai-dev-241-xyz/repo
-@nesti docker_run_playwright /tmp/ai-dev-241-xyz/repo
-@nesti skill_catalog_select "task management with DataTable"
+Connect Claude Code:
+
+```bash
+claude mcp add nesti docker exec -i nesti-mcp python -m mcp_server.server
 ```
 
-The MCP server runs alongside the orchestrator; it does not replace it.
-Every tool returns the uniform `{"success": bool, ...}` shape.
-`docker_run_playwright` returns `{"passed", "output", "fixture_request"}`;
-Vitest retains its tuple contract internally. The two dependency mutation
-tools remain graph-internal, preserving the single polling writer.
-
-Dependency: `mcp>=1.0.0,<2`. The MCP SDK renamed `FastMCP` to `MCPServer` in
-2.x and changed the decorator API; the server stays on the 1.x line.
+For VS Code, use [`.vscode/mcp.json.example`](.vscode/mcp.json.example).
+Other MCP clients can use the same `docker exec -i` command.
+Dependency mutations remain internal to the orchestrator to preserve a single
+polling writer.
 
 ---
 
 ## Platform Gateway APIs
-CLI command named `nesti` in `orchestration` container. It lists platform providers and their models.
+Run the CLI inside the orchestrator:
 
 ```bash
-/provider                              List consumer and platform providers
-/provider login <name>                 Log in to a consumer provider
-/provider logout <name>                Log out of a consumer provider
-/provider models <name> [search]       List text models and USD prices per 1M tokens
-/provider model <name>                 Show the selected planner/coder model
-/provider model <name> <model-id>      Persist a model selection (currently: openrouter)
-/provider model <name> --reset         Restore the environment model setting
-/usage                                 Show usage/quota for authenticated consumers
+docker exec -it nesti-orchestrator nesti /provider
+docker exec -it nesti-orchestrator nesti /provider login claude
+docker exec -it nesti-orchestrator nesti /usage
 ```
 
----
+Available commands (prefix each with `nesti` inside the container):
+
+| Command | Purpose |
+|---------|---------|
+| `/provider` | List consumer and platform providers |
+| `/provider login <name>` / `/provider logout <name>` | Add or remove a consumer session |
+| `/provider models <name> [search]` | List text models and prices per million tokens |
+| `/provider model <name> [model-id\|--reset]` | View, persist or reset model selection (OpenRouter) |
+| `/usage` | Show authenticated consumer usage and quota |
+
+OpenRouter needs an explicit model via `OPENROUTER_MODEL` or
+`nesti /provider model openrouter <model-id>`.
 
 ## Consumer Subscriptions & Quota
 
-`nesti` command also logs consumer subscriptions in and out `nesti /provider login|logout <name>` 
-for `claude`, `antigravity`, `chatgpt-plus`, `copilot` and shows their remaining quota:
+Supported login names: `claude`, `antigravity`, `chatgpt-plus`, `copilot`.
+Consumer login/logout takes effect on the next inference call without restart.
+Copilot's current PAT login supports quota reporting, not inference.
 
-```bash
-nesti /usage
-```
+`/usage` shows a used-capacity bar, remaining percentage and reset countdown.
 
-```
-Claude 7 Day
-███░░░░░░░░░░░░░░░░░░░░░  89%  1d23h
-Claude 5 Hour
-██░░░░░░░░░░░░░░░░░░░░░░  90%  4h11m
-Antigravity Gemini Pro
-███████░░░░░░░░░░░░░░░░░  69%  6d2h
-Antigravity Claude
-░░░░░░░░░░░░░░░░░░░░░░░░ 100%  6d23h
-```
+![Nesti usage CLI showing Claude and Antigravity quota bars, remaining percentages and reset countdowns](assets/usage.png)
 
-The bar is the used share, the percentage what is left, the last column the
-time until that window resets (coloured on a TTY unless `NO_COLOR` is set).
+*Example output; quota values and reset times vary by account and usage.*
 
-| Provider | Source | Shown |
-|----------|--------|-------|
-| `claude` | `api.anthropic.com/api/oauth/usage` | 7 Day, 5 Hour (+ Sonnet / Opus weekly when the plan has them) |
-| `antigravity` | Cloud Code `v1internal:fetchAvailableModels` (`User-Agent: antigravity`) | Gemini Pro, Gemini Flash, Claude, GPT-OSS — agent-selectable models only |
-| `copilot` | GitHub premium-request billing API | requests used this month; no remaining figure |
-| `chatgpt-plus` | `chatgpt.com/backend-api/wham/usage` | 7 Day, 5 Hour (only returned windows) |
-
-ChatGPT Plus inference uses the signed-in subscription through the Codex backend,
-with `NESTI_CHATGPT_MODEL=gpt-6.1-sol`. Its usage endpoint is internal, not a
-stable public API; missing quota windows remain unknown rather than guessed.
-
-Every read goes through `fetch_usage()`: an access token near expiry is renewed
-and saved to Redis *before* the usage call. Anthropic rotates the refresh token
-and revokes the old access token on each renewal, so an unsaved renewal logs the
-subscription out. The pipeline reads the same numbers (`tool_quota_check`, MCP
-`quota_check`) on every test-layer failure and sends a Telegram warning when the
-most depleted window drops below 10 %.
+Missing quota is unknown, not estimated; Copilot reports usage without a
+remaining figure. ChatGPT Plus uses the Codex backend; its quota endpoint is
+internal and may change. Credentials are renewed and persisted automatically.
+On test failures, Nesti checks quota and sends low-capacity Telegram warnings
+when configured.
 
 ---
 
 ## Configuration
 
-See `.env.example` for all variables. Key ones:
+Use [`.env.example`](.env.example) as the configuration reference:
 
-| Variable | Required | Default |
-|----------|----------|---------|
-| `DEEPSEEK_API_ENABLED` | No | `true` |
-| `DEEPSEEK_API_KEY` | When DeepSeek API is enabled | — |
-| `ANTHROPIC_API_ENABLED` | No | `false` |
-| `ANTHROPIC_API_KEY` | When Anthropic API is enabled | — |
-| `GITLAB_URL` + `GITLAB_TOKEN` | **Yes** | — |
-| `GITLAB_PROJECT_PATH` | **Yes** | — |
-| `GITLAB_ISSUE_LABEL` | No | `nesti` |
-| `REDIS_URL` | No | `redis://nesti-redis:6379/0` |
-| `NESTI_MEMORY_ENABLED` | No | `true` |
-| `QDRANT_URL` | No | `http://nesti-qdrant:6333` |
-| `HERMES3_LLM_ENABLED` | No | `false` |
-| `HERMES3_LLM_URL` | No | — |
-| `LOCAL_LLM_ENABLED` | No | `false` |
-| `LOCAL_LLM_URL` | No | — |
-| `MAX_CODE_RETRIES` | No | `2` |
-| `NESTI_LARAVEL_VERSION` | No | `^13.0` |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | No | — |
-| `DOCKER_SANDBOX_PHP_IMAGE` | No | `nesti-sandbox-php` |
-| `DOCKER_SANDBOX_NODE_IMAGE` | No | `nesti-sandbox-node` |
-| `DOCKER_SANDBOX_E2E_IMAGE` | No | `nesti-sandbox-e2e` |
-| `DOCKER_SANDBOX_TIMEOUT` | No | `900` |
-| `DOCKER_SANDBOX_BOOTSTRAP_TIMEOUT` | No | `1800` |
-| `NESTI_STACK` | No | `auto` |
-| `INCLUDE_SKILLS_IN_CODE_PROMPT` | No | `0` |
-
-Paid API clients require both their enable flag and an API key. A false flag
-prevents planner, coder, escalation and fallback calls even when the key is
-present; availability is checked before each attempt. Anthropic's billed API
-is opt-in and does not control a Claude consumer subscription.
-`NESTI_CONSUMER_PRIORITY` selects the consumer providers independently. To use
-only ChatGPT Plus with DeepSeek fallback, set it to `chatgpt-plus`, keep both
-local-model flags false, enable DeepSeek and disable Anthropic. Editing `.env`
-changes the next container's configuration, not an already-running process.
+- Required: `GITLAB_URL`, `GITLAB_TOKEN`, `GITLAB_PROJECT_PATH` and at least
+  one usable LLM provider.
+- `NESTI_CONSUMER_PRIORITY` orders subscriptions.
+- Paid APIs require both their `*_API_ENABLED=true` flag and API key.
+  A disabled flag prevents billing even when a key is present; Anthropic's
+  API flag does not disable the Claude consumer subscription.
+- Retry, sandbox timeout, memory, model and optional Telegram settings are
+  listed in `.env.example`. Recreate containers after editing `.env`;
+  existing processes do not reload it.
 
 ---
 
@@ -563,14 +355,11 @@ changes the next container's configuration, not an already-running process.
 **Offline smoke tests** (no Docker, no network):
 ```bash
 python test_graph_smoke.py
-# Behavior regressions: graph gates, fixture protocol, durable recovery and target checkout
 ```
 
 **Live integration tests** (needs Docker + network):
 ```bash
 python test_live_laravel.py
-# Includes the real empty/seeded/missing/broken fixture matrix, SQLite isolation,
-# real-page row matching, and existing PHP/OpenAPI/Vitest gates.
 ```
 
 ---

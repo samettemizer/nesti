@@ -1,6 +1,6 @@
 """mcp_server/tools/memory.py – hierarchical vector memory tools exposed over MCP.
 
-Thin wrappers over the Phase 8 ``tool_memory_*`` functions in graph/tools.py:
+Thin wrappers over the ``tool_memory_*`` functions in graph/tools.py:
 Qdrant long-term document memory plus the Redis solution cache and episodic
 memory.  Every result is already a plain dict / list of dicts, so the
 ``{"success": bool, ...}`` return passes through unchanged.

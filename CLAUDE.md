@@ -33,7 +33,7 @@ docker_runner.py             PHP sandbox, OpenAPI export, bootstrap, FILE-block 
 frontend_runner.py           Vitest + Playwright sandboxes
 gitlab_issues_client.py      issue intake + label lock; gitlab_client.py: repo + MR
 skill_catalog.py             offline corpus selection; skill_loader.py: issue URLs
-embedding.py, vector_store.py, semantic_cache.py   Phase 8 vector memory
+embedding.py, vector_store.py, semantic_cache.py   vector memory
 layer_output.py              condenses sandbox output to its meaningful tail
 telegram_notifier.py         fire-and-forget alerts
 scripts/                     oauth.py (`nesti` CLI), fetch_skills.py, index_skills.py,

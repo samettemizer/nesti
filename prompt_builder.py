@@ -44,7 +44,7 @@ Context budget strategy
   The coding-phase issue-URL budget is evaluated at call time — not at import
   time — so .env loading order never causes a stale value.
 
-  Phase 8 memory sections (additive, and empty whenever memory is off):
+  memory sections (additive, and empty whenever memory is off):
     • Retrieved Reference Snippets — Qdrant chunks of the vendored corpus,
       minus any passage the keyword catalog already injected verbatim.  The
       test is on content, not on the document URL: the catalog injects only
@@ -56,6 +56,7 @@ Context budget strategy
   than _CATALOG_CODE_BUDGET: the catalog is the proven source.
 """
 
+import math
 import os
 
 from issue_scope import SCOPES, documentation_request
@@ -612,7 +613,7 @@ def _format_retrieved_section(
     exclude_text: str = "",
 ) -> str:
     """
-    Render Qdrant document chunks as a prompt section, best score first.
+    Render chunks in coherent rerank order, otherwise best dense score first.
 
     A chunk whose passage already appears verbatim in ``exclude_text`` — the
     rendered catalog section of the same prompt — is dropped before any budget
@@ -621,13 +622,23 @@ def _format_retrieved_section(
     """
     if not chunks:
         return ""
+    model = chunks[0].get("rerank_model")
+    try:
+        reranked = isinstance(model, str) and bool(model.strip()) and all(
+            c.get("rerank_model") == model
+            and isinstance(c.get("rerank_score"), (int, float))
+            and not isinstance(c["rerank_score"], bool)
+            and math.isfinite(c["rerank_score"])
+            for c in chunks
+        )
+    except OverflowError:
+        reranked = False
+    eligible = drop_injected_chunks(chunks, exclude_text)
+    if not reranked:
+        eligible = sorted(eligible, key=lambda c: c.get("score", 0.0), reverse=True)
     blocks: list[str] = []
     used = 0
-    for chunk in sorted(
-        drop_injected_chunks(chunks, exclude_text),
-        key=lambda c: c.get("score", 0.0),
-        reverse=True,
-    ):
+    for chunk in eligible:
         url = chunk.get("doc_url", "")
         title = chunk.get("doc_title", "")
         heading = chunk.get("heading", "")
@@ -749,10 +760,10 @@ def build_plan_prompt(
         a second `create_<table>_table` migration then fails the PHP layer
         with "table already exists" on every attempt.
     retrieved_chunks:
-        Qdrant chunks of the vendored corpus (Phase 8); injected within
+        Qdrant chunks of the vendored corpus; injected within
         _QDRANT_PLAN_BUDGET, minus passages the catalog section already holds.
     past_solutions:
-        Similar merged issues from the Redis solution cache (Phase 8);
+        Similar merged issues from the Redis solution cache;
         injected within _SOLUTION_PLAN_BUDGET above the reference docs,
         because they are about this project and the docs are generic.
     scope:
@@ -842,10 +853,10 @@ def build_code_prompt(
         build_plan_prompt; the coding phase needs it most, because it is the
         phase that would otherwise emit a duplicate migration.
     retrieved_chunks:
-        Qdrant chunks of the vendored corpus (Phase 8); injected within
+        Qdrant chunks of the vendored corpus; injected within
         _QDRANT_CODE_BUDGET, minus passages the catalog section already holds.
     recalled_failures:
-        Older failed attempts of this issue from episodic memory (Phase 8);
+        Older failed attempts of this issue from episodic memory;
         injected within _EPISODE_CODE_BUDGET, last before the instructions,
         where the model is told to correct itself.
     scope:

@@ -301,7 +301,7 @@ def check_skill_catalog() -> None:
 
 
 def check_vector_memory() -> None:
-    """Phase 8 memory is optional by design: this section warns, never fails."""
+    """memory is optional by design: this section warns, never fails."""
     print("\n── Vector memory (optional) ──")
     from embedding import get_embedder
     from graph.tools import tool_memory_status

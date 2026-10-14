@@ -9,7 +9,7 @@ Design notes
   supplies the full initial state at runtime.
 
 • ``messages`` deliberately does NOT use LangGraph's ``add_messages`` reducer.
-  ConversationStore (Phase 1) is the source of truth for the per-issue
+  ConversationStore is the source of truth for the per-issue
   history: every node that touches the conversation calls the store and
   returns the *complete* updated list.  Plain last-write-wins replacement is
   therefore the correct merge semantic — an append-reducer would duplicate
@@ -21,7 +21,7 @@ Design notes
   sends unapplied responses directly to generation feedback or exhaustion,
   before stack detection and without a fabricated test-layer verdict.
 
-• ``run_phpunit`` (Phase 4) is stored next to the descriptive ``stack`` label
+• ``run_phpunit`` is stored next to the descriptive ``stack`` label
   because the two answer different questions.  ``stack`` says what the
   repository *is*; ``run_phpunit`` says whether the backend layer runs for
   this change.  A frontend-only repository has no composer.json, so forcing
@@ -31,7 +31,7 @@ Design notes
   the files the change touched, not the mere presence of .vue files, so a
   backend change in a Vue repository never pays for two Node containers.
 
-• The Phase 5 flags follow the same "descriptive label vs. routing gate"
+• flags follow the same "descriptive label vs. routing gate"
   split.  ``is_laravel`` says what the repository *is*; ``run_openapi`` says
   whether the OpenAPI layer applies to *this attempt* — it needs a Laravel
   app, a routes/api.php, and a code change that actually touched the API
@@ -69,13 +69,13 @@ class IssueState(TypedDict, total=False):
     # ── Conversation ───────────────────────────────────────────────────────
     messages: list[dict]               # growing per-issue history (from ConversationStore)
 
-    # ── Stack detection (Phase 4) ──────────────────────────────────────────
+    # ── Stack detection ──────────────────────────────────────────
     has_vue_files: bool                # True if the workspace contains .vue files
     stack: str                         # "php" | "vue" | "fullstack" | "unknown"
     run_phpunit: bool                  # PHP layer applies to this change (never for "vue")
     run_frontend: bool                 # Vitest + Playwright apply to this change
 
-    # ── Laravel detection / bootstrap (Phase 5) ────────────────────────────
+    # ── Laravel detection / bootstrap ────────────────────────────
     is_laravel: bool                   # repository contains artisan
     bootstrapped: bool                 # True when this run scaffolded the skeleton
     has_api_routes: bool               # routes/api.php exists
@@ -89,7 +89,7 @@ class IssueState(TypedDict, total=False):
     test_output: str                   # last PHPUnit output
     test_passed: bool
 
-    # ── Provider attribution (Phase 7) ─────────────────────────────────────
+    # ── Provider attribution ─────────────────────────────────────
     # Who produced the code that is being tested / merged. Recorded by
     # node_code from the coder that actually answered, because the chain head
     # moves during a run (escalation, API cascade) and would misattribute the
@@ -98,12 +98,12 @@ class IssueState(TypedDict, total=False):
     coder_model: str                   # e.g. "claude-sonnet-4-6"
     coder_billing: str                 # "consumer subscription" | "platform API" | "local model"
 
-    # ── OpenAPI layer results (Phase 5) ────────────────────────────────────
+    # ── OpenAPI layer results ────────────────────────────────────
     openapi_passed: bool
     openapi_output: str
     openapi_paths: list[str]           # paths present in the exported document
 
-    # ── Frontend test results (Phase 4) ────────────────────────────────────
+    # ── Frontend test results ────────────────────────────────────
     vitest_passed: bool
     vitest_output: str
     playwright_passed: bool
@@ -116,7 +116,7 @@ class IssueState(TypedDict, total=False):
     fixture_request: dict | None       # set only by node_playwright_test
     dependency_status: str             # "" | "paused" | "ineligible" | "error"
 
-    # ── Hierarchical vector memory (Phase 8) ───────────────────────────────
+    # ── Hierarchical vector memory ───────────────────────────────
     # How much memory reached the prompts — reported in the MR body so a
     # reviewer sees it without reading logs.  All zero when memory is off.
     retrieved_chunks: int              # doc chunks injected into the last prompt

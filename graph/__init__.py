@@ -1,10 +1,10 @@
 """
-graph – LangGraph pipeline for the AI Developer orchestrator (Phase 2),
-extended with the layered frontend test pipeline in Phase 4.
+graph – LangGraph pipeline for the AI Developer orchestrator,
+extended with the layered frontend test pipeline
 
 Modules:
     state    – IssueState TypedDict flowing through every node.
-    tools    – MCP-compatible atomic tool functions (Phase 3 reuses these).
+    tools    – MCP-compatible atomic tool functions.
     nodes    – LangGraph node functions (partial state updates).
     edges    – conditional routing functions, one router per test layer.
     builder  – graph assembly; exposes the compiled ``graph`` object.
@@ -12,5 +12,5 @@ Modules:
 This package intentionally has NO import side effects: importing ``graph``
 alone constructs nothing.  Heavier singletons (LLMClient, ConversationStore)
 are created only when ``graph.nodes`` / ``graph.builder`` are imported, which
-happens after ``load_dotenv()`` in main.py — same lifecycle as Phase 1.
+happens after ``load_dotenv()`` in main.py
 """

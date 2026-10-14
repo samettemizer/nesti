@@ -1,5 +1,5 @@
 """
-vector_store.py – Qdrant-backed long-term document memory (Phase 8).
+vector_store.py – Qdrant-backed long-term document memory.
 
 The whole vendored ``skills/`` corpus is chunked and embedded once by
 ``scripts/index_skills.py`` into one Qdrant collection (default

@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "kind": "reranker_implementation_verification",
+  "reference_plan": ".private/PLAN_NESTI_PYTORCH_DOCUMENTATION.md",
+  "branch": "feat/pytorch-documentation-reranker",
+  "decision": "not approved for activation",
+  "production_code_changed": true,
+  "running_deployment_changed": false,
+  "default_enabled": false,
+  "real_model_inference_performed": true,
+  "live_capture_performed": false,
+  "live_gitlab_canary_performed": false,
+  "model_quality_measurements": null,
+  "deployment_resource_measurements": null,
+  "validated_cpu_dependency_lock": "experiments/requirements-reranker.txt",
+  "model": {
+    "model_id": "cross-encoder/ettin-reranker-150m-v1",
+    "revision": "025501c4e0f9bbeb4c5b198318e0089ff061cc14"
+  },
+  "dependencies": {
+    "torch": "2.7.0+cpu",
+    "sentence-transformers": "5.6.0",
+    "transformers": "5.7.0",
+    "numpy": "2.5.3",
+    "tokenizers": "0.22.2"
+  },
+  "verification": [
+    {
+      "command": "docker build -t nesti-orchestrator:reranker-validation .",
+      "exit_code": 0,
+      "pip_check": "No broken requirements found.",
+      "artifact_preparation": "complete pinned model and license downloaded during controlled build",
+      "image_id": "sha256:beedaf6a135061241737ba2b7a2ed88b4d62642cb8720251b842cfe95adc6e98",
+      "docker_image_inspect_size_bytes": 1144476061
+    },
+    {
+      "runtime": "built nesti-orchestrator:reranker-validation image, Python 3.12.15",
+      "network": "none",
+      "host_source_or_model_mounts": false,
+      "root_filesystem": "read-only",
+      "cpu_limit": 1,
+      "memory_limit": "2g",
+      "commands": ["python test_graph_smoke.py", "python -m unittest test_reranker test_reranker_evaluation"],
+      "graph_checks_passed": 554,
+      "unit_tests_passed": 44,
+      "exit_code": 0
+    },
+    {
+      "runtime": "same self-contained network-isolated built image",
+      "command": "python experiments/reranker_poc.py smoke --model-dir /opt/nesti-reranker --model-id cross-encoder/ettin-reranker-150m-v1 --revision 025501c4e0f9bbeb4c5b198318e0089ff061cc14",
+      "exit_code": 0,
+      "scores": [11.203312873840332, 5.357706546783447, -4.218551158905029],
+      "mars_ranked_first": true,
+      "metadata_unchanged": true,
+      "warm_model_reused": true,
+      "cold_total_seconds": 6.577022477000355,
+      "warm_total_seconds": 0.3360571480006911,
+      "long_input": {
+        "original_query_tokens": 608,
+        "effective_query_tokens": 128,
+        "original_passage_tokens": 13501,
+        "effective_passage_tokens": 381,
+        "pair_tokens": 512,
+        "tokenization_seconds": 0.053689942998971674,
+        "total_seconds": 1.9483207520006545
+      },
+      "quality_or_deployment_sla_evidence": false
+    },
+    {
+      "scenario": "real baked-model spawned worker through graph retrieval into actual plan/code prompts, frozen synthetic candidates",
+      "runtime": "built image; only throwaway smoke script mounted; no network; one CPU; 2g memory",
+      "exit_code": 0,
+      "cold_seconds": 6.302449998998782,
+      "warm_seconds": 0.19217157599996426,
+      "selected": "Mars",
+      "dense_score_preserved": 0.1,
+      "worker_reused": true,
+      "worker_reaped": true,
+      "exact_baseline_dictionary_and_prompt_fallback": true,
+      "plan_and_code_prompts_verified": true,
+      "temporary_profile_removed": true,
+      "quality_or_deployment_sla_evidence": false
+    }
+  ],
+  "fixed_real_smoke_failure": {
+    "cause": "discarded tokenizer overflow windows multiplied during Encoding.merge and pair post-processing",
+    "before_2g_exit_code": 137,
+    "before_4g_long_input_tokenization_seconds": 153.33980948099997,
+    "after_2g_long_input_tokenization_seconds": 0.05678517699925578,
+    "regression_failed_before_and_passed_after": true,
+    "measurement_kind": "individual diagnostic observations, not percentiles"
+  },
+  "observed_warnings": [
+    "ONNX Runtime cannot persist a telemetry identifier on the read-only filesystem; tests passed.",
+    "Multiprocessing reported one semaphore for resource-tracker cleanup after explicit model-worker termination; child reaping was verified."
+  ],
+  "activation_blockers": [
+    "No sanitized real query groups, relevance judgments or frozen development/heldout dataset.",
+    "No comparable Nesti-quality results for 68M, 150M and MiniLM against legacy and expanded dense selection.",
+    "No operator-approved deployment resource ceilings/profile or measured co-located memory headroom.",
+    "No live GitLab/LLM canary or deployment activation was performed."
+  ],
+  "security_reference": "https://osv.dev/vulnerability/GHSA-jhr6-gm9c-rqjv"
+}

@@ -1,4 +1,4 @@
-"""Chunk, embed and index the vendored ``skills/`` corpus into Qdrant (Phase 8).
+"""Chunk, embed and index the vendored ``skills/`` corpus into Qdrant.
 
 Every document listed in ``skills/registry.json`` is read at FULL length —
 ``skill_catalog``'s 7 000-char per-document cap is deliberately not applied,
