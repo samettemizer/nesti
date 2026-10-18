@@ -45,6 +45,71 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_TOKENS = int(os.environ.get("DEFAULT_MAX_TOKENS", "16000"))
 
 
+def _text_chars(content: str | list[dict]) -> int:
+    """Count text characters, not JSON framing or tokenizer units."""
+    if isinstance(content, str):
+        return len(content)
+    return sum(len(part.get("text", "")) for part in content)
+
+
+def _log_request(provider: str, payload: dict, body: bytes | str | None = None) -> None:
+    """Measure the provider-shaped content and the actual prepared HTTP body."""
+    body_bytes = len(body) if isinstance(body, bytes) else "unavailable"
+    if isinstance(body, str):
+        body_bytes = len(body.encode("utf-8"))
+    if "request" in payload:  # Cloud Code's Vertex envelope
+        vertex = payload["request"]
+        system_chars = _text_chars(vertex["systemInstruction"]["parts"])
+        content_chars = sum(_text_chars(msg["parts"]) for msg in vertex["contents"])
+    else:
+        system_chars = _text_chars(payload.get("system", payload.get("instructions", "")))
+        content_chars = 0
+        for msg in payload.get("messages", payload.get("input", [])):
+            chars = _text_chars(msg.get("content", ""))
+            if msg.get("role") == "system":
+                system_chars += chars
+            else:
+                content_chars += chars
+    logger.info(
+        "LLM request provider=%s system_chars=%d content_chars=%d http_body_bytes=%s",
+        provider, system_chars, content_chars, body_bytes,
+    )
+
+
+def _log_usage(provider: str, usage: dict | None) -> None:
+    """Log only observed numeric token counters, never arbitrary response data."""
+    counters = {}
+    if isinstance(usage, dict):
+        for key in (
+            "input_tokens", "output_tokens", "total_tokens",
+            "prompt_tokens", "completion_tokens",
+            "cache_creation_input_tokens", "cache_read_input_tokens",
+            "promptTokenCount", "candidatesTokenCount", "totalTokenCount",
+            "cachedContentTokenCount", "thoughtsTokenCount",
+        ):
+            value = usage.get(key)
+            if type(value) is int and value >= 0:
+                counters[key] = value
+    logger.info("LLM usage provider=%s observed_tokens=%s", provider, counters or "unavailable")
+
+
+def _post_json(provider: str, url: str, **kwargs) -> requests.Response:
+    """Keep Requests' serialization and report its prepared body, without content."""
+    request = None
+    try:
+        response = requests.post(url, **kwargs)
+        request = response.request
+        if not response.ok:
+            _log_usage(provider, None)
+        return response
+    except requests.RequestException as exc:
+        request = exc.request
+        _log_usage(provider, None)
+        raise
+    finally:
+        _log_request(provider, kwargs["json"], getattr(request, "body", None))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Abstract base
 # ─────────────────────────────────────────────────────────────────────────────
@@ -159,14 +224,16 @@ class _OllamaBase(BaseLLMClient):
             "think": False,
         }
         try:
-            resp = requests.post(
-                url,
+            resp = _post_json(
+                self.name, url,
                 json=payload,
                 headers={"Content-Type": "application/json"},
                 timeout=self.timeout,
             )
             resp.raise_for_status()
-            text: str = resp.json()["choices"][0]["message"]["content"]
+            data = resp.json()
+            _log_usage(self.name, data.get("usage"))
+            text: str = data["choices"][0]["message"]["content"]
             logger.debug(
                 "%s responded (%d chars, %d message(s) sent).",
                 self.name,
@@ -269,14 +336,15 @@ class OpenRouterLLMClient(BaseLLMClient):
             payload_messages = [{"role": "system", "content": system_prompt}] + payload_messages
         logger.info("Requesting response from OpenRouter (%s) …", model)
         try:
-            response = requests.post(
-                f"{OPENROUTER_API_BASE}/chat/completions",
+            response = _post_json(
+                self.name, f"{OPENROUTER_API_BASE}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                 json={"model": model, "messages": payload_messages, "max_tokens": _DEFAULT_MAX_TOKENS},
                 timeout=self.timeout,
             )
             response.raise_for_status()
             data = response.json()
+            _log_usage(self.name, data.get("usage"))
             if data.get("error"):
                 raise RuntimeError(f"OpenRouter API error: {data['error']}")
             choice = data["choices"][0]
@@ -351,13 +419,6 @@ class DeepSeekLLMClient(BaseLLMClient):
                 {"role": "system", "content": system_prompt}
             ] + payload_messages
 
-        logger.debug(
-            "%s request – system_prompt: %d chars, %d message(s) in history.",
-            self.name,
-            len(system_prompt),
-            len(payload_messages),
-        )
-
         url = f"{self._API_BASE}/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -370,9 +431,11 @@ class DeepSeekLLMClient(BaseLLMClient):
             "temperature": 0.7,
         }
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout)
+            resp = _post_json(self.name, url, json=payload, headers=headers, timeout=self.timeout)
             resp.raise_for_status()
-            text: str = resp.json()["choices"][0]["message"]["content"]
+            data = resp.json()
+            _log_usage(self.name, data.get("usage"))
+            text: str = data["choices"][0]["message"]["content"]
             logger.debug("DeepSeek responded (%d chars).", len(text))
             return text
         except requests.exceptions.RequestException as exc:
@@ -443,13 +506,25 @@ class AnthropicLLMClient(BaseLLMClient):
         # the shared history.
         msg_list = [m for m in msg_list if m.get("role") != "system"]
 
-        client = anthropic.Anthropic(api_key=self.api_key)
-        message = client.messages.create(
-            model=self.model,
-            max_tokens=_DEFAULT_MAX_TOKENS,
-            system=system_prompt,
-            messages=msg_list,
+        payload = {
+            "model": self.model,
+            "max_tokens": _DEFAULT_MAX_TOKENS,
+            "system": system_prompt,
+            "messages": msg_list,
+        }
+        client = anthropic.Anthropic(
+            api_key=self.api_key,
+            http_client=anthropic.DefaultHttpxClient(event_hooks={
+                "request": [lambda request: _log_request(self.name, payload, request.content)],
+            }),
         )
+        try:
+            message = client.messages.create(**payload)
+        except anthropic.APIError:
+            _log_usage(self.name, None)
+            raise
+        usage = getattr(message, "usage", None)
+        _log_usage(self.name, usage.model_dump() if usage is not None else None)
         return message.content[0].text
 
     def generate_plan(
@@ -611,8 +686,8 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
         msg_list = [
             m for m in self._history(user_prompt, messages) if m.get("role") != "system"
         ]
-        resp = requests.post(
-            self._API_URL,
+        resp = _post_json(
+            self.name, self._API_URL,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {token}",
@@ -631,7 +706,9 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
             raise RuntimeError(
                 f"{self.name} request failed ({resp.status_code}): {resp.text[:300]}"
             )
-        return resp.json()["content"][0]["text"]
+        data = resp.json()
+        _log_usage(self.name, data.get("usage"))
+        return data["content"][0]["text"]
 
 
 class ChatGPTConsumerClient(_ConsumerLLMBase):
@@ -712,8 +789,8 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
             "originator": self._ORIGINATOR,
             "session-id": str(uuid.uuid4()),
         }
-        with requests.post(
-            self._API_URL, headers=headers, json=payload, timeout=self.timeout, stream=True
+        with _post_json(
+            self.name, self._API_URL, headers=headers, json=payload, timeout=self.timeout, stream=True
         ) as resp:
             if not resp.ok:
                 raise RuntimeError(
@@ -725,6 +802,7 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
     def _read_stream(cls, resp: requests.Response) -> str:
         deltas: list[str] = []
         completed = ""
+        usage = None
         # The Codex backend sends this stream without a Content-Type, so
         # requests has no encoding to apply and iter_lines(decode_unicode=True)
         # yields bytes. Split on bytes, then decode each complete line as
@@ -745,10 +823,14 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
             if event_type == "response.output_text.delta":
                 deltas.append(event.get("delta") or "")
             elif event_type == "response.completed":
-                completed = cls._text_from_response(event.get("response") or {})
+                response = event.get("response") or {}
+                completed = cls._text_from_response(response)
+                usage = response.get("usage")
             elif event_type in ("response.failed", "error"):
                 detail = event.get("error") or (event.get("response") or {}).get("error")
+                _log_usage(cls.name, usage)
                 raise RuntimeError(f"ChatGPT Codex stream failed: {detail}")
+        _log_usage(cls.name, usage)
         # Deltas are the normal path; the terminal event is the fallback for a
         # response delivered in one piece.
         text = "".join(deltas) or completed
@@ -823,8 +905,8 @@ class AntigravityConsumerClient(_ConsumerLLMBase):
                 },
             },
         }
-        resp = requests.post(
-            self._API_URL,
+        resp = _post_json(
+            self.name, self._API_URL,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {creds['access_token']}",
@@ -836,7 +918,9 @@ class AntigravityConsumerClient(_ConsumerLLMBase):
             raise RuntimeError(
                 f"{self.name} request failed ({resp.status_code}): {resp.text[:300]}"
             )
-        candidates = ((resp.json() or {}).get("response") or {}).get("candidates") or []
+        data = (resp.json() or {}).get("response") or {}
+        _log_usage(self.name, data.get("usageMetadata"))
+        candidates = data.get("candidates") or []
         if not candidates:
             raise RuntimeError(f"{self.name} returned no candidates.")
         parts = (candidates[0].get("content") or {}).get("parts") or []
@@ -911,8 +995,8 @@ class CopilotConsumerClient(_ConsumerLLMBase):
             msg_list = [{"role": "system", "content": system_prompt}] + msg_list
 
         base = (creds.get("chat_api_base") or provider.DEFAULT_CHAT_API).rstrip("/")
-        resp = requests.post(
-            f"{base}/chat/completions",
+        resp = _post_json(
+            self.name, f"{base}/chat/completions",
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {creds['session_token']}",
@@ -935,7 +1019,9 @@ class CopilotConsumerClient(_ConsumerLLMBase):
             raise RuntimeError(
                 f"{self.name} request failed ({resp.status_code}): {resp.text[:300]}"
             )
-        choices = (resp.json() or {}).get("choices") or []
+        data = resp.json() or {}
+        _log_usage(self.name, data.get("usage"))
+        choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"{self.name} returned no choices.")
         return choices[0]["message"]["content"]

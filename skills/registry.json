@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-09T02:59:33Z",
+  "generated_at": "2026-10-18T15:49:54Z",
   "primevue": {
     "version": "5.0.1",
     "source_pattern": "https://primevue.dev/llms/components/{slug}.md",
@@ -1921,7 +1921,7 @@
           "test coverage"
         ],
         "path": "practices/tdd.md",
-        "chars": 9411
+        "chars": 11601
       }
     ]
   }

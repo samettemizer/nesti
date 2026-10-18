@@ -17,7 +17,11 @@ Nesti writes implementation and tests in one response; the sandbox gates (PHPUni
 1. Derive the acceptance criteria from the issue text. Each criterion is one observable behaviour.
 2. For each criterion, write the test that would fail against the current repository.
 3. Write the minimal implementation that makes that test pass. No speculative features, no behaviour the issue does not name.
-4. On a gate failure (its output is fed back), fix the code, not the test, unless the test asserts something the issue never asked for. Never weaken, skip or delete an assertion to get green.
+4. On a gate failure (its output is fed back), first check the test's interaction, async timing and fixture/API contract. Fix the implementation when it violates the criterion; fix invalid test setup when it does not exercise that criterion. Never weaken, skip or delete a valid assertion to get green.
+
+The retry prompt lists the previous attempt's change set. Re-emit every still-needed file,
+including unchanged component and E2E files when only a test needs repair: omitting a file
+deliberately reverts its change. Keep any required DELETE directives as well.
 
 Work in vertical slices inside the single response: one criterion → its test → its code, then the next criterion. Do not write a block of generic tests for imagined behaviour.
 
@@ -125,6 +129,22 @@ describe('TaskTable', () => {
 
 Bad: asserting PrimeVue's internal DOM shape (`.p-datatable-tbody tr` counts, `p-*` classes). A DataTable with zero rows still renders an empty-message row, so row counts lie. Add your own `data-testid` on elements you render and assert on text instead. Keep specs to behaviour the issue names.
 
+Drive reactive inputs through their public interface, not `wrapper.vm` assignments. For a radio,
+use `await wrapper.get('input[type="radio"][value="done"]').setValue(true)` when that is the
+rendered input, or emit the RadioButton's public `update:modelValue` event with its value.
+A label click on a detached jsdom mount may not activate its input. Import `nextTick` from
+`vue`, not `@vue/test-utils`; import every component passed to `findComponent`. After a manually emitted
+event, `await nextTick()` lets Vue run watchers; `await flushPromises()` settles resulting
+fetches before asserting rows and pagination props. Advance fake timers for debounce delays.
+
+For a paginated API, use a fixed dataset and a URL-aware fetch mock: select the requested
+page from that dataset and keep `meta.total` equal to the full server-filtered count.
+Mounting, changing a filter and sorting can each request page 1 again. A queue of one-shot
+responses followed by a default two-row response silently changes the dataset midway.
+When filtering affects pagination, cover a matching set larger than one page: its total,
+last-page contents, and reset to page 1 after the filter changes. Keep the expected rows
+independent of the component's filtering implementation.
+
 ## Mock only at system boundaries
 
 The real SQLite test database via `RefreshDatabase` is the default, not a mock. Never mock Eloquent models or your own services. Fake only what leaves the process:
@@ -196,6 +216,8 @@ test('user adds a task', async ({ page }) => {
 ```
 
 - The sandbox runs `php artisan migrate --force --seed`, builds assets and serves `http://127.0.0.1:8000`. The database holds exactly what `DatabaseSeeder` creates: never assume rows exist. Seed in `DatabaseSeeder::run()` with factories, or create the data through the UI or API inside the spec.
-- Use precise locators: `getByRole` with a name, `getByTestId`, `getByText(..., { exact: true })`. Avoid CSS selectors on PrimeVue internals.
+- Read the API classes quoted in Existing Repository State: FormRequest validation defines writable fields, Resources define output, and services/controllers define pagination and ordering. A returned field is not necessarily writable. Reuse existing specs' setup routes, verify the created state, and preserve the API's order in expected rows unless the test explicitly changes sorting.
+- Use precise locators: `getByRole('radio', { name: 'Done', exact: true })`, `getByTestId`, `getByText(..., { exact: true })`. A substring name can match both Done and Not done. Avoid CSS selectors on PrimeVue internals.
 - Rely on `expect(...).toBeVisible()` auto-waiting; never fixed sleeps.
+- Register `page.waitForResponse` before the action that triggers it, then await the saved promise.
 - One flow per test, named after the user-visible outcome.

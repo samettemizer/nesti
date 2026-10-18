@@ -58,6 +58,7 @@ Context budget strategy
 
 import math
 import os
+from pathlib import Path
 
 from issue_scope import SCOPES, documentation_request
 from skill_loader import Skill, format_skills_for_prompt
@@ -84,6 +85,9 @@ _PRIMEVUE_MAJOR: str = "5"
 # ── Project context (read once at import; stable across the process lifetime) ──
 _GITLAB_PROJECT: str = os.environ.get("GITLAB_PROJECT_PATH", "the project")
 _DEFAULT_BRANCH: str = os.environ.get("GITLAB_DEFAULT_BRANCH", "main")
+_PONYTAIL_FULL = (Path(__file__).parent / "skills" / "ponytail" / "SKILL.md").read_text(
+    encoding="utf-8"
+).strip()
 
 # ── Prompt blocks ──────────────────────────────────────────────────────────────
 # Every system prompt is composed from these blocks for the issue's scope
@@ -168,8 +172,8 @@ on the "{_DEFAULT_BRANCH}" branch.""",
 
 # ── Planning ───────────────────────────────────────────────────────────────────
 _PLAN_COMMON_STANDARDS = """\
-- Identify only the files that need to be created, modified or deleted, each with a clear reason.
-- Flag any ambiguities or risks explicitly.
+- State the changed behaviour, affected files, required tests and constraints concisely.
+- Do not restate the repository inventory, repeat requirements across sections, or include code.
 - If skill documentation is supplied in the prompt, incorporate its guidance into the plan and
   reference the source URL where relevant."""
 
@@ -246,46 +250,37 @@ OUTPUT FORMAT:
 - Do NOT write any code in this step.
 - Do NOT include pleasantries or meta-commentary."""
 
-# The user-prompt plan structure: a backend plan has no frontend section to fill
-# with "none", and a frontend plan no database or API-surface section.
+# Framework-specific detail belongs only where the issue changes it.
 _PLAN_STRUCTURE = {
     "backend": (
-        "Objective – one sentence",
-        'Database changes – migrations (table/columns/indexes), factories, seeders; "none" if not needed',
-        "Backend files to create/modify/delete – path + purpose (model, FormRequest, controller, resource, route)",
-        'API surface – each /api route: method, URI, request shape, response shape; "none" if not needed',
-        "Implementation steps per file (method names, logic, data flow)",
-        "Test cases that must pass (PHPUnit; OpenAPI when /api routes change) – file + test names",
-        "Risks or ambiguities",
+        "Behaviour – the observable change in one sentence",
+        "Files – path + change; name database/schema and API contract changes only when needed",
+        "Tests – file + behaviour asserted (PHPUnit; OpenAPI for changed /api routes)",
+        "Constraints – compatibility, risks, ambiguities, skipped work and checks not performed",
     ),
     "frontend": (
-        "Objective – one sentence",
-        "Frontend files to create/modify/delete – path + which PrimeVue components are used",
-        'Backend used as it is – the existing routes and response shapes the UI calls; "none" if not needed',
-        "Implementation steps per file (props, events, state, data flow)",
-        "Test cases that must pass (Vitest / Playwright) – file + test names, and where the E2E data comes from",
-        "Risks or ambiguities",
+        "Behaviour – the observable change in one sentence",
+        "Files – path + change, PrimeVue components and served entry wiring where needed",
+        "Backend used as it is – only existing routes/response fields this change depends on",
+        "Tests – file + behaviour asserted (Vitest / Playwright), including E2E data source",
+        "Constraints – compatibility, risks, ambiguities, skipped work and checks not performed",
     ),
     "fullstack": (
-        "Objective – one sentence",
-        'Database changes – migrations (table/columns/indexes), factories, seeders; "none" if not needed',
-        "Backend files to create/modify/delete – path + purpose (model, FormRequest, controller, resource, route)",
-        'API surface – each /api route: method, URI, request shape, response shape; "none" if not needed',
-        "Frontend files to create/modify/delete – path + which PrimeVue components are used",
-        "Implementation steps per file (method names, logic, data flow)",
-        "Test cases per layer that must pass (PHPUnit / OpenAPI / Vitest / Playwright) – file + test names",
-        "Risks or ambiguities",
+        "Behaviour – the observable change in one sentence",
+        "Files – path + change; include only affected database, API and frontend contracts",
+        "Tests – file + behaviour asserted in each affected layer (PHPUnit / OpenAPI / Vitest / Playwright)",
+        "Constraints – compatibility, risks, ambiguities, skipped work and checks not performed",
     ),
 }
 
 _SCOPE_DECLARATION = {
     "backend": (
         "SCOPE: backend — or SCOPE: fullstack when the issue cannot be solved without frontend "
-        "changes (say why under Risks)"
+        "changes (say why under Constraints)"
     ),
     "frontend": (
         "SCOPE: frontend — or SCOPE: fullstack when the issue cannot be solved without backend "
-        "changes, e.g. the endpoint the UI calls does not exist yet (say why under Risks)"
+        "changes, e.g. the endpoint the UI calls does not exist yet (say why under Constraints)"
     ),
     "fullstack": (
         "SCOPE: fullstack — or SCOPE: backend / SCOPE: frontend when the plan changes only that side"
@@ -295,10 +290,7 @@ _SCOPE_DECLARATION = {
 # ── Coding ─────────────────────────────────────────────────────────────────────
 _CODING_STANDARDS = """\
 CODING STANDARDS:
-- Match the existing code style of the project.
-- Do not create unnecessary files.
-- Every change ships with tests in its own layer (see TESTING below).
-- If unsure about something, state your assumptions explicitly instead of guessing."""
+- Resolve uncertainty from the supplied repository context; do not invent contracts or fields."""
 
 _BACKEND_STANDARDS = """\
 LARAVEL BACKEND (PHP):
@@ -358,6 +350,9 @@ PRIMEVUE FRONTEND (Vue 3):
   for example, a requested native input type="date" must stay a native date input.
 - Components live in resources/js/components/<Name>.vue; Vitest specs in
   resources/js/components/__tests__/<Name>.test.js; Playwright specs in e2e/<feature>.spec.js.
+- Extend the existing component test suite and reuse its mount helper and plugin setup.
+  A new suite still mounts with the PrimeVue plugin (and the existing Aura preset); importing
+  the component alone does not provide $primevue.config.
 - vite.config.js, vitest.config.js, playwright.config.js and package.json already exist. You
   may ADD an npm dependency to package.json when the task truly needs one; never remove an
   existing dependency, never change the pinned "@playwright/test": "1.50.0", and never rewrite
@@ -366,7 +361,33 @@ PRIMEVUE FRONTEND (Vue 3):
 - In Vitest, assert on rendered text, props and emitted events — never on PrimeVue's
   internal DOM shape. A DataTable with zero rows still renders an empty-message row, so
   expecting findAll('tr') to be empty fails; assert the empty message is shown instead.
-  Keep component specs to behaviour the issue actually names."""
+  Keep component specs to behaviour the issue actually names.
+- Drive Vitest interactions through DOM controls (radio/checkbox: await setValue(true)) or
+  the child component's public update:modelValue event, not assignments to wrapper.vm state.
+  Clicking a detached label in jsdom need not activate its input; use the input or public event.
+  Import nextTick from 'vue' and mount/flushPromises from '@vue/test-utils'; nextTick is NOT
+  exported by @vue/test-utils. Import every component passed to findComponent explicitly.
+  Await mount's initial fetch before interacting; after a manually emitted event, await
+  nextTick(), then flushPromises() for resulting fetches before asserting rows or table props.
+  Advance fake timers for debounced work.
+- For paginated fetch mocks, derive each response from the requested URL's page/search/sort
+  and one fixed dataset; meta.total describes that dataset, not the current page length.
+  Mounting and changing a filter can both fetch page 1: do not exhaust mockResolvedValueOnce
+  pages and silently fall back to unrelated default rows. Test a filtered result spanning
+  two pages, including its total, last-page rows and reset to page 1 after a filter change.
+  Configure that mock before mount and keep it active for every fetch in the test. Example
+  for a page-only API (adapt the envelope and supported search/sort to the existing contract):
+    fetchMock.mockImplementation(async input => {{
+      const page = Number(new URL(input, 'http://localhost').searchParams.get('page') || 1);
+      return {{ ok: true, json: async () => ({{
+        data: dataset.slice((page - 1) * pageSize, page * pageSize),
+        meta: {{ total: dataset.length, per_page: pageSize, current_page: page }}
+      }}) }};
+    }});
+  For locally paginated filtered results, assert visible rows and paginator props, not the
+  last fetch's page number: changing local pages need not send any HTTP request.
+- On failure, check the test's interaction, update timing and mock contract before changing
+  working application code. Repair invalid test setup without weakening the expected behaviour."""
 
 _TEST_PHPUNIT = """\
 - PHPUnit (`php artisan test`) runs whenever the change creates, modifies or deletes PHP, so
@@ -384,6 +405,10 @@ _TEST_FRONTEND_LAYERS = """\
 - Test the integration on the served page: at least one Playwright spec opens it (page.goto('/')
   or the feature's web route) and asserts the feature with real API data. A directly mounted
   component or a mocked API proves nothing about integration.
+- Reuse the existing E2E setup and mutation routes shown in repository tests. A field in a
+  GET response is not necessarily accepted by POST: do not invent writable fields from it.
+  Verify setup responses establish the required state; the repository contract overrides a
+  plan's assumptions. Preserve the API's ordering in expected rows, or explicitly request a sort.
 - The E2E database holds what DatabaseSeeder creates plus any declared fixture. NEVER assume
   other rows exist."""
 
@@ -407,9 +432,11 @@ _TEST_E2E_DATA = {
 }
 
 _TEST_LOCATORS = """\
-- Use precise Playwright locators: getByRole, getByTestId, or getByText(..., { exact: true }).
-  A substring locator such as getByText('Done') matches every cell containing that word and
-  fails Playwright's strict mode with "resolved to N elements"."""
+- Use precise Playwright locators: getByRole('radio', { name: 'Done', exact: true }),
+  getByLabel('Done', { exact: true }), getByTestId, or getByText(..., { exact: true }).
+  Substring names such as 'Done' can also match 'Not done' and fail strict mode.
+- Register page.waitForResponse before the action that sends the request, then await the
+  saved promise. For rendered results, use Playwright's auto-waiting assertions, not sleeps."""
 
 _TEST_SCOPE_NOTE = {
     "backend": """\
@@ -488,7 +515,6 @@ def _task_scope_block(scope: str, documentation: str) -> str:
     """The TASK SCOPE block both system prompts carry right after their role."""
     lines = [
         f"TASK SCOPE: {_SCOPE_SUMMARY[scope]}",
-        "- Change only what the issue needs; every extra file widens the review and the test run.",
     ]
     if _SCOPE_BOUNDARY[scope]:
         lines.append(_SCOPE_BOUNDARY[scope])
@@ -515,8 +541,9 @@ def _planning_system_prompt(scope: str, documentation: str) -> str:
 
     sections = [
         _PLANNING_ROLE[scope],
-        "Your task in this phase is to produce a detailed IMPLEMENTATION PLAN — no code yet.",
+        "Your task in this phase is a concise IMPLEMENTATION PLAN — no code yet.",
         _task_scope_block(scope, documentation),
+        _PONYTAIL_FULL,
     ]
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
@@ -534,7 +561,7 @@ def _coding_system_prompt(scope: str, documentation: str) -> str:
         testing += [_TEST_FRONTEND_LAYERS, _TEST_E2E_DATA[scope], _TEST_LOCATORS]
     testing.append(_TEST_SCOPE_NOTE[scope])
 
-    sections = [_CODING_ROLE[scope], _task_scope_block(scope, documentation)]
+    sections = [_CODING_ROLE[scope], _task_scope_block(scope, documentation), _PONYTAIL_FULL]
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
     sections.append(_CODING_STANDARDS)
@@ -561,19 +588,19 @@ def _get_code_skill_budget() -> int:
     return _CODE_SKILL_CHAR_BUDGET_WHEN_ENABLED if include == "1" else 0
 
 
-def _format_catalog_section(
-    catalog_skills: "list[Skill] | None", char_budget: int, scope: str = "fullstack"
+def format_catalog_for_prompt(
+    skills: "list[Skill] | None", phase: str, scope: str
 ) -> str:
     """
     Render the vendored Laravel/PrimeVue reference corpus as a prompt section.
 
-    Returns an empty string when no catalog skills are supplied or none fit the
-    budget.  The section is headed so it reads before the issue-URL skills, and
-    names only the framework(s) the scope's documents come from.
+    Use the same phase budget for retrieval deduplication and prompt rendering.
+    Returns empty when no catalog skills fit. Unknown phases are caller errors.
     """
-    if not catalog_skills:
+    char_budget = {"plan": _CATALOG_PLAN_BUDGET, "code": _CATALOG_CODE_BUDGET}[phase]
+    if not skills:
         return ""
-    formatted = format_skills_for_prompt(catalog_skills, char_budget=char_budget)
+    formatted = format_skills_for_prompt(skills, char_budget=char_budget)
     if not formatted:
         return ""
     frameworks = {
@@ -611,6 +638,7 @@ def _format_retrieved_section(
     chunks: "list[dict] | None",
     char_budget: int,
     exclude_text: str = "",
+    metrics: dict | None = None,
 ) -> str:
     """
     Render chunks in coherent rerank order, otherwise best dense score first.
@@ -620,6 +648,8 @@ def _format_retrieved_section(
     is spent.  A chunk that does not fit the remaining budget is skipped, never
     truncated.  Returns ``""`` when nothing fits.
     """
+    if metrics is not None:
+        metrics.update(rag_selected=len(chunks or []), rag_rendered=0)
     if not chunks:
         return ""
     model = chunks[0].get("rerank_model")
@@ -650,6 +680,8 @@ def _format_retrieved_section(
             continue
         blocks.append(block)
         used += len(block)
+    if metrics is not None:
+        metrics["rag_rendered"] = len(blocks)
     if not blocks:
         return ""
     return (
@@ -737,6 +769,7 @@ def build_plan_prompt(
     past_solutions: "list[dict] | None" = None,
     scope: str = "fullstack",
     scope_evidence: str = "",
+    metrics: dict | None = None,
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the planning phase.
@@ -773,6 +806,8 @@ def build_plan_prompt(
     scope_evidence:
         Why the issue text got that scope (ScopeDecision.evidence()); shown to
         the planner, which confirms or corrects the scope on line 1 of its plan.
+    metrics:
+        Optional output dict of section character counts and selected/rendered RAG counts.
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
@@ -786,10 +821,10 @@ def build_plan_prompt(
             f"{repo_context.strip()}\n"
         )
 
-    catalog_section = _format_catalog_section(catalog_skills, _CATALOG_PLAN_BUDGET, scope)
+    catalog_section = format_catalog_for_prompt(catalog_skills, "plan", scope)
     solutions_section = _format_solutions_section(past_solutions, _SOLUTION_PLAN_BUDGET)
     retrieved_section = _format_retrieved_section(
-        retrieved_chunks, _QDRANT_PLAN_BUDGET, exclude_text=catalog_section
+        retrieved_chunks, _QDRANT_PLAN_BUDGET, exclude_text=catalog_section, metrics=metrics
     )
 
     skills_section = ""
@@ -803,13 +838,20 @@ def build_plan_prompt(
     )
     scope_note = f"Task scope: {scope}" + (f" ({scope_evidence})" if scope_evidence else "") + "."
 
-    user_prompt = f"""\
+    sections = {
+        "task": f"""\
 ## Task
 GitLab Issue #{issue_id}: {subject}
 
 ### Description
 {description or "(no description provided)"}
-{repo_section}{solutions_section}{catalog_section}{retrieved_section}{skills_section}
+""",
+        "repo": repo_section,
+        "solutions": solutions_section,
+        "catalog": catalog_section,
+        "rag": retrieved_section,
+        "skills": skills_section,
+        "instructions": f"""
 ## Required Plan Structure
 {scope_note}
 Line 1 of the plan, alone: {_SCOPE_DECLARATION[scope]}.
@@ -817,8 +859,13 @@ Then a numbered implementation plan covering:
 {structure}
 
 Write the plan now. No code, no preamble.\
-"""
+""",
+    }
+    user_prompt = "".join(sections.values())
     system_prompt = _planning_system_prompt(scope, documentation_request(subject, description))
+    if metrics is not None:
+        metrics.update({f"{name}_chars": len(text) for name, text in sections.items()})
+        metrics.update(system_chars=len(system_prompt), user_chars=len(user_prompt))
     return system_prompt, user_prompt
 
 
@@ -831,6 +878,7 @@ def build_code_prompt(
     retrieved_chunks: "list[dict] | None" = None,
     recalled_failures: "list[dict] | None" = None,
     scope: str = "fullstack",
+    metrics: dict | None = None,
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the code-generation phase.
@@ -863,6 +911,8 @@ def build_code_prompt(
         The scope of the approved plan (node_plan) — widened by
         node_on_layer_failure when a layer outside it went red.  Composes the
         system prompt and the instructions; anything else means "fullstack".
+    metrics:
+        Optional output dict of section character counts and selected/rendered RAG counts.
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
@@ -876,9 +926,9 @@ def build_code_prompt(
             f"{repo_context.strip()}\n"
         )
 
-    catalog_section = _format_catalog_section(catalog_skills, _CATALOG_CODE_BUDGET, scope)
+    catalog_section = format_catalog_for_prompt(catalog_skills, "code", scope)
     retrieved_section = _format_retrieved_section(
-        retrieved_chunks, _QDRANT_CODE_BUDGET, exclude_text=catalog_section
+        retrieved_chunks, _QDRANT_CODE_BUDGET, exclude_text=catalog_section, metrics=metrics
     )
     episodes_section = _format_episodes_section(recalled_failures, _EPISODE_CODE_BUDGET)
 
@@ -889,16 +939,21 @@ def build_code_prompt(
         if formatted:
             skills_section = f"\n## Skill Documentation\n{formatted}\n"
 
-    user_prompt = f"""\
+    sections = {
+        "task": f"""\
 ## Task
 GitLab Issue #{issue_id}: {subject}
 
 ### Description
 {description or "(no description provided)"}
-{repo_section}
-## Approved Implementation Plan
-{plan.strip()}
-{catalog_section}{retrieved_section}{episodes_section}{skills_section}
+""",
+        "repo": repo_section,
+        "plan": f"\n## Approved Implementation Plan\n{plan.strip()}\n",
+        "catalog": catalog_section,
+        "rag": retrieved_section,
+        "episodes": episodes_section,
+        "skills": skills_section,
+        "instructions": f"""
 ## Instructions
 Implement the approved plan above:
 - Produce every code and test file the plan lists using FILE blocks, and every physical
@@ -906,6 +961,11 @@ Implement the approved plan above:
 - Files must be complete and immediately deployable.
 {_CODE_TEST_INSTRUCTIONS[scope]}
 {_CODE_REPOSITORY_RULE[scope]}\
-"""
+""",
+    }
+    user_prompt = "".join(sections.values())
     system_prompt = _coding_system_prompt(scope, documentation_request(subject, description))
+    if metrics is not None:
+        metrics.update({f"{name}_chars": len(text) for name, text in sections.items()})
+        metrics.update(system_chars=len(system_prompt), user_chars=len(user_prompt))
     return system_prompt, user_prompt

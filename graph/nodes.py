@@ -7,15 +7,10 @@ the running state.
 
 Conversation semantics
 ──────────────────────────────────────────
-Nodes call the same ConversationStore and keep its ordering:
-
-    append(user turn) → LLM call with the updated history → append(assistant turn)
-
-The user turn is appended *before* the LLM call on purpose: llm_client uses
-``messages`` verbatim when it is non-empty (ignoring ``user_prompt``), so the
-current instruction must already be inside the history or the provider would
-never see it on follow-up turns (e.g. the coding phase after planning, or a
-reopened issue with surviving history).
+The stored transcript is diagnostic, not provider input. Each provider call
+gets one compiled current request: issue, plan, current repository, previous
+change set and latest failure. Raw responses are retained and applied intact.
+Planning starts a fresh transcript, even after an interrupted previous run.
 
 Error strategy per node
 ───────────────────────
@@ -92,7 +87,9 @@ from graph.tools import (
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
 from conversation_store import ConversationStore
-from prompt_builder import build_plan_prompt, build_code_prompt, drop_injected_chunks
+from prompt_builder import (
+    build_plan_prompt, build_code_prompt, drop_injected_chunks, format_catalog_for_prompt,
+)
 from layer_output import condense
 from telegram_notifier import notify as telegram_notify
 
@@ -208,7 +205,8 @@ def _select_catalog_skills(
 
 
 def _retrieve_chunks(
-    text: str, catalog_skills: list, stack: str = "", limit: int = _DOC_CHUNK_SEARCH_LIMIT
+    text: str, catalog_skills: list, stack: str = "", limit: int = _DOC_CHUNK_SEARCH_LIMIT,
+    *, phase: str = "plan", scope: str = "fullstack",
 ) -> list[dict]:
     """
     Semantic doc chunks from Qdrant, minus passages the catalog already injected.
@@ -224,7 +222,7 @@ def _retrieve_chunks(
     if not result["success"]:
         logger.warning("Document memory search failed: %s", result["error"])
         return []
-    injected = "\n".join(skill.content for skill in catalog_skills)
+    injected = format_catalog_for_prompt(catalog_skills, phase, scope)
     chunks = drop_injected_chunks(result["result"], injected)[:_DOC_CHUNK_KEEP]
     if chunks:
         logger.info(
@@ -478,7 +476,36 @@ def _quoted_entry_files(
     return sections
 
 
-def _repo_inventory(repo_path: str, scope: str = "fullstack", task_text: str = "") -> str:
+def _api_contract_files(root: Path, routes: str) -> list[tuple[str, str]]:
+    """Follow local API class references without executing PHP or reading dependencies."""
+    files: dict[str, str] = {}
+    sources = [routes]
+    remaining = _MAX_QUOTED_TOTAL_CHARS
+    # shortcut: conventional App namespace only; custom PSR-4/grouped imports need a PHP resolver.
+    for source in sources:
+        for name in re.findall(r"\bApp\\(?:[A-Za-z_]\w*\\)*[A-Za-z_]\w*", source):
+            relative = "app/" + name.removeprefix("App\\").replace("\\", "/") + ".php"
+            path = root / relative
+            if relative in files or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+                continue
+            files[relative] = "php"
+            if remaining <= 0:
+                continue
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    body = handle.read(min(_MAX_QUOTED_FILE_CHARS, remaining) + 1)
+            except (OSError, UnicodeDecodeError):
+                continue
+            if len(body) <= min(_MAX_QUOTED_FILE_CHARS, remaining):
+                remaining -= len(body)
+                sources.append(body)
+    return list(files.items())
+
+
+def _repo_inventory(
+    repo_path: str, scope: str = "fullstack", task_text: str = "",
+    previous_files: list[str] | None = None,
+) -> str:
     """
     Describe what the cloned repository already contains, for the prompts.
 
@@ -492,8 +519,11 @@ def _repo_inventory(repo_path: str, scope: str = "fullstack", task_text: str = "
     Every scope gets the backend listing, route files and default seeder.
     Files named by the issue or plan get complete bodies before fixed entry
     files, so modifying an existing component does not require guessing its
-    implementation. Frontend/fullstack also get the served entry chain,
-    fixture manifest and configs within the same bounded quote section.
+    implementation. Tests importing a named SFC bring their existing mount
+    setup even when the issue names no test. Frontend/fullstack also get the served entry chain,
+    fixture manifest and configs within the same bounded quote section. API
+    class references also supply validation, serialization and pagination
+    contracts; a response field alone does not establish a writable field.
 
     Never raises: an unreadable workspace yields an empty string and the
     prompts are built without the section, exactly as before; one unreadable
@@ -505,7 +535,12 @@ def _repo_inventory(repo_path: str, scope: str = "fullstack", task_text: str = "
             return ""
 
         lines: list[str] = []
-        referenced_files: list[tuple[str, str]] = []
+        referenced_files: list[tuple[str, str]] = [("package.json", "json")] if scope != "backend" else []
+        referenced_files = [
+            (path, Path(path).suffix.lstrip(".")) for path in (previous_files or [])
+        ] + referenced_files
+        api_files: list[tuple[str, str]] = []
+        test_files: list[str] = []
         for relative, cap in _INVENTORY_DIRS:
             directory = root / relative
             if not directory.is_dir():
@@ -519,10 +554,43 @@ def _repo_inventory(repo_path: str, scope: str = "fullstack", task_text: str = "
             for name in names:
                 path = f"{relative}/{name}"
                 basename = name.rsplit("/", 1)[-1]
+                if re.search(r"\.(?:test|spec)\.[cm]?[jt]sx?$", name):
+                    test_files.append(path)
                 pattern = rf"(?<![\w./-])(?:{re.escape(path)}|{re.escape(basename)})(?![\w./-])"
                 if task_text and re.search(pattern, task_text):
                     language = Path(name).suffix.lstrip(".")
                     referenced_files.append((path, language))
+
+        targets = {(root / path).resolve() for path, _ in referenced_files if path.endswith(".vue")}
+        e2e_names = {re.sub(r"(?<!^)(?=[A-Z])", "-", path.stem).lower() for path in targets}
+        # shortcut: relative SFC imports; Vite aliases need a resolver for alias-only suites.
+        for relative in test_files if targets else []:
+            path = root / relative
+            if relative.startswith("e2e/") and path.name.split(".")[0] in e2e_names:
+                referenced_files.append((relative, path.suffix.lstrip(".")))
+                continue
+            if not path.resolve().is_relative_to(root.resolve()):
+                continue
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    body = handle.read(_MAX_QUOTED_FILE_CHARS + 1)
+            except (OSError, UnicodeDecodeError):
+                continue
+            imports = re.findall(r"""from\s*['"](\.[^'"]+\.vue)['"]""", body)
+            if any((path.parent / name).resolve() in targets for name in imports):
+                referenced_files.append((relative, path.suffix.lstrip(".")))
+
+        api_context = task_text
+        if scope == "frontend":
+            for relative, _ in referenced_files:
+                path = root / relative
+                if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+                    continue
+                try:
+                    with path.open(encoding="utf-8") as handle:
+                        api_context += "\n" + handle.read(_MAX_QUOTED_FILE_CHARS)
+                except (OSError, UnicodeDecodeError):
+                    continue
 
         for relative in _INVENTORY_ROUTE_FILES:
             route_file = root / relative
@@ -533,11 +601,33 @@ def _repo_inventory(repo_path: str, scope: str = "fullstack", task_text: str = "
             except OSError as exc:
                 lines.append(f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}).")
                 continue
+            if relative == "routes/api.php":
+                contract_routes = body
+                if (
+                    scope == "frontend" and (targets or "/api/" in task_text)
+                    and not re.search(r"(?:Route::|->)(?:prefix|group)\s*\(", body)
+                ):
+                    # shortcut: literal ungrouped routes; grouped routes keep all contracts.
+                    relevant = [
+                        route for route in re.findall(r"Route::[^;]+;", body)
+                        if any(
+                            re.search(rf"{re.escape('/api/' + uri.strip('/'))}(?![\w-])", api_context)
+                            for uri in re.findall(r"""Route::\w+\(\s*['"]([^'"]+)['"]""", route)
+                        )
+                    ]
+                    aliases = "\n".join(relevant)
+                    imports = []
+                    for name, alias in re.findall(r"use\s+(App\\[\w\\]+)(?:\s+as\s+(\w+))?;", body):
+                        alias = alias or name.rsplit("\\", 1)[-1]
+                        if re.search(rf"\b{re.escape(alias)}::", aliases):
+                            imports.append(f"use {name};")
+                    contract_routes = "\n".join(imports + relevant)
+                api_files = _api_contract_files(root, contract_routes)
             if len(body) > _MAX_ROUTE_FILE_CHARS:
                 body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
             lines.append(f"\nCurrent {relative}:\n```php\n{body}\n```")
 
-        lines += _quoted_entry_files(root, scope, referenced_files)
+        lines += _quoted_entry_files(root, scope, referenced_files + api_files)
 
         if not lines:
             return (
@@ -790,11 +880,12 @@ def node_plan(state: IssueState) -> dict:
         logger.warning("Solution cache lookup failed: %s", past["error"])
     past_solutions = past["result"] if past["success"] else []
     retrieved = _retrieve_chunks(
-        issue_text, catalog_skills, stack=_SCOPE_DOC_STACK.get(decision.scope, "")
+        issue_text, catalog_skills, stack=_SCOPE_DOC_STACK.get(decision.scope, ""),
+        phase="plan", scope=decision.scope,
     )
     if past_solutions or retrieved:
         logger.info(
-            "Memory: %d past solution(s), %d doc chunk(s) injected into the plan prompt.",
+            "Memory: %d past solution(s), %d doc chunk(s) selected for the plan prompt.",
             len(past_solutions),
             len(retrieved),
         )
@@ -803,6 +894,7 @@ def node_plan(state: IssueState) -> dict:
         "past_solutions": len(past_solutions),
     }
 
+    metrics: dict = {}
     system_prompt, user_prompt = build_plan_prompt(
         state["issue"],
         skills=state.get("skills", []),
@@ -812,17 +904,12 @@ def node_plan(state: IssueState) -> dict:
         past_solutions=past_solutions,
         scope=decision.scope,
         scope_evidence=decision.evidence(),
+        metrics=metrics,
     )
-    prior = _store.load(issue_id)
-    if prior:
-        logger.info(
-            "Loaded %d message(s) from conversation history for issue #%s.",
-            len(prior),
-            issue_id,
-        )
-
-    # Record the request first so the provider sees it inside the history.
-    messages = _store.append(issue_id, "user", user_prompt)
+    messages = [{"role": "user", "content": user_prompt}]
+    _store.save(issue_id, messages)
+    memory_counts["retrieved_chunks"] = metrics["rag_rendered"]
+    logger.info("Context plan · issue #%s · %s", issue_id, metrics)
     try:
         plan = _llm.generate_plan(system_prompt, user_prompt, messages=messages)
     except RuntimeError as exc:
@@ -878,7 +965,8 @@ def node_code(state: IssueState) -> dict:
     )
     # Rebuilt every attempt: the previous attempt's own files are part of the
     # repository now, and a retry must see them rather than re-inventing them.
-    repo_context = _repo_inventory(state.get("repo_path", ""), scope, haystack)
+    previous_files = state.get("written_files") or []
+    repo_context = _repo_inventory(state.get("repo_path", ""), scope, haystack, previous_files)
 
     # memory.  A narrow scope filters the doc search from the first
     # attempt.  A fullstack scope falls back to the detected stack, and only
@@ -887,9 +975,10 @@ def node_code(state: IssueState) -> dict:
     # from a Vue issue's first attempt.
     detected = state.get("stack", "") if attempt > 1 else ""
     stack_filter = _SCOPE_DOC_STACK.get(scope) or (detected if detected in ("php", "vue") else "")
-    retrieved = _retrieve_chunks(haystack, catalog_skills, stack=stack_filter)
-    # Attempt N-1 just failed and is verbatim in the history already, so
-    # episodic recall has something older to offer only from attempt 3 on.
+    retrieved = _retrieve_chunks(
+        haystack, catalog_skills, stack=stack_filter, phase="code", scope=scope,
+    )
+    # The latest failure goes into the current request; recall only older episodes.
     recalled: list[dict] = []
     if attempt > 2:
         layer, last_output = _last_failure_output(state)
@@ -912,6 +1001,7 @@ def node_code(state: IssueState) -> dict:
         "recalled_failures": len(recalled),
     }
 
+    metrics: dict = {}
     system_prompt, user_prompt = build_code_prompt(
         state["issue"],
         state.get("plan", ""),
@@ -921,14 +1011,36 @@ def node_code(state: IssueState) -> dict:
         retrieved_chunks=retrieved,
         recalled_failures=recalled,
         scope=scope,
+        metrics=metrics,
     )
+    base_user_chars = len(user_prompt)
+    if previous_files:
+        user_prompt += (
+            "\n\n## Previous attempt's change set\n"
+            + "\n".join(f"- `{path}`" for path in previous_files)
+            + "\nRe-emit every file above that the feature still needs, even if unchanged. "
+            "A test-only correction still needs the component and E2E FILE blocks. "
+            "Omit a path only to deliberately revert that change; retain required DELETE directives."
+        )
+    change_set_chars = len(user_prompt) - base_user_chars
+    feedback = ""
+    if attempt > 1:
+        layer, last_output = _last_failure_output(state)
+        feedback = "\n\n## Latest failure\n" + _store.format_test_failure(last_output, layer)
+        user_prompt += feedback
+    metrics.update(
+        change_set_chars=change_set_chars, latest_failure_chars=len(feedback),
+        user_chars=len(user_prompt),
+    )
+    memory_counts["retrieved_chunks"] = metrics["rag_rendered"]
+    logger.info("Context code · issue #%s · attempt %d · %s", issue_id, attempt, metrics)
     messages = _store.append(issue_id, "user", user_prompt)
 
     try:
         code_response = _llm.generate_code(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            messages=messages,
+            messages=[{"role": "user", "content": user_prompt}],
         )
     except RuntimeError as exc:
         # Every reachable coder failed: exhaust the shared budget so
@@ -1486,12 +1598,9 @@ def node_failure(state: IssueState) -> dict:
 
     tool_issue_set_status(issue_id, "new", note=note)
 
-    # dropped the history after exhausted coding attempts (the issue
-    # is retried fresh); after a planning failure no new turns were persisted
-    # by that run, so the history is kept, matching.
-    if attempts > 0:
-        _store.delete(issue_id)
-        tool_memory_forget_episodes(issue_id)
+    # Every reopened issue starts fresh, including failures before coding.
+    _store.delete(issue_id)
+    tool_memory_forget_episodes(issue_id)
 
     logger.debug("← node_failure (%s)", reason)
     return {"failure_reason": reason}

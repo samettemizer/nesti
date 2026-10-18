@@ -111,10 +111,11 @@ class ConversationStore:
             else:
                 self._memory[key] = payload
             logger.debug(
-                "Saved %d message(s) for issue #%s (%d chars).",
+                "Transcript: %d message(s) for issue #%s; json_chars=%d utf8_bytes=%d.",
                 len(messages),
                 issue_id,
                 len(payload),
+                len(payload.encode("utf-8")),
             )
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("Failed to save history for issue #%s: %s", issue_id, exc)
@@ -138,21 +139,27 @@ class ConversationStore:
         """
         Append corrective feedback for generation rejection or a test-layer failure.
 
-        This is what makes the LLM aware of WHY the previous attempt failed:
-        the corrective turn is added to the shared history so the next
-        generate_code() call sees the prior attempt and its failure reason.
+        The transcript retains feedback for diagnostics; the next request uses
+        the same formatter with the current state's failure, not old history.
 
         ``layer`` names Code generation or the gate that went red (PHPUnit,
         OpenAPI documentation, Vitest, Playwright). All share this method and
         its bounded feedback output.
         """
-        content = (
+        return self.append(issue_id, "user", self.format_test_failure(test_output, layer))
+
+    @staticmethod
+    def format_test_failure(test_output: str, layer: str = "PHPUnit") -> str:
+        """Build bounded corrective evidence for both transcript and working context."""
+        return (
             f"The {layer} layer FAILED for the code you generated.\n"
             "Test output:\n"
             "---\n"
             f"{condense(test_output, _TEST_FAILURE_OUTPUT_LIMIT)}\n"
             "---\n"
-            "Analyse the failure and correct the implementation. Output the "
+            "Diagnose the failure against the repository contract: check test interactions, "
+            "async timing and mock data as well as application logic. Correct the implementation "
+            "or invalid test setup without weakening the required behaviour. Output the "
             "COMPLETE set of files for this change using the FILE format, "
             "including the files that were already correct: any file you wrote "
             "before and now omit is reverted — a new file is deleted, an "
@@ -160,7 +167,6 @@ class ConversationStore:
             "path for a file you are only editing — renaming a migration "
             "leaves the old table behind and breaks the next attempt."
         )
-        return self.append(issue_id, "user", content)
 
     def delete(self, issue_id: int) -> None:
         """Remove the conversation. Called after a successful MR or permanent failure."""

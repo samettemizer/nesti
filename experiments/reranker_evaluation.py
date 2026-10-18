@@ -19,9 +19,8 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from prompt_builder import (
-    _CATALOG_CODE_BUDGET, _CATALOG_PLAN_BUDGET,
     _QDRANT_CODE_BUDGET, _QDRANT_PLAN_BUDGET,
-    _format_catalog_section, _format_retrieved_section, chunk_body, drop_injected_chunks,
+    format_catalog_for_prompt, _format_retrieved_section, chunk_body, drop_injected_chunks,
 )
 from skill_loader import Skill
 import reranker
@@ -124,8 +123,10 @@ def _validate_record(record: dict) -> None:
     for skill in skills:
         _require(isinstance(skill, dict) and all(isinstance(skill.get(key), str) for key in ("url", "title", "content")), qid, "invalid catalog skill")
     _require(record["catalog_text"] == "\n".join(skill["content"] for skill in skills), qid, "catalog_text mismatch")
-    budget = _CATALOG_PLAN_BUDGET if record["phase"] == "plan" else _CATALOG_CODE_BUDGET
-    rendered = _format_catalog_section([Skill(url=s["url"], title=s["title"], content=s["content"]) for s in skills], budget, record["scope"])
+    rendered = format_catalog_for_prompt(
+        [Skill(url=s["url"], title=s["title"], content=s["content"]) for s in skills],
+        record["phase"], record["scope"],
+    )
     _require(record["rendered_catalog"] == rendered, qid, "rendered catalog mismatch")
     keys = set()
     for field, limit in (("baseline_candidates", 8), ("expanded_candidates", 20)):
@@ -251,8 +252,8 @@ def _pack(candidates: list[dict], budget: int, exclude: str, preserve_order: boo
 
 
 def _quality(record: dict, scores: list[float]) -> dict:
-    expanded = drop_injected_chunks(record["expanded_candidates"], record["catalog_text"])
-    baseline = drop_injected_chunks(record["baseline_candidates"], record["catalog_text"])[:6]
+    expanded = drop_injected_chunks(record["expanded_candidates"], record["rendered_catalog"])
+    baseline = drop_injected_chunks(record["baseline_candidates"], record["rendered_catalog"])[:6]
     if len(scores) != len(expanded) or not all(_finite(score) for score in scores):
         raise ValueError(f"query {record['query_id']}: invalid scoring result")
     rank = lambda values: [expanded[index] for index in sorted(range(len(expanded)), key=lambda i: values[i], reverse=True)]
@@ -265,7 +266,7 @@ def _quality(record: dict, scores: list[float]) -> dict:
     # End-to-end policies share an ideal pool, including baseline-only positions.
     universe = list(expanded)
     remaining = Counter(candidate_key(c) for c in expanded)
-    for candidate in drop_injected_chunks(record["baseline_candidates"], record["catalog_text"]):
+    for candidate in drop_injected_chunks(record["baseline_candidates"], record["rendered_catalog"]):
         key = candidate_key(candidate)
         if remaining[key]:
             remaining[key] -= 1
@@ -308,7 +309,7 @@ def _replay(records: list[dict], config: dict, model_dir: str) -> dict:
     from reranker import score_candidates, scoring_details
     options = {key: config[key] for key in ("batch_size", "max_length", "threads")}
     options["model_dir"] = model_dir
-    eligible = [drop_injected_chunks(r["expanded_candidates"], r["catalog_text"]) for r in records]
+    eligible = [drop_injected_chunks(r["expanded_candidates"], r["rendered_catalog"]) for r in records]
     first = next((index for index, candidates in enumerate(eligible) if candidates), None)
     cold = None
     if first is not None:
@@ -326,7 +327,7 @@ def _replay(records: list[dict], config: dict, model_dir: str) -> dict:
             selection_seconds = time.perf_counter() - start - scoring_seconds
             retrieval = record["retrieval_seconds"]
             # Retrieval is frozen capture timing, not a new live end-to-end measurement.
-            e2e = scoring_seconds + selection_seconds + retrieval["baseline"] + (retrieval["expanded"] if drop_injected_chunks(record["baseline_candidates"], record["catalog_text"])[:6] else 0)
+            e2e = scoring_seconds + selection_seconds + retrieval["baseline"] + (retrieval["expanded"] if drop_injected_chunks(record["baseline_candidates"], record["rendered_catalog"])[:6] else 0)
             observation = {"scoring_seconds": scoring_seconds, "selection_formatting_seconds": selection_seconds,
                            "estimated_end_to_end_seconds": e2e, "inference_seconds": details.get("inference_seconds")}
             if replay == 0:

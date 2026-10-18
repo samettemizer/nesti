@@ -99,6 +99,7 @@ def reset_calls(issue_id: int) -> None:
         "bootstrap": [], "layers": [],
         "pushes": [], "mrs": [], "history_at_commit": None, "workspaces": [],
         "plan_prompts": [], "plan_systems": [], "code_prompts": [], "code_systems": [],
+        "plan_messages": [], "code_messages": [],
         "memory_search": [], "memory_similar": [], "memory_remember_solution": [],
         "memory_remember_failure": [], "memory_forget": [], "memory_recall": [],
     })
@@ -271,10 +272,12 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     # LLM fakes (instance attributes shadow bound methods)
     if plan_exc:
         def fail_plan(sp, up, messages=None):
+            calls["plan_messages"].append(messages)
             raise RuntimeError(plan_exc)
         nodes._llm.generate_plan = fail_plan
     else:
         def fake_plan(sp, up, messages=None):
+            calls["plan_messages"].append(messages)
             calls["plan_prompts"].append(up)
             calls["plan_systems"].append(sp)
             return plan_text or "1. Objective: implement Hello\n2. Files: src/Hello.php"
@@ -283,6 +286,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     seq = list(code_responses)
 
     def fake_code(system_prompt, user_prompt, messages=None):
+        calls["code_messages"].append(messages)
         calls["code_prompts"].append(user_prompt)
         calls["code_systems"].append(system_prompt)
         if code_exc_first:
@@ -344,10 +348,18 @@ reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
 check(len(reopen) == 1 and "failed to produce passing tests" in reopen[0][1]
       and "PHPUnit FAILURES!" in reopen[0][1], "issue reopened with failure note + test output")
 check(nodes._store.load(102) == [], "history deleted after exhausted failure")
+check(all(messages == [{"role": "user", "content": prompt}]
+          for messages, prompt in zip(calls["code_messages"], calls["code_prompts"])),
+      "two coding retries send only the compiled current request, not the transcript")
+check(all(prompt.count("## Existing Repository State") == 1
+          and prompt.count("## Latest failure") == 1
+          and "PHPUnit FAILURES!" in prompt for prompt in calls["code_prompts"][1:]),
+      "each retry carries one current repository snapshot and the latest failure")
 check(not os.path.exists(calls["workspaces"][0]), "cleanup ran on failure path")
 
 # ═════ Scenario 3: planning fails → failure without any coding ═════
 print("\n── Scenario 3: planning failure ──")
+nodes._store.save(103, [{"role": "user", "content": "stale unanswered plan"}] * 4)
 f = run(103, docker_outcomes=[True], code_responses=[GOOD_CODE],
         plan_exc="All planning providers exhausted.")
 check(f["plan"] == "" and "Planning failed" in f["failure_reason"], "routed plan → failure")
@@ -357,8 +369,14 @@ check(len(reopen) == 1 and "planning providers failed" in reopen[0][1],
       "reopened with planning note")
 check("All planning providers exhausted." in f["error"], "error field populated")
 check(not os.path.exists(calls["workspaces"][0]), "cleanup ran after plan failure")
-check(len(nodes._store.load(103)) == 1, "history kept (only the plan request turn)")
-nodes._store.delete(103)
+check(nodes._store.load(103) == [], "failed planning clears history before reopening")
+check(len(calls["plan_messages"][0]) == 1
+      and "stale unanswered plan" not in calls["plan_messages"][0][0]["content"],
+      "four unanswered requests collapse to one current planning request")
+f = run(103, docker_outcomes=[True], code_responses=[GOOD_CODE],
+        plan_exc="All planning providers exhausted.")
+check(nodes._store.load(103) == [] and len(calls["plan_messages"][0]) == 1,
+      "a fresh run after planning failure cannot accumulate unanswered prompts")
 
 # ═════ Scenario 4: coder providers exhausted → immediate failure ═════
 print("\n── Scenario 4: coder providers exhausted ──")
@@ -759,9 +777,6 @@ check(not any(section in _code_sys["backend"]
 check(all(section in _code_sys["fullstack"]
           for section in ("DATABASE POLICY", "LARAVEL BACKEND", "PRIMEVUE FRONTEND")),
       "fullstack keeps both standards")
-check("Database changes" not in _plan_user["frontend"] and "Frontend files" in _plan_user["frontend"]
-      and "Frontend files" not in _plan_user["backend"] and "Database changes" in _plan_user["backend"],
-      "the plan structure only asks for the sections of its scope")
 check(all(f"Line 1 of the plan, alone: SCOPE: {s}" in _plan_user[s] for s in SCOPES),
       "the planner is asked to declare the scope on line 1")
 check(all("Documentation is out of scope" in p and "README.md" in p
@@ -904,6 +919,10 @@ check([(e["attempt"], e["layer"]) for e in calls["memory_remember_failure"]]
 check(f["scope"] == "fullstack", "the PHPUnit failure widened the frontend scope")
 check(f["mr_url"] and "### Vitest" not in calls["mrs"][0],
       "the MR body lists only the layers that ran on the merged code")
+check("FAIL  src/components" in calls["code_messages"][1][0]["content"]
+      and "PHPUnit FAILURES!" in calls["code_messages"][2][0]["content"]
+      and "FAIL  src/components" not in calls["code_messages"][2][0]["content"],
+      "a retry replaces the previous failure evidence instead of sending both layers")
 
 
 # Unapplied frontend responses must not masquerade as PHPUnit failures or
@@ -1766,12 +1785,39 @@ try:
 finally:
     shutil.rmtree(git_root, ignore_errors=True)
 
-store_msg = nodes._store.append_test_failure(999, "boom", layer="OpenAPI documentation")[-1]
-check("OpenAPI documentation layer FAILED" in store_msg["content"],
-      "retry feedback names the failing layer")
-check("COMPLETE set of files" in store_msg["content"],
-      "retry feedback demands the complete file set (pruning depends on it)")
-nodes._store.delete(999)
+
+# Current source replaces old answers without changing FILE/DELETE application.
+with tempfile.TemporaryDirectory(prefix="nesti-retry-context-") as root:
+    from pathlib import Path
+    removed = Path(root, "obsolete.js")
+    removed.write_text("remove me\n", encoding="utf-8")
+    bodies = ["first revision\n \t\n", "second revision\n \t\n", "final revision\n \t\n"]
+    responses = [
+        f"### FILE: custom/current.txt\n```text\n{body}```\n### DELETE: obsolete.js\n"
+        for body in bodies
+    ]
+    reset_calls(3100)
+    patch_tools(docker_outcomes=[True], code_responses=responses)
+    state = initial(3100)
+    state.update(repo_path=root, plan="Change the feature, with its tests.")
+    for index, response in enumerate(responses):
+        if index:
+            state["test_output"] = f"failure-{index}"
+        state.update(nodes.node_code(state))
+        check(state["code_response"] == response
+              and state["written_files"] == ["custom/current.txt", "obsolete.js"]
+              and Path(root, "custom/current.txt").read_text() == bodies[index]
+              and not removed.exists(),
+              f"attempt {index + 1} preserves raw response, path set, complete bytes and DELETE")
+    for index in (1, 2):
+        request = calls["code_messages"][index][0]["content"]
+        check(bodies[index - 1] in request and f"failure-{index}" in request
+              and request.count("## Existing Repository State") == 1,
+              f"retry {index} receives latest applied source and failure")
+    check(bodies[0] not in calls["code_messages"][2][0]["content"]
+          and "failure-1" not in calls["code_messages"][2][0]["content"],
+          "second retry excludes obsolete code and failure despite full diagnostic transcript")
+    nodes._store.delete(3100)
 
 # ═════ Scenario 12c: the coder must see what the repository already has ═════
 print("\n── Scenario 12c: _repo_inventory ──")
@@ -2049,12 +2095,86 @@ with tempfile.TemporaryDirectory(prefix="nesti-task-context-") as root:
     inventory = nodes._repo_inventory(root, "frontend", "Update Table.vue")
     check(target_body in inventory and unrelated_body in inventory,
           "an ambiguous basename exposes both real candidates instead of guessing one")
+    existing_test = "import Table from '../public/Table.vue';\nconst mountOptions = { plugins: ['PrimeVue'] };\n"
+    unrelated_test = "import Table from '../admin/Table.vue';\nconst adminOnly = true;\n"
+    put_target("resources/js/components/__tests__/PublicFilters.test.js", existing_test)
+    put_target("resources/js/components/__tests__/AdminFilters.test.js", unrelated_test)
+    e2e_test = "import { test } from '@playwright/test';\nawait page.goto('/table');\n"
+    put_target("e2e/table.spec.js", e2e_test)
+    put_target("package.json", '{"type":"module"}')
+    inventory = nodes._repo_inventory(
+        root, "frontend", "Filter resources/js/components/public/Table.vue")
+    check(existing_test in inventory and unrelated_test not in inventory,
+          "a component target brings its existing test setup even when the issue names no test")
+    check(e2e_test in inventory and '{"type":"module"}' in inventory,
+          "component context includes its conventional E2E setup and JavaScript module contract")
+    put_target("custom/retained.txt", "last valid attempt\n \t\n")
+    inventory = nodes._repo_inventory(root, "frontend", "Update Table.vue", ["custom/retained.txt"])
+    check("last valid attempt\n \t\n" in inventory,
+          "retry includes complete prior changes even outside inventory directories")
     put_target("resources/js/components/public/Table.vue",
                "TARGET_OVERSIZE" + "x" * nodes._MAX_QUOTED_FILE_CHARS)
     inventory = nodes._repo_inventory(
         root, "frontend", "Update resources/js/components/public/Table.vue")
     check("TARGET_OVERSIZE" not in inventory and "body omitted" in inventory,
           "task-target priority never turns an oversized source into a partial rewrite")
+
+with tempfile.TemporaryDirectory(prefix="nesti-api-context-") as root:
+    def put_contract(relative, body):
+        path = Path(root, relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    put_contract("routes/api.php", "<?php\nuse App\\Http\\Controllers\\TaskController;\n")
+    controller = (
+        "<?php\nuse App\\Http\\Requests\\StoreTaskRequest;\n"
+        "use App\\Services\\TaskIndexService;\n"
+        "use App\\Http\\Resources\\TaskResource;\n"
+    )
+    request = "<?php\nreturn ['title' => ['required', 'string']];\n"
+    service = "<?php\nuse App\\Http\\Controllers\\TaskController;\n$query->latest()->orderByDesc('id');\n"
+    resource = "<?php\nreturn ['is_done' => (bool) $this->is_done];\n"
+    put_contract("app/Http/Controllers/TaskController.php", controller)
+    put_contract("app/Http/Requests/StoreTaskRequest.php", request)
+    put_contract("app/Services/TaskIndexService.php", service)
+    put_contract("app/Http/Resources/TaskResource.php", resource)
+    put_contract("app/Services/Unrelated.php", "<?php\nUNRELATED_SECRET;\n")
+    inventory = nodes._repo_inventory(root, "frontend", "Add task status radios")
+    check(all(body in inventory for body in (controller, request, service, resource)),
+          "frontend API context exposes accepted inputs, response fields and actual pagination order")
+    check(inventory.count("Current app/Http/Controllers/TaskController.php (complete)") == 1
+          and "UNRELATED_SECRET" not in inventory,
+          "cyclic API references terminate and unrelated service bodies stay out")
+    put_contract("routes/api.php", (
+        "<?php\nuse App\\Http\\Controllers\\TaskController as Tasks;\n"
+        "use App\\Http\\Controllers\\CurrencyController;\n"
+        "Route::apiResource('tasks',\n Tasks::class);\n"
+        "Route::get('/currency', [CurrencyController::class, 'index']);\n"
+    ))
+    put_contract("app/Http/Controllers/CurrencyController.php", "<?php\nUNRELATED_CURRENCY_BODY;\n")
+    put_contract("resources/js/components/Table.vue",
+                 "<script setup>fetch('/api/tasks');</script><template><p>Task title</p></template>\n")
+    inventory = nodes._repo_inventory(root, "frontend", "Add TitleLength to Table.vue")
+    check(all(body in inventory for body in (controller, request, service, resource))
+          and "UNRELATED_CURRENCY_BODY" not in inventory,
+          "target SFC keeps its multiline aliased API contracts, excludes unrelated route bodies")
+    put_contract("resources/js/components/Table.vue", "<template><p>Local title</p></template>\n")
+    inventory = nodes._repo_inventory(root, "frontend", "Add TitleLength to Table.vue")
+    check(controller not in inventory and "UNRELATED_CURRENCY_BODY" not in inventory
+          and "Route::get('/currency'" in inventory,
+          "local-only frontend target retains route inventory without unrelated API bodies")
+    put_contract("app/Services/TaskIndexService.php",
+                 "<?php\nOVERSIZED_CONTRACT\n" + "x" * nodes._MAX_QUOTED_FILE_CHARS)
+    inventory = nodes._repo_inventory(root, "frontend")
+    check("OVERSIZED_CONTRACT" not in inventory and request in inventory
+          and "body omitted" in inventory,
+          "oversized API source is omitted whole without losing other usable contracts")
+    with tempfile.TemporaryDirectory(prefix="nesti-outside-contract-") as outside:
+        external = Path(outside, "Outside.php")
+        external.write_text("<?php\nOUTSIDE_CONTRACT_SECRET;\n")
+        Path(root, "app/Services/Outside.php").symlink_to(external)
+        put_contract("routes/api.php", "<?php\nuse App\\Services\\Outside;\n")
+        check("OUTSIDE_CONTRACT_SECRET" not in nodes._repo_inventory(root, "frontend"),
+              "API reference discovery never quotes files outside the workspace")
 
 print("\n── Playwright report transport and container lifecycle ──")
 import frontend_runner as fr

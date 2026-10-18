@@ -137,7 +137,7 @@ def capture(args: argparse.Namespace) -> tuple[list[dict], dict]:
     from embedding import get_embedder
     from vector_store import get_document_memory
     from skill_catalog import select_skills
-    from prompt_builder import _format_catalog_section, _CATALOG_PLAN_BUDGET, _CATALOG_CODE_BUDGET
+    from prompt_builder import format_catalog_for_prompt
     from experiments.reranker_evaluation import runtime_provenance
     from reranker import MODEL_REVISIONS
 
@@ -167,12 +167,11 @@ def capture(args: argparse.Namespace) -> tuple[list[dict], dict]:
         expanded_started = time.monotonic()
         expanded = memory.search(text, stack=stack, limit=20)
         expanded_seconds = time.monotonic() - expanded_started
-        budget = _CATALOG_PLAN_BUDGET if row["phase"] == "plan" else _CATALOG_CODE_BUDGET
         frozen.append({
             **row, "scope": scope, "query_text": text, "stack_filter": stack,
             "catalog_skills": [asdict(skill) for skill in skills],
             "catalog_text": "\n".join(skill.content for skill in skills),
-            "rendered_catalog": _format_catalog_section(skills, budget, scope),
+            "rendered_catalog": format_catalog_for_prompt(skills, row["phase"], scope),
             "baseline_candidates": baseline, "expanded_candidates": expanded,
             "judgments": {},
             "retrieval_status": "verified_nonempty" if baseline and expanded else "retrieval_unverified",
