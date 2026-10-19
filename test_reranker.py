@@ -370,7 +370,7 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 reranker.validate_profile(root / "reranker-profile.json")
 
-    def test_minilm_remains_available_to_experiments_only(self):
+    def test_minilm_remains_available_to_evaluation_only(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             model_id = "cross-encoder/ms-marco-MiniLM-L6-v2"

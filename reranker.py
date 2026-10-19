@@ -210,7 +210,7 @@ def _load_model(config: tuple[str, int, int, int]) -> tuple[Any, bool]:
         raise ValueError("reranking requires exactly one raw score per pair")
     tokenizer = model.tokenizer
     if not tokenizer.is_fast:
-        raise ValueError("the experiment requires the artifact's fast tokenizer")
+        raise ValueError("reranking requires the artifact's fast tokenizer")
     # Encode full texts first; truncation is applied to Encoding objects below.
     tokenizer.backend_tokenizer.no_truncation()
     tokenizer.backend_tokenizer.no_padding()

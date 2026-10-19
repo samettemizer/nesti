@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only capture and offline documentation reranker experiments.
+"""Read-only capture and offline evaluation of the documentation reranker.
 
 Capture requires QUERY_PATH.manifest.json with operator attestations
 ``{"poller_stopped": true, "sanitized": true}``. Attempts are one-based.
@@ -138,7 +138,7 @@ def capture(args: argparse.Namespace) -> tuple[list[dict], dict]:
     from vector_store import get_document_memory
     from skill_catalog import select_skills
     from prompt_builder import format_catalog_for_prompt
-    from experiments.reranker_evaluation import runtime_provenance
+    from scripts.reranker_evaluation import runtime_provenance
     from reranker import MODEL_REVISIONS
 
     memory = get_document_memory()
@@ -199,7 +199,7 @@ def capture(args: argparse.Namespace) -> tuple[list[dict], dict]:
 def smoke(args: argparse.Namespace) -> dict:
     """Exercise a complete local artifact with real inference, not mock scores."""
     from copy import deepcopy
-    from experiments.reranker_evaluation import runtime_provenance
+    from scripts.reranker_evaluation import runtime_provenance
     from reranker import score_candidates, scoring_details, validate_artifact
 
     artifact = validate_artifact(args.model_dir, args.model_id, args.revision)
@@ -255,7 +255,7 @@ def _json(value: object) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run one explicit experiment operation; failures exit nonzero without fallback data."""
+    """Run one explicit evaluation operation; failures exit nonzero without fallback data."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     cap = commands.add_parser("capture", help="freeze read-only Qdrant searches; stopped poller required")
@@ -295,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
             extra = _json(manifest)
             summary = {"captured_records": len(rows), "retrieval_unverified": manifest["retrieval_unverified_count"]}
         else:
-            from experiments.reranker_evaluation import evaluate, compare, render_report
+            from scripts.reranker_evaluation import evaluate, compare, render_report
             result = evaluate(args) if args.command == "evaluate" else compare(args)
             content = _json(result)
             extra = render_report(result) if args.command == "compare" else ""
@@ -308,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         # Model/service exceptions may contain private inputs; only validation errors are displayed.
         detail = str(exc) if isinstance(exc, (ValueError, FileNotFoundError)) else type(exc).__name__
-        print(f"reranker experiment failed: {detail}", file=sys.stderr)
+        print(f"reranker evaluation failed: {detail}", file=sys.stderr)
         return 1
 
 

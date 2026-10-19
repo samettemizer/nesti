@@ -34,7 +34,7 @@ def prepare(output: Path, model_id: str, profile_path: Path | None = None) -> di
             raise ValueError("profile must be a JSON object")
         model_id = profile.get("model_id")
     if not isinstance(model_id, str) or model_id not in MODEL_REVISIONS:
-        raise ValueError("model_id must be one of the pinned experiment models")
+        raise ValueError("model_id must be one of the pinned reranker models")
     revision = MODEL_REVISIONS[model_id]
     if profile is not None and profile.get("revision") != revision:
         raise ValueError("profile revision differs from the pinned artifact")

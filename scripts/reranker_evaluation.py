@@ -652,7 +652,7 @@ def compare(args: object) -> dict:
 
 def render_report(result: dict) -> str:
     """Render aggregate, non-content-bearing evidence and the explicit no-activation gate."""
-    lines = ["# Documentation reranker experiment", "", "**Not approved for activation.**", ""]
+    lines = ["# Documentation reranker evaluation", "", "**Not approved for activation.**", ""]
     lines.extend("- " + reason for reason in result["gate"]["reasons"])
     lines.extend(["", "## Dataset and provenance", "", "```json", json.dumps({key: result.get(key) for key in ("hashes", "dataset", "runtime", "resource_ceilings")}, indent=2, sort_keys=True), "```", "", "## Measured configurations", ""])
     for entry in result.get("configurations", {}).values():

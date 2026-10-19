@@ -34,10 +34,14 @@ frontend_runner.py           Vitest + Playwright sandboxes
 gitlab_issues_client.py      issue intake + label lock; gitlab_client.py: repo + MR
 skill_catalog.py             offline corpus selection; skill_loader.py: issue URLs
 embedding.py, vector_store.py, semantic_cache.py   vector memory
+reranker.py                  opt-in CPU rerank of retrieved docs (NESTI_RERANKER_ENABLED);
+                             deps in requirements-reranker.txt (orchestrator image only)
 layer_output.py              condenses sandbox output to its meaningful tail
 telegram_notifier.py         fire-and-forget alerts
 scripts/                     oauth.py (`nesti` CLI), fetch_skills.py, index_skills.py,
-                             preflight.py, seed_live_issues.py, e2e_fixtures.php
+                             preflight.py, seed_live_issues.py, e2e_fixtures.php,
+                             prepare_reranker.py (build-time model artifact),
+                             evaluate_reranker.py + reranker_evaluation.py (offline quality gate)
 skills/, templates/laravel/  vendored doc corpus (primevue/laravel/practices),
                              bootstrap templates
 test_graph_smoke.py          offline regression net (.venv/bin/python test_graph_smoke.py)

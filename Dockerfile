@@ -12,8 +12,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # CPU reranker dependencies are isolated from the dense-only MCP image.
-COPY experiments/requirements-reranker.txt experiments/requirements-reranker.txt
-RUN pip install --no-cache-dir -r experiments/requirements-reranker.txt && pip check
+COPY requirements-reranker.txt .
+RUN pip install --no-cache-dir -r requirements-reranker.txt && pip check
 
 # bake the ~65 MB ONNX embedding model into the image so the first
 # issue of a fresh deployment never stalls on a silent download in node_plan.

@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
-from experiments import reranker_evaluation as evaluation
-from experiments import reranker_poc as cli
+from scripts import reranker_evaluation as evaluation
+from scripts import evaluate_reranker as cli
 from prompt_builder import _format_retrieved_section
 import reranker
 
