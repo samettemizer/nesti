@@ -430,9 +430,9 @@ def _quoted_entry_files(
         (relative, language) for relative, language in _INVENTORY_QUOTED_FILES
         if scope != "backend" or relative == "database/seeders/DatabaseSeeder.php"
     ]
-    files = dict.fromkeys((referenced_files or []) + fixed_files)
+    files = dict((referenced_files or []) + fixed_files)
     entries: list[tuple[str | None, str]] = []
-    for relative, language in files:
+    for relative, language in files.items():
         path = root / relative
         if path.is_symlink():
             entries.append((None, f"\n{relative}: exists, body omitted (symbolic link)."))

@@ -12,6 +12,7 @@ an indexing failure exits without polling GitLab.
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 
@@ -26,14 +27,23 @@ logger = logging.getLogger(__name__)
 _QDRANT_STARTUP_TIMEOUT = 60
 
 
+class _RedactingFormatter(logging.Formatter):
+    """Keep HTTP/Git diagnostics without exposing URL credentials, including tracebacks."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        text = re.sub(r"(https?://)[^/@\s]+:[^/@\s]+@", r"\1[REDACTED]@", text)
+        return re.sub(r"/bot\d+:[^/\s\"']+", "/bot[REDACTED]", text)
+
+
 def _setup_logging() -> None:
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s – %(message)s",
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_RedactingFormatter(
+        "%(asctime)s [%(levelname)s] %(name)s – %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
-        stream=sys.stdout,
-    )
+    ))
+    logging.basicConfig(level=level, handlers=[handler])
 
 
 def _wait_for_qdrant() -> None:

@@ -358,10 +358,11 @@ PRIMEVUE FRONTEND (Vue 3):
   existing dependency, never change the pinned "@playwright/test": "1.50.0", and never rewrite
   the three config files.
 - Tailwind CSS 4 is available for layout utilities.
-- In Vitest, assert on rendered text, props and emitted events — never on PrimeVue's
-  internal DOM shape. A DataTable with zero rows still renders an empty-message row, so
-  expecting findAll('tr') to be empty fails; assert the empty message is shown instead.
-  Keep component specs to behaviour the issue actually names.
+- In Vitest, assert user-visible behaviour through rendered text, interactions and emitted
+  events. Do not pin a library's incidental defaults (null versus undefined, unset props),
+  exact component/column counts or full prop arrays. Remove those brittle assertions when
+  extending an existing test; keep the required behaviour covered. A DataTable with zero rows
+  still renders an empty-message row: assert that message, not an empty list of tr elements.
 - Drive Vitest interactions through DOM controls (radio/checkbox: await setValue(true)) or
   the child component's public update:modelValue event, not assignments to wrapper.vm state.
   Clicking a detached label in jsdom need not activate its input; use the input or public event.
@@ -467,8 +468,11 @@ To physically remove a file, emit one standalone line with no code fence or body
 - DELETE removes the file before tests; an empty FILE body does not delete it.
 - Delete only files whose removal the issue/plan requires. Never delete migrations,
   directories, symlinks or .git metadata.
-- On every retry re-emit the complete set of FILE blocks AND DELETE directives, including
-  files already absent from a previous attempt. An omitted deletion is restored from HEAD."""
+- Every response is the COMPLETE change relative to the original repository, NOT a patch
+  against the previous attempt. Re-emit all still-required FILE blocks and DELETE directives,
+  even when only one test needs correction. Omitted paths are reverted to the original state.
+  Minimal code changes do not mean a partial response; unchanged files within this feature
+  still need their complete bodies. Before answering, check the plan and previous change set."""
 
 _CODE_TEST_INSTRUCTIONS = {
     "backend": """\
@@ -493,13 +497,14 @@ _CODE_REPOSITORY_RULE = {
     "backend": """\
 - Respect "Existing Repository State" above: it lists what the repository ALREADY has.
   Never write a create-table migration for a table listed there — add a separate
-  ALTER-style migration instead. Do not re-emit a file listed there unless the plan
-  changes it, and reuse the existing model, controller, resource and route rather than
-  creating a second copy under a different path.""",
+  ALTER-style migration instead. Do not emit unrelated original files; re-emit files already
+  changed by this feature on every retry. Reuse existing models, controllers, resources and
+  routes rather than creating a second copy under a different path.""",
     "frontend": """\
-- Respect "Existing Repository State" above: it lists what the repository ALREADY has.
-  Do not re-emit a file listed there unless the plan changes it, and reuse the existing
-  components and routes rather than creating a second copy under a different path.""",
+- Respect "Existing Repository State" above: it is the current workspace, INCLUDING the
+  previous attempt's changes, not a new baseline. Do not emit unrelated original files;
+  re-emit files already changed by this feature on every retry. Reuse existing components
+  and routes rather than creating a second copy under a different path.""",
 }
 _CODE_REPOSITORY_RULE["fullstack"] = _CODE_REPOSITORY_RULE["backend"]
 

@@ -162,4 +162,13 @@ with tempfile.TemporaryDirectory() as directory:
           == hashlib.sha256(guide.read_bytes()).hexdigest(),
           "changed documents are replaced with their current hash before polling")
 
+
+_record = logging.LogRecord(
+    "urllib3", logging.DEBUG, __file__, 1,
+    'clone https://oauth2:secret-token@vcs.example/repo.git; POST /bot123:ABC-def/sendMessage', None, None,
+)
+_line = startup._RedactingFormatter("%(message)s").format(_record)
+check("secret-token" not in _line and "ABC-def" not in _line
+      and "https://[REDACTED]@vcs.example" in _line and "/bot[REDACTED]/" in _line,
+      "log lines keep diagnostics while redacting URL credentials and Telegram bot tokens")
 print(f"\n{passed_checks} startup/index checks passed.")

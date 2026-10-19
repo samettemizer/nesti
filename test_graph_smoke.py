@@ -2069,6 +2069,9 @@ with tempfile.TemporaryDirectory(prefix="nesti-inventory-") as root:
           "aggregate quote budget keeps priority complete bodies only")
     check(len("\n\n".join(nodes._quoted_entry_files(Path(root)))) <= nodes._MAX_QUOTED_TOTAL_CHARS,
           "inventory headings and bodies together stay within aggregate budget")
+    put_file("package.json", '{"name": "ONCE_ONLY"}')
+    check(nodes._repo_inventory(root, "frontend").count("ONCE_ONLY") == 1,
+          "a referenced fixed entry file is quoted once")
     original_read = Path.read_text
     def unreadable(path, *args, **kwargs):
         if path == Path(root, "resources/js/app.js"):
