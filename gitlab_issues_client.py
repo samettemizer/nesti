@@ -224,6 +224,22 @@ class GitLabIssuesClient:
     # Public API
     # ------------------------------------------------------------------
 
+    def get_project(self) -> dict:
+        """Fetch the configured project's identity independently from GitLab."""
+        response = self.session.get(self._project_api, timeout=_REQUEST_TIMEOUT)
+        response.raise_for_status()
+        project = response.json()
+        if not isinstance(project, dict) or type(project.get("id")) is not int or project["id"] <= 0:
+            raise RuntimeError("GitLab project response has no positive numeric id")
+        return project
+
+    def list_notes(self, iid: int) -> list[dict]:
+        """Return every raw issue note in deterministic ascending id order."""
+        notes = self._paginate(f"{self._project_api}/issues/{iid}/notes")
+        if any(not isinstance(note, dict) or type(note.get("id")) is not int or note["id"] <= 0 for note in notes):
+            raise RuntimeError("GitLab returned an issue note without a numeric id")
+        return sorted(notes, key=lambda note: note["id"])
+
     def get_issue(self, iid: int) -> dict:
         """Fetch one issue by its project-scoped iid, in intake shape."""
         return self._normalise(self._get_raw(iid))
@@ -485,7 +501,7 @@ class GitLabIssuesClient:
         """
         user_id = self.current_user_id()
         latest: dict | None = None
-        for note in self._paginate(f"{self._project_api}/issues/{iid}/notes"):
+        for note in self.list_notes(iid):
             if note.get("system") or not is_dependency_note(note.get("body") or ""):
                 continue
             if (note.get("author") or {}).get("id") != user_id:
@@ -570,9 +586,10 @@ class GitLabIssuesClient:
 
         Returns the normalised read-back; raises RuntimeError on a non-2xx
         answer or a read-back that lacks the title, description or labels.
+        ``None`` omits labels; ``[]`` explicitly requests and verifies no labels.
         """
         payload: dict = {"title": title, "description": description}
-        if labels:
+        if labels is not None:
             payload["labels"] = ",".join(labels)
         response = self.session.post(
             f"{self._project_api}/issues", json=payload, timeout=_REQUEST_TIMEOUT
@@ -589,7 +606,7 @@ class GitLabIssuesClient:
         missing = [label for label in labels or [] if label not in issue["labels"]]
         if (issue["subject"] != title
                 or _normalise_text(issue["description"]) != _normalise_text(description)
-                or missing):
+                or missing or (labels == [] and issue["labels"] != [])):
             raise RuntimeError(
                 f"Issue #{iid} did not read back as created (missing labels: {missing})"
             )

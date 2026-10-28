@@ -1,8 +1,8 @@
 """
-conversation_store.py – Redis-backed per-issue conversation history.
+conversation_store.py – Redis-backed project/issue conversation history.
 
 Key schema:
-    ai-dev:issue:{issue_id}:messages  →  JSON list of {"role": ..., "content": ...}
+    ai-dev:issue:{namespace}:{issue_id}:messages → JSON list of {"role", "content"}
 
 TTL: CONVERSATION_TTL_DAYS (default 7). Reset on every write so active
 issues never expire mid-flight.
@@ -13,6 +13,7 @@ Resilience:
     (history survives within a single process run, but not across restarts).
     Every individual operation is also wrapped defensively: a Redis hiccup
     mid-run is logged and swallowed rather than crashing the pipeline.
+    Missing configured project identity disables history, including fallback.
 """
 
 import json
@@ -22,20 +23,20 @@ import os
 import redis
 
 from layer_output import condense
+from project_context import project_namespace
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_REDIS_URL = "redis://nesti-redis:6379/0"
 _DEFAULT_TTL_DAYS = 7
 _SOCKET_CONNECT_TIMEOUT = 3  # seconds
-_KEY_PREFIX = "ai-dev:issue:"
 _TEST_FAILURE_OUTPUT_LIMIT = 4000  # chars of *condensed* layer output fed back
 
 
 class ConversationStore:
     """
-    Per-issue conversation history persisted in Redis, with an in-memory
-    fallback when Redis cannot be reached.
+    Project-scoped conversation history persisted in Redis, with an in-memory
+    fallback when Redis cannot be reached and project identity is configured.
 
     The public API always returns/accepts ``list[dict]`` message lists of the
     form ``[{"role": "user" | "assistant", "content": "..."}]`` and never
@@ -45,10 +46,20 @@ class ConversationStore:
     def __init__(self) -> None:
         redis_url = os.environ.get("REDIS_URL", _DEFAULT_REDIS_URL)
         self._ttl_seconds: int = self._resolve_ttl_seconds()
+        try:
+            self.namespace = project_namespace()
+        except ValueError:
+            self.namespace = ""
+        self._key_prefix = f"ai-dev:issue:{self.namespace}:"
+        self._redis = None
+        self._available = False
 
         # Always present so the in-memory path can never hit AttributeError,
         # even if we later flip _available.
         self._memory: dict[str, str] = {}
+        if not self.namespace:
+            logger.info("Conversation history disabled: project identity is missing or invalid.")
+            return
 
         try:
             self._redis = redis.from_url(
@@ -87,6 +98,8 @@ class ConversationStore:
 
     def load(self, issue_id: int) -> list[dict]:
         """Return the stored message list, or [] if no history exists."""
+        if not self.namespace:
+            return []
         key = self._key(issue_id)
         try:
             raw = self._redis.get(key) if self._available else self._memory.get(key)
@@ -103,6 +116,8 @@ class ConversationStore:
 
     def save(self, issue_id: int, messages: list[dict]) -> None:
         """Persist the full message list. Resets TTL on every write."""
+        if not self.namespace:
+            return
         key = self._key(issue_id)
         try:
             payload = json.dumps(messages, ensure_ascii=False)
@@ -122,6 +137,8 @@ class ConversationStore:
 
     def append(self, issue_id: int, role: str, content: str) -> list[dict]:
         """Append one message, persist, and return the updated list."""
+        if not self.namespace:
+            return []
         messages = self.load(issue_id)
         messages.append({"role": role, "content": content})
         self.save(issue_id, messages)
@@ -170,6 +187,8 @@ class ConversationStore:
 
     def delete(self, issue_id: int) -> None:
         """Remove the conversation. Called after a successful MR or permanent failure."""
+        if not self.namespace:
+            return
         key = self._key(issue_id)
         try:
             if self._available:
@@ -185,7 +204,7 @@ class ConversationStore:
     # ------------------------------------------------------------------
 
     def _key(self, issue_id: int) -> str:
-        return f"{_KEY_PREFIX}{issue_id}:messages"
+        return f"{self._key_prefix}{issue_id}:messages"
 
     @staticmethod
     def _resolve_ttl_seconds() -> int:

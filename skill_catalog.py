@@ -70,7 +70,7 @@ def load_registry() -> dict:
 
 
 def catalog_status() -> dict:
-    """Report corpus availability and coarse counts for diagnostics/health checks."""
+    """Report corpus availability, registry generation time and coarse counts."""
     registry = load_registry()
     primevue = registry.get("primevue") if isinstance(registry, dict) else None
     laravel = registry.get("laravel") if isinstance(registry, dict) else None
@@ -83,6 +83,7 @@ def catalog_status() -> dict:
     documents = practices.get("documents")
     return {
         "available": bool(registry),
+        "generated_at": registry.get("generated_at"),
         "components": len(components) if isinstance(components, list) else 0,
         "topics": len(topics) if isinstance(topics, list) else 0,
         "practices": len(documents) if isinstance(documents, list) else 0,

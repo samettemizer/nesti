@@ -103,6 +103,8 @@ class TaskEngine:
             "scope":          "fullstack",
             "code_response":  "",
             "repo_path":      "",
+            "git_root":       "",
+            "project_context": {},
             "branch_name":    "",
             "workspace":      "",
             "messages":       [],

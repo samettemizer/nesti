@@ -203,6 +203,9 @@ class DocumentMemory:
                     "source": str(payload.get("source", "")),
                     "stack": str(payload.get("stack", "")),
                     "heading": str(payload.get("heading", "")),
+                    "version": str(payload.get("version", "")),
+                    "doc_hash": str(payload.get("doc_hash", "")),
+                    "chunk_index": payload.get("chunk_index"),
                     "text": str(payload.get("text", "")),
                     "score": float(point.score),
                 }

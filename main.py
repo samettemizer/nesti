@@ -5,8 +5,10 @@ Usage:
     python main.py            # process one issue and exit
     python main.py --loop     # keep polling until interrupted
 
-When memory is enabled, refresh the skill index before importing the engine;
-an indexing failure exits without polling GitLab.
+When memory is enabled, refresh the skill index and migrate attributable legacy
+solutions before importing the engine. A configured shared project must complete
+safe initialization before any GitLab polling. Loop mode waits and retries failed
+project initialization at the polling interval; single-run mode exits nonzero.
 """
 
 import argparse
@@ -101,6 +103,38 @@ def main() -> None:
     else:
         logger.info("Vector memory disabled; skipping skill indexing.")
 
+
+    if get_embedder().enabled:
+        from semantic_cache import migrate_legacy_solutions
+
+        migration = migrate_legacy_solutions()
+        if not migration["available"]:
+            logger.warning("Legacy solution migration unavailable: %s", migration.get("reason", "unknown"))
+        else:
+            logger.info("Legacy solution migration: %s", migration)
+
+    if os.environ.get("NESTI_PROJECT_PATH", "").strip():
+        while True:
+            try:
+                from project_context import configured_project_root
+                from project_boost import boost_project
+
+                result = boost_project(str(configured_project_root(discover=True)), force=False)
+                if result["status"] == "conflicts":
+                    raise RuntimeError(f"Shared project initialization conflicts: {result}")
+                logger.info("Shared project initialization: %s", result["status"])
+                break
+            except Exception as exc:
+                logger.exception("Shared project initialization failed; refusing to poll GitLab: %s", exc)
+                if not args.loop:
+                    sys.exit(1)
+                logger.warning(
+                    "Shared project initialization pending; GitLab polling disabled. Retrying in %d seconds.",
+                    args.poll_interval,
+                )
+                time.sleep(args.poll_interval)
+    else:
+        logger.info("NESTI_PROJECT_PATH unset; shared-project initialization disabled.")
     from task_engine import TaskEngine
 
     engine = TaskEngine()

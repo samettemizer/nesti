@@ -1,0 +1,21 @@
+# Opt in explicitly: docker-compose -f docker-compose.yml -f docker-compose.project.yml up
+services:
+  nesti-orchestrator:
+    environment:
+      - NESTI_PROJECT_PATH=${NESTI_PROJECT_PATH:?Set the absolute shared Laravel application root}
+    volumes:
+      - type: bind
+        source: ${NESTI_PROJECT_PATH:?Set the absolute shared Laravel application root}
+        target: ${NESTI_PROJECT_PATH:?Set the absolute shared Laravel application root}
+        bind:
+          create_host_path: false
+  nesti-mcp:
+    environment:
+      - NESTI_PROJECT_PATH=${NESTI_PROJECT_PATH:?Set the absolute shared Laravel application root}
+    volumes:
+      - type: bind
+        source: ${NESTI_PROJECT_PATH:?Set the absolute shared Laravel application root}
+        target: ${NESTI_PROJECT_PATH:?Set the absolute shared Laravel application root}
+        read_only: true
+        bind:
+          create_host_path: false

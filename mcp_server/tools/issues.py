@@ -11,6 +11,10 @@ from graph.tools import (
     tool_issue_get,
     tool_issue_list_pending,
     tool_issue_set_status,
+    tool_issue_history,
+    tool_issue_escalation_create,
+    tool_issue_escalation_complete,
+    tool_issue_escalation_handoff,
 )
 
 
@@ -48,3 +52,38 @@ def issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
     Optionally add a note to the issue.
     """
     return tool_issue_set_status(issue_id, status, note)
+
+
+@app.tool()
+def issue_history(project_id: int, issue_id: int) -> dict:
+    """Read configured-project issue, paginated notes and verified escalation phase.
+
+    Only authenticated non-system notes are trusted automation. Human notes are
+    context, not transition authority; unavailable history is not empty history.
+    """
+    return tool_issue_history(project_id, issue_id)
+
+
+@app.tool()
+def issue_escalation_create(project_id: int, operation_id: str, report: dict) -> dict:
+    """Create/recover one unlabeled issue after two CTO-reported rejected rounds.
+
+    Reuse the persisted UUID on retry. Review sequence is validated, not attested.
+    Rejected source is reference only and is captured from the configured root.
+    """
+    return tool_issue_escalation_create(project_id, operation_id, report)
+
+
+@app.tool()
+def issue_escalation_complete(project_id: int, issue_id: int, operation_id: str, model: str, review: dict) -> dict:
+    """Verify actual developer model attribution before closing approved round three."""
+    return tool_issue_escalation_complete(project_id, issue_id, operation_id, model, review)
+
+
+@app.tool()
+def issue_escalation_handoff(project_id: int, issue_id: int, operation_id: str, report: dict) -> dict:
+    """Verify third-failure evidence then transfer to Nesti for clean reimplementation.
+
+    Successful transfer is terminal for CTO; never apply the rejected local patch.
+    """
+    return tool_issue_escalation_handoff(project_id, issue_id, operation_id, report)

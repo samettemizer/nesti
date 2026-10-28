@@ -51,6 +51,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional, Protocol
 from urllib.parse import parse_qs, urlencode, urlparse
 
+# Keep direct-script use working without importing llm_client back into this module.
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import redis
 import requests
 
@@ -1068,8 +1072,8 @@ def fetch_usage(store: TokenStore, name: str, token_data: Dict[str, Any]) -> Dic
 # ---------------------------------------------------------
 
 def print_help() -> None:
-    """Print the container-native provider commands."""
-    print("Nesti Provider CLI")
+    """Print provider and shared-project commands."""
+    print("Nesti CLI")
     print("Commands:")
     print("  /provider                              List consumer and platform providers")
     print("  /provider login <name>                 Log in to a consumer provider")
@@ -1079,6 +1083,8 @@ def print_help() -> None:
     print("  /provider model <name> <model-id>      Persist a model selection (currently: openrouter)")
     print("  /provider model <name> --reset        Restore the environment model setting")
     print("  /usage                                 Show usage/quota for authenticated consumers")
+    print("  /boost                                 Refresh managed OMP rules for NESTI_PROJECT_PATH")
+    print("  /arch [--json]                         View project architecture or print its JSON")
 
 
 def _model_price(value: str | None) -> str:
@@ -1245,13 +1251,46 @@ def _format_usage_line(name: str, usage: Dict[str, Any]) -> str:
 
 
 def main() -> None:
-    """Dispatch provider operations without making inference calls."""
+    """Dispatch project commands before provider-store availability checks."""
     if len(sys.argv) < 2:
         print_help()
         sys.exit(0)
 
     cmd = sys.argv[1]
     args = sys.argv[2:]
+
+    if cmd in ("/boost", "/arch"):
+        if (cmd == "/boost" and args) or (cmd == "/arch" and args not in ([], ["--json"])):
+            print_help()
+            sys.exit(1)
+        try:
+            from dotenv import load_dotenv
+            from project_context import configured_project_root, inspect_project
+
+            load_dotenv()
+            root = str(configured_project_root(discover=cmd == "/boost"))
+            if cmd == "/boost":
+                from project_boost import boost_project
+
+                result = boost_project(root, force=True)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                if result["status"] == "conflicts":
+                    sys.exit(1)
+                print("OMP: use /new or /clear to refresh the project rulebook.")
+            elif args == ["--json"]:
+                from project_architecture import collect_architecture
+
+                print(json.dumps(collect_architecture(root, inspect_project(root)), ensure_ascii=False))
+            else:
+                from architecture_view import serve_architecture
+
+                serve_architecture(root)
+        except KeyboardInterrupt:
+            return
+        except Exception as exc:
+            print(f"Project command failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
 
     # The public catalog needs neither Redis nor a configured API key.
     if cmd == "/provider" and args and args[0] == "models":

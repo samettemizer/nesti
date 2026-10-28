@@ -1147,6 +1147,7 @@ class LLMClient:
         # Merge Request body attribute the work to it, so it must be the
         # provider that actually served the call, not the chain head.
         self._last_planner: BaseLLMClient | None = None
+        self._planner_attribution: dict[str, str] = {}
         self._last_coder: BaseLLMClient | None = None
 
         logger.info(
@@ -1169,6 +1170,8 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         messages: list[dict] | None = None,
+        *,
+        consumer_only: bool = False,
     ) -> str:
         """
         Try planners in cascade order.  Returns the first successful plan.
@@ -1176,16 +1179,25 @@ class LLMClient:
 
         *messages*, when provided, is forwarded verbatim to each provider as the
         conversation history; when None the providers behave single-turn.
+        *consumer_only* forbids local and billed fallback for project discovery.
         """
         last_exc: Exception | None = None
+        self._planner_attribution = {}
 
         for idx, provider in enumerate(self._planners):
+            if consumer_only and provider.billing != "consumer subscription":
+                continue
             if not provider.available:
                 logger.debug("Planner %s skipped – unavailable.", provider.name)
                 continue
             try:
                 result = provider.generate_plan(system_prompt, user_prompt, messages)
                 self._last_planner = provider
+                self._planner_attribution = {
+                    "provider": provider.name,
+                    "model": provider.model or "unknown",
+                    "billing": provider.billing,
+                }
                 if idx > 0:
                     logger.info(
                         "Plan obtained via tier-%d planner: %s", idx, provider.label
@@ -1199,7 +1211,8 @@ class LLMClient:
                 )
                 last_exc = exc
 
-        err = "All planning providers exhausted."
+        err = ("No available consumer subscription completed planning; discovery will not use billed APIs."
+               if consumer_only else "All planning providers exhausted.")
         logger.error(err)
         telegram_notify(f"❌ {err} Issue will be reopened.")
         raise RuntimeError(err) from last_exc
@@ -1371,4 +1384,14 @@ class LLMClient:
             "provider": provider.name,
             "model": provider.model or "unknown",
             "billing": provider.billing,
+        }
+
+    def last_planner_attribution(self) -> dict[str, str]:
+        """Return the actual last planning response's immutable attribution.
+
+        Capture immediately after each response; later model selection changes
+        cannot relabel an earlier discovery or conversion receipt.
+        """
+        return dict(self._planner_attribution) if self._planner_attribution else {
+            "provider": "unknown", "model": "unknown", "billing": "unknown",
         }

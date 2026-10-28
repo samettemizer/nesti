@@ -22,6 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
+# Official Boost bridge runs only against a disposable project copy.
+COPY scripts/boost_bridge.php /opt/nesti/boost_bridge.php
+
 # The orchestrator chowns the mounted workspace back to the host user, so the
 # cloned repo is owned by uid 1000 while this container runs as root. git then
 # refuses it with "fatal: detected dubious ownership", and because composer

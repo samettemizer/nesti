@@ -38,6 +38,7 @@ Notes
 import json
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -49,6 +50,7 @@ from frontend_runner import FrontendRunner
 from gitlab_client import GitLabClient
 from gitlab_issues_client import GitLabIssuesClient
 from issue_dependencies import FixtureDependencies
+from project_architecture import collect_inventory, inventory_listing
 from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
 from skill_catalog import catalog_status, select_skills
@@ -60,33 +62,13 @@ logger = logging.getLogger(__name__)
 _ISSUE_LIST_LIMIT = 25
 _REQUEST_TIMEOUT = 15  # seconds, matches the clients' own timeouts
 
-# Directories never treated as project source during stack detection.
-# ``node_modules`` is the load-bearing entry: the Vitest sandbox mounts the
-# workspace read-write, so from the second attempt onward the tree contains
-# installed dependencies — and Vue component libraries ship thousands of .vue
-# files.  Without pruning, every retry would report has_vue=True and the walk
-# would crawl the whole dependency tree.
-_STACK_SCAN_PRUNE = frozenset({
-    ".git", "node_modules", "vendor", "dist", "build", ".next", "out",
-    "coverage", "playwright-report", "test-results", ".nuxt", ".output",
-})
 
 # Markers that prove a layer is present even before any source file matches.
 _PHP_PROJECT_FILES = ("composer.json", "composer.lock")
 
-# Laravel / OpenAPI layer markers.  Checked with direct is_file() calls rather
-# than through _scan_workspace: both are fixed, known paths, and the walk must
-# stay exactly as pruned as it is.
 _LARAVEL_MARKER = "artisan"
 _API_ROUTES_FILE = "routes/api.php"
 
-# A written path under one of these makes the OpenAPI layer applicable.  A
-# pure .vue or migration change must not pay for a Scramble export.
-_API_TOUCH_PREFIXES = (
-    "app/Http/Controllers/",
-    "app/Http/Resources/",
-    "app/Http/Requests/",
-)
 
 # Written paths that change what the browser loads: the Vitest and Playwright
 # layers apply to them (in a repository that has Vue).  A pure PHP change in a
@@ -381,45 +363,103 @@ def tool_docker_run_tests(workspace_path: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _scan_workspace(workspace_path: str) -> tuple[list[str], bool]:
-    """
-    Walk *workspace_path* once, pruning generated and vendored trees.
-
-    Returns ``(vue_files, has_php)`` where *vue_files* are repo-relative paths
-    and *has_php* is True when the workspace contains PHP sources or a Composer
-    project file.
-    """
-    root = Path(workspace_path)
-    vue_files: list[str] = []
-    has_php = False
-
-    for dirpath, dirnames, filenames in os.walk(workspace_path):
-        # In-place mutation is what makes os.walk skip these subtrees.
-        dirnames[:] = [d for d in dirnames if d not in _STACK_SCAN_PRUNE]
-        for filename in filenames:
-            if filename.endswith(".vue"):
-                vue_files.append(str(Path(dirpath, filename).relative_to(root)))
-            elif not has_php and (
-                filename.endswith(".php") or filename in _PHP_PROJECT_FILES
-            ):
-                has_php = True
-
-    return sorted(vue_files), has_php
+    """Detect owned Vue/PHP sources using the shared pruned, secret-free listing."""
+    files = inventory_listing(Path(workspace_path))
+    return (
+        [path for path in files if path.endswith(".vue")],
+        any(path.endswith(".php") or path in _PHP_PROJECT_FILES for path in files),
+    )
 
 
-def _touches_api(written_files: "list[str] | None") -> bool:
-    """
-    True when the last code attempt changed the API surface.
+def _routing_metadata(inventory: dict, application_root: str = "") -> dict:
+    """Find literal route registrations without executing PHP; uncertainty stays explicit."""
+    files = inventory["files"]
+    roots = [
+        item["path"].rstrip("/") for item in inventory["psr4"]
+        if item["resolved"] and not item["dev"]
+    ]
+    if not roots:
+        roots = [(Path(application_root) / "app").as_posix()]
+    routes: dict[str, set[str]] = {}
+    registrations: set[str] = set()
+    unresolved: set[str] = set()
+    for path, kind in (("routes/api.php", "api"), ("routes/web.php", "web")):
+        path = (Path(application_root) / path).as_posix()
+        if path in files:
+            routes[path] = {kind}
+    for path, entry in files.items():
+        if not path.endswith(".php"):
+            continue
+        body = entry["content"]
+        if not re.search(r"withRouting\s*\(|loadRoutesFrom\s*\(|Route::|->group\s*\(", body):
+            continue
+        registrations.add(path)
+        if "Route::" in body:
+            kinds = routes.setdefault(path, set())
+            if re.search(r"""(?:prefix|middleware)\s*\(\s*['"]api['"]|['"]/api(?:/|['"])""", body):
+                kinds.add("api")
+            if re.search(r"\b(?:Route::view|view)\s*\(", body):
+                kinds.add("web")
+            if not kinds:
+                kinds.add("unknown")
+        found = False
+        for match in re.finditer(
+            r"""(?:(?P<base>base_path|resource_path|app_path)\s*\(\s*|(?P<directory>__DIR__)\s*\.\s*)?['"](?P<path>[^'"]+\.php)['"]""",
+            body,
+        ):
+            literal = match["path"]
+            if match["base"]:
+                prefix = {"base_path": "", "resource_path": "resources", "app_path": "app"}[match["base"]]
+                candidate = Path(application_root) / prefix / literal.lstrip("/")
+            elif match["directory"]:
+                candidate = Path(path).parent / literal.lstrip("/")
+            elif literal.startswith("/"):
+                unresolved.add(path)
+                continue
+            else:
+                candidate = Path(application_root) / literal
+            relative = os.path.normpath(candidate.as_posix()).replace("\\", "/")
+            if relative.startswith("../") or relative not in files:
+                unresolved.add(path)
+                continue
+            context = body[max(body.rfind(";", 0, match.start()), 0):match.start()]
+            kind = "unknown"
+            if re.search(r"""\bapi\s*:|(?:prefix|middleware)\s*\(\s*['"]api['"]""", context):
+                kind = "api"
+            elif re.search(r"""\bweb\s*:|middleware\s*\(\s*['"]web['"]""", context):
+                kind = "web"
+            routes.setdefault(relative, set()).add(kind)
+            found = True
+        if (
+            not found and re.search(r"withRouting\s*\(|loadRoutesFrom\s*\(|->group\s*\(", body)
+            and path not in routes
+        ) or re.search(r"(?:loadRoutesFrom|->group)\s*\(\s*\$", body):
+            unresolved.add(path)
+    if inventory["unresolved"]:
+        unresolved.add((Path(application_root) / "composer.json").as_posix())
+    if not routes:
+        unresolved.add((Path(application_root) / "bootstrap/app.php").as_posix())
+    return {"roots": roots, "routes": routes, "registrations": registrations, "unresolved": unresolved}
 
-    ``None`` means "caller does not know" — every MCP client and any unit test
-    that omits the argument — and gets the conservative answer, True, so the
-    document is verified rather than silently skipped.  An empty list means
-    "nothing was written", which genuinely cannot touch the API.
-    """
+
+def _touches_api(written_files: list[str] | None, routing: dict) -> bool:
+    """Gate custom HTTP roots and routes, conservatively retaining unresolved PHP changes."""
     if written_files is None:
         return True
     for raw in written_files:
-        path = raw.replace("\\", "/").lstrip("./")
-        if path == _API_ROUTES_FILE or path.startswith(_API_TOUCH_PREFIXES):
+        path = raw.replace("\\", "/").removeprefix("./")
+        parts = set(Path(path).parts)
+        if parts & {"migrations", "factories", "seeders", "tests", "Tests"} or path.endswith("Test.php"):
+            continue
+        kinds = routing["routes"].get(path, set())
+        if kinds & {"api", "unknown"}:
+            return True
+        in_source = any(not root or path.startswith(root + "/") for root in routing["roots"])
+        if in_source and re.search(r"(?:^|/)Http/(?:Controllers|Resources|Requests)/", path):
+            return True
+        if path in routing["unresolved"]:
+            return True
+        if routing["unresolved"] and in_source and path.endswith(".php"):
             return True
     return False
 
@@ -449,7 +489,10 @@ def _change_sides(written_files: "list[str] | None") -> tuple[bool, bool]:
     return backend, frontend
 
 
-def tool_detect_stack(workspace_path: str, written_files: "list[str] | None" = None) -> dict:
+def tool_detect_stack(
+    workspace_path: str, written_files: "list[str] | None" = None, *,
+    application_root: str | None = None, frontend_root: str = "",
+) -> dict:
     """
     Determine which test layers apply to the code in workspace_path.
 
@@ -483,25 +526,65 @@ def tool_detect_stack(workspace_path: str, written_files: "list[str] | None" = N
     run, PHPUnit does, so no change — "unknown" stack, README-only, a JS
     change in a repository without Vue — ever reaches commit untested.
 
-    ``run_openapi`` is the same kind of gate for the Scramble layer and needs
-    all three of: a Laravel app (``artisan``), a registered API surface
-    (``routes/api.php``), and a change that actually touched that surface.
-    Exporting the document for a pure .vue or migration change would only add
-    a slow container to every attempt.
+    ``run_openapi`` follows registered API routes and HTTP classes under
+    Composer roots. Unresolved PHP routing is checked conservatively against
+    the actual route:list API surface, even without routes/api.php.
 
     Omitting *written_files* (MCP callers) yields the conservative answer for
     all three gates: every layer the repository supports runs.
 
-    Detection is automatic; set NESTI_STACK to php / vue / fullstack to pin the
-    *stack* when a repository's layout misleads the scan.  NESTI_STACK never
-    pins the Laravel markers: those are two cheap is_file() checks that cannot
-    be misled.
+    NESTI_STACK pins descriptive stack detection, never the source-based API gate.
     """
     try:
+        if application_root is not None:
+            root = Path(workspace_path).resolve()
+            backend = root / application_root
+            frontend = root / frontend_root if frontend_root else None
+            for directory in (backend, frontend):
+                if directory is not None and (
+                    not directory.is_dir() or directory.absolute() != directory.resolve()
+                    or not directory.resolve().is_relative_to(root)
+                ):
+                    return _err("Configured application directory is absent or unsafe.")
+            if frontend is not None and (
+                frontend.is_relative_to(backend) or backend.is_relative_to(frontend)
+            ):
+                return _err("Backend and frontend directories must not overlap.")
+
+            def relative_changes(directory: Path) -> list[str] | None:
+                if written_files is None:
+                    return None
+                prefix = directory.relative_to(root)
+                return [
+                    Path(raw.replace("\\", "/")).relative_to(prefix).as_posix()
+                    for raw in written_files
+                    if Path(raw.replace("\\", "/")).is_relative_to(prefix)
+                ]
+
+            backend_files = relative_changes(backend)
+            detected = tool_detect_stack(str(backend), backend_files)
+            if not detected["success"]:
+                return detected
+            result = detected["result"]
+            frontend_files = relative_changes(frontend) if frontend is not None else []
+            run_frontend = frontend is not None and (
+                frontend_files is None or bool(frontend_files)
+            )
+            vue_files = _scan_workspace(str(frontend))[0] if frontend is not None else []
+            return _ok({
+                **result,
+                "stack": "fullstack" if frontend is not None else "php",
+                "has_php": True,
+                "has_vue": bool(vue_files),
+                "vue_files": [str(Path(frontend_root) / path) for path in vue_files],
+                "run_frontend": run_frontend,
+                "run_phpunit": backend_files is None or bool(backend_files) or not run_frontend,
+            })
         root = Path(workspace_path)
         is_laravel = (root / _LARAVEL_MARKER).is_file()
-        has_api_routes = (root / _API_ROUTES_FILE).is_file()
-        run_openapi = is_laravel and has_api_routes and _touches_api(written_files)
+        routing = _routing_metadata(collect_inventory(workspace_path))
+        has_api_routes = any(kinds & {"api", "unknown"} for kinds in routing["routes"].values())
+        run_openapi = is_laravel and bool(has_api_routes or routing["unresolved"]) and _touches_api(written_files, routing)
 
         override = os.environ.get("NESTI_STACK", "auto").strip().lower()
         if override in _VALID_STACKS:
@@ -528,6 +611,11 @@ def tool_detect_stack(workspace_path: str, written_files: "list[str] | None" = N
             source = "auto"
 
         touches_backend, touches_frontend = _change_sides(written_files)
+        if written_files is not None and has_vue:
+            for raw in written_files:
+                path = raw.replace("\\", "/").removeprefix("./")
+                if routing["routes"].get(path, set()) & {"web", "unknown"} or path in routing["unresolved"]:
+                    touches_backend = touches_frontend = True
         run_frontend = stack == "vue" or (has_vue and touches_frontend)
         run_phpunit = stack != "vue" and (touches_backend or not run_frontend)
 
@@ -644,8 +732,7 @@ def _append_gitignore(repo_path: str) -> list[str]:
 
 
 def tool_laravel_bootstrap(repo_path: str) -> dict:
-    """
-    Make *repo_path* a Laravel 13 + Scramble + PrimeVue application.
+    """Scaffold greenfield Laravel apps; preserve the installed stack of existing apps.
 
     result: {"created": bool, "mode": str, "reason": str, "output": str}
 
@@ -657,11 +744,10 @@ def tool_laravel_bootstrap(repo_path: str) -> dict:
       template over the skeleton (Nesti created those files seconds earlier, so
       overwriting is safe), merges package.json and appends .gitignore.
 
-    • existing Laravel app (artisan present) → mode "top-up".  Never overwrites
-      a file the repository already has: installs Scramble only when absent,
-      writes only the missing test-runner configs and the Scramble wiring test,
-      and adds only missing package.json keys.  vite.config.js,
-      resources/js/app.js, resources/views/** and routes/** are never touched.
+    • existing Laravel app (artisan present) → mode "top-up". Install Scramble
+      only when absent and add absent test configs without replacing custom
+      configuration. Backend-only applications receive no frontend scaffolding
+      or dependencies; existing packages, routes, entries and themes stay intact.
 
     • non-Laravel PHP project (composer.json without artisan) → success=False.
       Scaffolding a Laravel skeleton over a foreign application would destroy
@@ -701,17 +787,6 @@ def tool_laravel_bootstrap(repo_path: str) -> dict:
             })
 
         # ── top-up: an existing Laravel application ──────────────────────────
-        vite_config = root / "vite.config.js"
-        if vite_config.is_file():
-            vite_source = vite_config.read_text(encoding="utf-8", errors="replace")
-            if "@vitejs/plugin-vue" not in vite_source:
-                # Generating .vue files a repository cannot compile would burn
-                # every retry on infrastructure the model cannot fix.
-                return _err(
-                    "existing vite.config.js has no @vitejs/plugin-vue — add Vue "
-                    "support to the repository before running frontend issues"
-                )
-
         notes: list[str] = []
         output = ""
         if not _has_scramble(root):
@@ -720,12 +795,16 @@ def tool_laravel_bootstrap(repo_path: str) -> dict:
                 return _err(f"dedoc/scramble installation failed:\n{output}")
             notes.append("installed dedoc/scramble")
 
-        applied = _apply_templates(repo_path, _TOPUP_TEMPLATES, overwrite=False)
+        vue_files, _ = _scan_workspace(repo_path)
+        templates = ["tests/Feature/OpenApiDocumentationTest.php"]
+        if vue_files:
+            for name in _TOPUP_TEMPLATES[:2]:
+                stem = name.removesuffix(".js")
+                if not any((root / (stem + suffix)).exists() for suffix in (".js", ".ts", ".mjs", ".mts", ".cjs", ".cts")):
+                    templates.append(name)
+        applied = _apply_templates(repo_path, tuple(templates), overwrite=False)
         if applied:
             notes.append("added " + ", ".join(applied))
-        package = _merge_package_json(repo_path, overwrite=False)
-        if package:
-            notes.append(f"added {len(package)} package.json key(s)")
         ignored = _append_gitignore(repo_path)
         if ignored:
             notes.append("extended .gitignore")
@@ -1043,7 +1122,7 @@ def tool_memory_search_docs(text: str, stack: str = "", limit: int = 6) -> dict:
     other value searches both stacks and interleaves them rank by rank, so
     the PrimeVue-heavy corpus cannot crowd out the Laravel docs.
     result: [{"doc_title", "doc_url", "doc_path", "source", "stack",
-              "heading", "text", "score"}, ...]; [] when unavailable.
+              "heading", "text", "score", "version", "doc_hash", "chunk_index"}, ...]; [] when unavailable.
     """
     try:
         memory = get_document_memory()
@@ -1057,8 +1136,8 @@ def tool_memory_search_docs(text: str, stack: str = "", limit: int = 6) -> dict:
 
 def tool_memory_find_similar(text: str, limit: int = 2) -> dict:
     """
-    Previously merged issues similar to *text* (Redis solution cache).
-    result: [{"issue_id", "subject", "plan", "mr_url", "stack", "similarity"},
+    MR-opened precedents similar to *text*; merge status is unverified.
+    result: [{"issue_id", "subject", "plan", "mr_url", "stack", "similarity", "created_at"},
              ...] most similar first, above NESTI_SOLUTION_MIN_SCORE.
     """
     try:
@@ -1075,7 +1154,7 @@ def tool_memory_remember_solution(
     issue_id: int, subject: str, description: str, plan: str, stack: str, mr_url: str
 ) -> dict:
     """
-    Store the plan that produced a merged issue in the solution cache.
+    Store the plan that opened an MR, without claiming it has merged.
     result: {"stored": bool} (plus "reason" when not stored).
     """
     try:
@@ -1110,7 +1189,7 @@ def tool_memory_recall_failures(issue_id: int, text: str, attempt: int, limit: i
     Older failed attempts of an issue similar to *text*.  ``attempt`` is the
     attempt about to run; the one that just failed (attempt - 1) is excluded
     because its output is already in the conversation history.
-    result: [{"issue_id", "attempt", "layer", "summary", "similarity"}, ...].
+    result: [{"issue_id", "attempt", "layer", "summary", "similarity", "created_at"}, ...].
     """
     try:
         memory = get_semantic_memory()
@@ -1138,7 +1217,7 @@ def tool_memory_status() -> dict:
     Report both memory tiers.
     result: {"qdrant": {"available", "url", "collection", "points", "model",
                         "dim", "error"},
-             "redis": {"available", "url", "solutions", "episodes", "engine"}}.
+             "redis": {"available", "url", "solutions", "episodes", "engine", "namespace"}}.
     Counts are None, never guessed, when they cannot be read.
     """
     try:
@@ -1183,3 +1262,47 @@ def tool_quota_check() -> dict:
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_quota_check failed: %s", exc)
         return _err(exc)
+
+
+def tool_project_architecture() -> dict:
+    """Read verified configured-project structure and current evidence; never write or infer."""
+    try:
+        from project_context import configured_project_root, inspect_project
+        from project_architecture import collect_architecture
+
+        root = str(configured_project_root())
+        return _ok(collect_architecture(root, inspect_project(root)))
+    except Exception as exc:
+        return _err(exc)
+
+
+def tool_issue_history(project_id: int, issue_id: int) -> dict:
+    """Read project-scoped history with trusted-author and escalation-phase metadata."""
+    from issue_escalations import issue_history
+
+    return issue_history(project_id, issue_id)
+
+
+def tool_issue_escalation_create(project_id: int, operation_id: str, report: dict) -> dict:
+    """Create or recover one verified unlabeled assisted issue after two rejections."""
+    from issue_escalations import issue_escalation_create
+
+    return issue_escalation_create(project_id, operation_id, report)
+
+
+def tool_issue_escalation_complete(
+    project_id: int, issue_id: int, operation_id: str, model: str, review: dict
+) -> dict:
+    """Verify actual developer-model attribution before closing an approved third attempt."""
+    from issue_escalations import issue_escalation_complete
+
+    return issue_escalation_complete(project_id, issue_id, operation_id, model, review)
+
+
+def tool_issue_escalation_handoff(
+    project_id: int, issue_id: int, operation_id: str, report: dict
+) -> dict:
+    """Verify failure evidence then transfer intake to Nesti for clean reimplementation."""
+    from issue_escalations import issue_escalation_handoff
+
+    return issue_escalation_handoff(project_id, issue_id, operation_id, report)

@@ -62,7 +62,10 @@ class IssueState(TypedDict, total=False):
     plan: str                          # planner output
     scope: str                         # "backend" | "frontend" | "fullstack" — prompts only
     code_response: str                 # latest coder output
-    repo_path: str                     # local clone path
+    repo_path: str                     # application root inside the clean clone
+    git_root: str                      # enclosing clone root for branch/commit operations
+    frontend_path: str                 # separate SPA root in clone; empty when absent
+    project_context: dict              # verified shared identity and external rules root
     branch_name: str                   # git branch
     workspace: str                     # tempdir path
 
@@ -78,7 +81,7 @@ class IssueState(TypedDict, total=False):
     # ── Laravel detection / bootstrap ────────────────────────────
     is_laravel: bool                   # repository contains artisan
     bootstrapped: bool                 # True when this run scaffolded the skeleton
-    has_api_routes: bool               # routes/api.php exists
+    has_api_routes: bool               # conventional or discovered API route registrations
     run_openapi: bool                  # OpenAPI layer applies to this attempt
 
     # ── Test / retry state ─────────────────────────────────────────────────

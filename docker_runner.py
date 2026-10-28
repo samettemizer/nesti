@@ -4,8 +4,7 @@ Docker runner – executes generated code inside an isolated sandbox container.
 Responsibilities:
 - Write generated files into a temporary workspace directory.
 - Mount that workspace into a Docker container.
-- Run one of four container recipes — Laravel/PHPUnit tests, OpenAPI (Scramble)
-  export, greenfield bootstrap, or Scramble install — inside the container.
+- Run test/bootstrap recipes or pinned Boost preparation in an isolated copy.
 - Return stdout/stderr and a boolean success flag.
 
 The AI developer never runs code on the host machine directly.
@@ -133,6 +132,15 @@ _SCRAMBLE_INSTALL_COMMAND = [
     ]),
 ]
 
+_BOOST_INSTALL_COMMAND = [
+    "bash", "-lc",
+    " ".join([
+        "set -e;", _CAPTURE_OWNER, _TRAP_OWNER,
+        "composer require --dev laravel/boost:2.10.3 --no-interaction",
+        "--prefer-dist --no-progress --no-scripts --no-plugins",
+    ]),
+]
+
 
 class DockerRunner:
     def __init__(self):
@@ -194,6 +202,28 @@ class DockerRunner:
             repo_path, _SCRAMBLE_INSTALL_COMMAND, self.bootstrap_timeout, "scramble-install"
         )
 
+    def run_boost_install(self, workspace_path: str) -> tuple[bool, str]:
+        """Install pinned official Boost in a disposable, secret-free copy only."""
+        return self._run(
+            workspace_path, _BOOST_INSTALL_COMMAND, self.bootstrap_timeout, "boost-install"
+        )
+
+    def run_boost_bridge(self, workspace_path: str, operation: str) -> tuple[bool, str]:
+        """Render or record official Boost artifacts without network access."""
+        if operation not in {"prepare", "record"}:
+            raise ValueError("Boost bridge operation must be prepare or record.")
+        command = [
+            "bash", "-lc",
+            " ".join([
+                "set -e;", _CAPTURE_OWNER, _TRAP_OWNER,
+                f"php /opt/nesti/boost_bridge.php {operation}",
+            ]),
+        ]
+        return self._run(
+            workspace_path, command, self.timeout, f"boost-{operation}",
+            network_disabled=True,
+        )
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -204,6 +234,8 @@ class DockerRunner:
         command: list[str],
         timeout: int,
         label: str,
+        *,
+        network_disabled: bool = False,
     ) -> tuple[bool, str]:
         """
         Run *command* inside the sandbox image against *workspace_path*.
@@ -211,8 +243,8 @@ class DockerRunner:
         Keeps the detach → ``wait(timeout=…)`` → ``logs()`` →
         ``finally: remove(force=True)`` sequence (Absolute Rule 8): never the
         blocking ``containers.run(remove=True)`` form, which cannot enforce a
-        run-duration timeout. *label* names the recipe in the log messages so
-        the four recipes stay distinguishable. Never raises.
+        run-duration timeout. *label* names the recipe in log messages.
+        Only the offline Boost bridge disables networking. Never raises.
         """
         logger.info("Running %s in Docker sandbox (image: %s) …", label, self.image)
         container = None
@@ -231,6 +263,7 @@ class DockerRunner:
                 stdout=True,
                 stderr=True,
                 detach=True,
+                network_disabled=network_disabled,
             )
             exit_info = container.wait(timeout=timeout)
             output = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
@@ -263,7 +296,10 @@ class DockerRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def write_files(llm_output: str, workspace_path: str) -> tuple[bool, list[str]]:
+    def write_files(
+        llm_output: str, workspace_path: str, *,
+        backend_root: str | None = None, frontend_root: str = "",
+    ) -> tuple[bool, list[str]]:
         """Apply FILE bodies and explicit DELETE directives inside the workspace.
 
         Return whether any operations were accepted and their repo-relative
@@ -271,6 +307,8 @@ class DockerRunner:
         Validate the complete response before mutation; invalid declarations
         raise ValueError. DELETE is idempotent but never removes directories,
         symlinks, Git metadata or migrations.
+        Configured split layouts keep PHP under backend_root and SPA files
+        under frontend_root; an absent frontend is not permission to embed one.
         """
         matches = list(_FILE_CHANGE_PATTERN.finditer(llm_output))
         for header in _FILE_CHANGE_HEADER.finditer(llm_output):
@@ -292,8 +330,30 @@ class DockerRunner:
             path = relative.as_posix()
             if path in operations:
                 raise ValueError(f"Duplicate or conflicting file changes for {path}.")
-            if deleting and relative.parts[:2] == ("database", "migrations"):
+            if deleting and any(
+                relative.parts[index:index + 2] == ("database", "migrations")
+                for index in range(len(relative.parts) - 1)
+            ):
                 raise ValueError(f"Migrations cannot be deleted: {path}.")
+            if backend_root is not None:
+                backend = Path(backend_root)
+                frontend = Path(frontend_root) if frontend_root else None
+                is_frontend = (
+                    relative.suffix.lower() in {
+                        ".vue", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts",
+                        ".jsx", ".tsx", ".css", ".scss", ".sass", ".less", ".html",
+                    }
+                    or relative.name in {"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"}
+                )
+                if is_frontend and (frontend is None or not relative.is_relative_to(frontend)):
+                    raise ValueError(f"SPA files must stay in the configured separate frontend directory: {path}.")
+                if relative.suffix == ".php" and not relative.is_relative_to(backend):
+                    raise ValueError(f"PHP files must stay in the configured backend directory: {path}.")
+                if not deleting and relative.is_relative_to(backend) and re.search(
+                    r"@vite\b|@livewire\b|\bInertia(?:::|\\)|\bLivewire\\|\bcreateApp\s*\(",
+                    match.group("body"),
+                ):
+                    raise ValueError(f"Integrated SPA/Inertia/Livewire frontend is forbidden in the API backend: {path}.")
             target = root
             for part in relative.parts:
                 target /= part

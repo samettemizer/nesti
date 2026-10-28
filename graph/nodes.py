@@ -82,10 +82,14 @@ from graph.tools import (
     tool_memory_search_docs, tool_memory_find_similar, tool_memory_remember_solution,
     tool_memory_remember_failure, tool_memory_recall_failures,
     tool_memory_forget_episodes, tool_issue_pause_for_fixture,
-    _STACK_SCAN_PRUNE,
+    _routing_metadata,
 )
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
+from project_architecture import (
+    collect_inventory, collect_architecture, load_project_rules, format_project_context,
+)
+from project_context import configured_project_root, inspect_project
 from conversation_store import ConversationStore
 from prompt_builder import (
     build_plan_prompt, build_code_prompt, drop_injected_chunks, format_catalog_for_prompt,
@@ -282,14 +286,17 @@ def _committed_paths(root: str, relatives: list[str]) -> set[str]:
     if not relatives:
         return set()
     try:
-        with git.Repo(root) as repo:
+        with git.Repo(root, search_parent_directories=True) as repo:
             if not repo.head.is_valid():
                 return set()
-            listed = repo.git.ls_tree("-r", "-z", "--name-only", "HEAD", "--", *relatives)
+            prefix = Path(root).relative_to(repo.working_tree_dir).as_posix()
+            prefix = "" if prefix == "." else prefix + "/"
+            listed = repo.git.ls_tree("-r", "-z", "--name-only", "HEAD", "--",
+                                      *(prefix + path for path in relatives))
     except (git.InvalidGitRepositoryError, git.NoSuchPathError, git.GitCommandError) as exc:
         logger.debug("No committed baseline for the stale files: %s", exc)
         return set()
-    return {path for path in listed.split("\0") if path}
+    return {path.removeprefix(prefix) for path in listed.split("\0") if path}
 
 
 def _prune_stale_files(
@@ -338,8 +345,9 @@ def _prune_stale_files(
         target = os.path.join(root, normalised)
         if normalised in committed:
             try:
-                with git.Repo(root) as repo:
-                    repo.git.checkout("HEAD", "--", normalised)
+                with git.Repo(root, search_parent_directories=True) as repo:
+                    relative = Path(target).relative_to(repo.working_tree_dir).as_posix()
+                    repo.git.checkout("HEAD", "--", relative)
                 reverted.append(relative)
             except git.GitCommandError as exc:
                 logger.warning("Could not restore stale file %s: %s", relative, exc)
@@ -364,30 +372,6 @@ def _prune_stale_files(
     return reverted
 
 
-# Directories whose contents the coder needs to know about, with the cap on how
-# many entries each contributes. Migrations are listed in full: a duplicate
-# create-table migration is the one mistake that cannot be recovered from.
-# Entries are paths relative to the listed directory, so same-named files in
-# different subdirectories stay distinguishable.
-_INVENTORY_DIRS = (
-    ("database/migrations", 60),
-    ("database/factories", 40),
-    ("database/seeders", 40),
-    ("app/Models", 40),
-    ("app/Http/Controllers", 40),
-    ("app/Http/Resources", 40),
-    ("app/Http/Requests", 40),
-    ("app/Services", 40),
-    ("resources/js/components", 40),
-    ("resources/views", 40),
-    ("tests/Feature", 40),
-    ("e2e", 40),
-)
-
-# Route files are quoted rather than listed: the coder must see which URIs are
-# already registered, not merely that the file exists.
-_INVENTORY_ROUTE_FILES = ("routes/api.php", "routes/web.php")
-_MAX_ROUTE_FILE_CHARS = 1500
 
 # Every scope quotes the default seeder so backend removals can preserve
 # unrelated registrations. Frontend/fullstack also quote the served entry
@@ -412,20 +396,14 @@ _MAX_QUOTED_FILE_CHARS = 24000
 _MAX_QUOTED_TOTAL_CHARS = 48000
 
 
-def _inventory_listing(directory: Path) -> list[str]:
-    """Every file under *directory*, relative to it, pruning dependency trees."""
-    names: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(directory):
-        # In-place mutation is what makes os.walk skip these subtrees.
-        dirnames[:] = [d for d in dirnames if d not in _STACK_SCAN_PRUNE]
-        names += [Path(dirpath, name).relative_to(directory).as_posix() for name in filenames]
-    return sorted(names)
 
 
 def _quoted_entry_files(
-    root: Path, scope: str = "fullstack", referenced_files: list[tuple[str, str]] | None = None
+    root: Path, scope: str = "fullstack", referenced_files: list[tuple[str, str]] | None = None,
+    inventory: dict | None = None,
 ) -> list[str]:
     """Quote complete task targets and entry bodies within one budget, never fragments."""
+    inventory = inventory if inventory is not None else collect_inventory(str(root))
     fixed_files = [
         (relative, language) for relative, language in _INVENTORY_QUOTED_FILES
         if scope != "backend" or relative == "database/seeders/DatabaseSeeder.php"
@@ -434,6 +412,8 @@ def _quoted_entry_files(
     entries: list[tuple[str | None, str]] = []
     for relative, language in files.items():
         path = root / relative
+        if relative not in inventory["files"]:
+            continue
         if path.is_symlink():
             entries.append((None, f"\n{relative}: exists, body omitted (symbolic link)."))
             continue
@@ -476,35 +456,41 @@ def _quoted_entry_files(
     return sections
 
 
-def _api_contract_files(root: Path, routes: str) -> list[tuple[str, str]]:
-    """Follow local API class references without executing PHP or reading dependencies."""
+def _api_contract_files(root: Path, routes: str, inventory: dict | None = None) -> list[tuple[str, str]]:
+    """Follow literal FQCN references through longest-first Composer PSR-4 mappings."""
+    inventory = inventory if inventory is not None else collect_inventory(str(root))
+    available = inventory["files"]
+    mappings = sorted(
+        (item for item in inventory["psr4"] if item["resolved"]),
+        key=lambda item: -len(item["namespace"]),
+    )
     files: dict[str, str] = {}
     sources = [routes]
     remaining = _MAX_QUOTED_TOTAL_CHARS
-    # shortcut: conventional App namespace only; custom PSR-4/grouped imports need a PHP resolver.
     for source in sources:
-        for name in re.findall(r"\bApp\\(?:[A-Za-z_]\w*\\)*[A-Za-z_]\w*", source):
-            relative = "app/" + name.removeprefix("App\\").replace("\\", "/") + ".php"
-            path = root / relative
-            if relative in files or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
-                continue
-            files[relative] = "php"
-            if remaining <= 0:
-                continue
-            try:
-                with path.open(encoding="utf-8") as handle:
-                    body = handle.read(min(_MAX_QUOTED_FILE_CHARS, remaining) + 1)
-            except (OSError, UnicodeDecodeError):
-                continue
-            if len(body) <= min(_MAX_QUOTED_FILE_CHARS, remaining):
-                remaining -= len(body)
-                sources.append(body)
+        for name in re.findall(r"\b[A-Za-z_]\w*\\(?:[A-Za-z_]\w*\\)*[A-Za-z_]\w*", source):
+            for mapping in mappings:
+                if not name.startswith(mapping["namespace"]):
+                    continue
+                relative = (Path(mapping["path"]) / (
+                    name[len(mapping["namespace"]):].replace("\\", "/") + ".php"
+                )).as_posix()
+                if relative not in available:
+                    continue
+                if relative not in files:
+                    files[relative] = "php"
+                    body = available[relative]["content"]
+                    if len(body) <= min(_MAX_QUOTED_FILE_CHARS, remaining):
+                        remaining -= len(body)
+                        sources.append(body)
+                break
     return list(files.items())
 
 
 def _repo_inventory(
     repo_path: str, scope: str = "fullstack", task_text: str = "",
     previous_files: list[str] | None = None,
+    project: dict | None = None,
 ) -> str:
     """
     Describe what the cloned repository already contains, for the prompts.
@@ -534,39 +520,44 @@ def _repo_inventory(
         if not root.is_dir():
             return ""
 
-        lines: list[str] = []
-        referenced_files: list[tuple[str, str]] = [("package.json", "json")] if scope != "backend" else []
+        project = project or {}
+        application_root = project.get("application_root", "")
+        inventory = collect_inventory(str(root), application_root=application_root)
+        files = inventory["files"]
+        routing = _routing_metadata(inventory, application_root)
+        lines = list(inventory["warnings"]) + list(inventory["unresolved"])
         referenced_files = [
             (path, Path(path).suffix.lstrip(".")) for path in (previous_files or [])
-        ] + referenced_files
+            if path in files
+        ]
+        for prefix in dict.fromkeys((application_root, project.get("frontend_root", ""))):
+            for path, language in _INVENTORY_QUOTED_FILES:
+                if scope != "backend" or path == "database/seeders/DatabaseSeeder.php":
+                    referenced_files.append(((Path(prefix) / path).as_posix(), language))
         api_files: list[tuple[str, str]] = []
         test_files: list[str] = []
-        for relative, cap in _INVENTORY_DIRS:
-            directory = root / relative
-            if not directory.is_dir():
+        directories: dict[str, list[str]] = {}
+        for path, entry in files.items():
+            if entry["kind"] == "rule":
                 continue
-            names = _inventory_listing(directory)
-            if not names:
-                continue
-            shown = names[:cap]
-            suffix = f" … (+{len(names) - cap} more)" if len(names) > cap else ""
-            lines.append(f"- {relative}/: {', '.join(shown)}{suffix}")
-            for name in names:
-                path = f"{relative}/{name}"
-                basename = name.rsplit("/", 1)[-1]
-                if re.search(r"\.(?:test|spec)\.[cm]?[jt]sx?$", name):
-                    test_files.append(path)
-                pattern = rf"(?<![\w./-])(?:{re.escape(path)}|{re.escape(basename)})(?![\w./-])"
-                if task_text and re.search(pattern, task_text):
-                    language = Path(name).suffix.lstrip(".")
-                    referenced_files.append((path, language))
+            directory, _, name = path.rpartition("/")
+            directories.setdefault(directory, []).append(name)
+            if re.search(r"\.(?:test|spec)\.[cm]?[jt]sx?$", path):
+                test_files.append(path)
+            pattern = rf"(?<![\w./-])(?:{re.escape(path)}|{re.escape(name)})(?![\w./-])"
+            if task_text and re.search(pattern, task_text):
+                referenced_files.append((path, Path(path).suffix.lstrip(".")))
+        for directory, names in directories.items():
+            cap = len(names) if "migrations" in Path(directory).parts else 60
+            suffix = f" … (+{len(names) - cap} omitted)" if len(names) > cap else ""
+            lines.append(f"- {directory or '.'}/: {', '.join(f'{directory}/{name}'.lstrip('/') for name in names[:cap])}{suffix}")
 
-        targets = {(root / path).resolve() for path, _ in referenced_files if path.endswith(".vue")}
+        targets = {(root / path).resolve() for path, _ in referenced_files if path.endswith(".vue") and path in files}
         e2e_names = {re.sub(r"(?<!^)(?=[A-Z])", "-", path.stem).lower() for path in targets}
         # shortcut: relative SFC imports; Vite aliases need a resolver for alias-only suites.
         for relative in test_files if targets else []:
             path = root / relative
-            if relative.startswith("e2e/") and path.name.split(".")[0] in e2e_names:
+            if "e2e" in Path(relative).parts and path.name.split(".")[0] in e2e_names:
                 referenced_files.append((relative, path.suffix.lstrip(".")))
                 continue
             if not path.resolve().is_relative_to(root.resolve()):
@@ -592,7 +583,7 @@ def _repo_inventory(
                 except (OSError, UnicodeDecodeError):
                     continue
 
-        for relative in _INVENTORY_ROUTE_FILES:
+        for relative in sorted(routing["routes"]):
             route_file = root / relative
             if not route_file.is_file():
                 continue
@@ -601,7 +592,7 @@ def _repo_inventory(
             except OSError as exc:
                 lines.append(f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}).")
                 continue
-            if relative == "routes/api.php":
+            if routing["routes"][relative] & {"api", "unknown"}:
                 contract_routes = body
                 if (
                     scope == "frontend" and (targets or "/api/" in task_text)
@@ -617,23 +608,62 @@ def _repo_inventory(
                     ]
                     aliases = "\n".join(relevant)
                     imports = []
-                    for name, alias in re.findall(r"use\s+(App\\[\w\\]+)(?:\s+as\s+(\w+))?;", body):
+                    for name, alias in re.findall(r"use\s+([\w\\]+)(?:\s+as\s+(\w+))?;", body):
                         alias = alias or name.rsplit("\\", 1)[-1]
                         if re.search(rf"\b{re.escape(alias)}::", aliases):
                             imports.append(f"use {name};")
                     contract_routes = "\n".join(imports + relevant)
-                api_files = _api_contract_files(root, contract_routes)
-            if len(body) > _MAX_ROUTE_FILE_CHARS:
-                body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
-            lines.append(f"\nCurrent {relative}:\n```php\n{body}\n```")
+                api_files.extend(_api_contract_files(root, contract_routes, inventory))
+                if re.search(r"\buse\s+[^;]*\{|::\s*\$", body):
+                    lines.append(f"{relative}: grouped/dynamic class references unresolved; no complete PHP resolver.")
+            referenced_files.append((relative, "php"))
 
-        lines += _quoted_entry_files(root, scope, referenced_files + api_files)
+        if scope != "backend":
+            for path, entry in files.items():
+                if path.endswith((".js", ".ts", ".vue", ".blade.php")) and re.search(
+                    r"\bcreateApp\s*\(|\.mount\s*\(|@vite\b", entry["content"]
+                ):
+                    referenced_files.append((path, Path(path).suffix.lstrip(".")))
+                    for imported in re.findall(r"""from\s*['"](\.[^'"]+\.vue)['"]""", entry["content"]):
+                        target = os.path.normpath(str(Path(path).parent / imported))
+                        if target in files:
+                            referenced_files.append((target, "vue"))
 
-        if not lines:
-            return (
-                "The repository is a freshly scaffolded Laravel application "
-                "with no feature code yet."
-            )
+        lines += _quoted_entry_files(root, scope, referenced_files + api_files, inventory)
+        project_prefix = ""
+        if project.get("project_root") and project.get("git_root"):
+            project_prefix = Path(project["project_root"]).relative_to(project["git_root"]).as_posix()
+        containing_root = root / project_prefix
+        snapshot = collect_architecture(str(containing_root), {
+            **project, "root": str(root / application_root),
+            "project_root": str(containing_root), "git_root": str(root),
+            "application_root": application_root,
+        })
+        paths = [
+            Path(path).relative_to(project_prefix).as_posix()
+            for path, _ in referenced_files + api_files
+            if Path(path).is_relative_to(project_prefix)
+        ]
+        rules = {rule["path"]: rule for rule in load_project_rules(str(containing_root), task_text, paths)}
+        external = project.get("project_root") or project.get("root")
+        if external and Path(external) != containing_root:
+            rules.update({rule["path"]: rule for rule in load_project_rules(
+                external, task_text, paths, evidence_repo_path=str(containing_root)
+            )})
+        if project:
+            lines.insert(0, (
+                "SEPARATE APPLICATION LAYOUT (all FILE/DELETE paths are git-repository-relative): "
+                f"Laravel API backend = {application_root or '.'}/; "
+                f"standalone SPA = {project.get('frontend_root') or 'absent (do not invent a location)'}. "
+                "PHP/OpenAPI run in the backend; Vitest/Playwright run in the SPA. "
+                "Never put SPA files, Blade-mounted Vue, Inertia or Livewire in the API backend. "
+                "Architecture/rule evidence paths below are relative to the containing project "
+                f"{project_prefix or '.'}/, not necessarily the FILE-block root."
+            ))
+        context = format_project_context(snapshot, list(rules.values()))
+        if not files:
+            lines.insert(0, "No eligible source evidence was collected; this does not establish a freshly scaffolded application.")
+        lines.append(context)
         return (
             "These files already exist in the repository. Reuse them; do not "
             "re-create them and do not add a create-table migration for a "
@@ -727,6 +757,10 @@ def node_setup(state: IssueState) -> dict:
     issue_id = state["issue_id"]
     subject = state.get("subject", f"issue-{issue_id}")
     _llm.reset_coder_tier()
+    project = (
+        inspect_project(str(configured_project_root()))
+        if os.getenv("NESTI_PROJECT_PATH", "").strip() else {}
+    )
 
     # Lock first so no other worker grabs the issue during the clone.
     lock = tool_issue_set_status(issue_id, "in_progress")
@@ -736,15 +770,38 @@ def node_setup(state: IssueState) -> dict:
         logger.debug("← node_setup (claim refused)")
         return {"failure_reason": reason}
 
-    workspace = tempfile.mkdtemp(prefix=f"ai-dev-{issue_id}-")
-    repo_path = os.path.join(workspace, "repo")
+    workspace = tempfile.mkdtemp(prefix=f"nesti-{issue_id}-")
+    git_root = os.path.join(workspace, "repo")
 
-    cloned = tool_gitlab_clone(repo_path)
+    cloned = tool_gitlab_clone(git_root)
     if not cloned["success"]:
         shutil.rmtree(workspace, ignore_errors=True)
         raise RuntimeError(f"Repository clone failed: {cloned['error']}")
+    relative = project.get("application_root", "")
+    application = Path(git_root) / relative
+    if project and (
+        Path(relative).is_absolute() or ".." in Path(relative).parts
+        or not application.resolve().is_relative_to(Path(git_root).resolve())
+        or application.absolute() != application.resolve()
+        or not (application / "artisan").is_file()
+        or not (application / "composer.json").is_file()
+    ):
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise RuntimeError("Configured application subdirectory is absent or unsafe in the clean clone; refusing bootstrap")
+    repo_path = str(application)
+    frontend_relative = project.get("frontend_root", "")
+    frontend = Path(git_root) / frontend_relative if frontend_relative else None
+    if frontend is not None and (
+        Path(frontend_relative).is_absolute() or ".." in Path(frontend_relative).parts
+        or frontend.absolute() != frontend.resolve()
+        or not frontend.resolve().is_relative_to(Path(git_root).resolve())
+        or frontend.is_relative_to(application) or application.is_relative_to(frontend)
+        or not (frontend / "package.json").is_file()
+    ):
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise RuntimeError("Configured frontend subdirectory is absent, overlapping or unsafe in the clean clone")
 
-    branched = tool_gitlab_create_branch(repo_path, issue_id, subject)
+    branched = tool_gitlab_create_branch(git_root, issue_id, subject)
     if not branched["success"]:
         shutil.rmtree(workspace, ignore_errors=True)
         raise RuntimeError(f"Branch creation failed: {branched['error']}")
@@ -754,6 +811,9 @@ def node_setup(state: IssueState) -> dict:
     return {
         "workspace": workspace,
         "repo_path": repo_path,
+        "git_root": git_root,
+        "frontend_path": str(frontend) if frontend is not None else "",
+        "project_context": project,
         "branch_name": branch_name,
     }
 
@@ -871,7 +931,10 @@ def node_plan(state: IssueState) -> dict:
         max_topic_docs=topics,
         max_practice_docs=1,
     )
-    repo_context = _repo_inventory(state.get("repo_path", ""), decision.scope, issue_text)
+    repo_context = _repo_inventory(
+        state.get("git_root") or state.get("repo_path", ""), decision.scope, issue_text,
+        project=state.get("project_context"),
+    )
 
     # memory: how similar issues were solved before (Redis solution
     # cache) and the corpus passages the keyword catalog missed (Qdrant).
@@ -966,7 +1029,10 @@ def node_code(state: IssueState) -> dict:
     # Rebuilt every attempt: the previous attempt's own files are part of the
     # repository now, and a retry must see them rather than re-inventing them.
     previous_files = state.get("written_files") or []
-    repo_context = _repo_inventory(state.get("repo_path", ""), scope, haystack, previous_files)
+    repo_context = _repo_inventory(
+        state.get("git_root") or state.get("repo_path", ""), scope, haystack, previous_files,
+        project=state.get("project_context"),
+    )
 
     # memory.  A narrow scope filters the doc search from the first
     # attempt.  A fullstack scope falls back to the detected stack, and only
@@ -1067,7 +1133,14 @@ def node_code(state: IssueState) -> dict:
     # Static file application needs neither a Docker client nor a container.
     apply_error = ""
     try:
-        files_written, written = DockerRunner.write_files(code_response, state["repo_path"])
+        project = state.get("project_context") or {}
+        layout = ({
+            "backend_root": project.get("application_root", ""),
+            "frontend_root": project.get("frontend_root", ""),
+        } if project else {})
+        files_written, written = DockerRunner.write_files(
+            code_response, state.get("git_root") or state["repo_path"], **layout,
+        )
     except ValueError as exc:
         files_written, written = False, []
         apply_error = f"File changes rejected: {exc}"
@@ -1082,7 +1155,7 @@ def node_code(state: IssueState) -> dict:
 
     if files_written:
         pruned = _prune_stale_files(
-            state.get("written_files") or [], written, state["repo_path"]
+            state.get("written_files") or [], written, state.get("git_root") or state["repo_path"]
         )
         if pruned:
             logger.info(
@@ -1120,7 +1193,14 @@ def node_detect_stack(state: IssueState) -> dict:
 
     # route_after_code admits only responses with accepted file operations.
 
-    result = tool_detect_stack(state["repo_path"], state.get("written_files"))
+    project = state.get("project_context") or {}
+    layout = ({
+        "application_root": project.get("application_root", ""),
+        "frontend_root": project.get("frontend_root", ""),
+    } if project else {})
+    result = tool_detect_stack(
+        state.get("git_root") or state["repo_path"], state.get("written_files"), **layout,
+    )
     if not result["success"]:
         # Detection is advisory: a scan error must never strand an issue.
         # Fall back to previous behaviour and run the PHP layer.
@@ -1265,7 +1345,7 @@ def node_vitest_test(state: IssueState) -> dict:
     logger.debug("→ node_vitest_test")
     logger.info("Running Vitest component tests (attempt %d) …", state.get("attempt", 0))
 
-    result = tool_vitest_run_tests(state["repo_path"])
+    result = tool_vitest_run_tests(state.get("frontend_path") or state["repo_path"])
     passed = result.get("result", {}).get("passed", False) if result["success"] else False
     output = (
         result.get("result", {}).get("output", "")
@@ -1287,11 +1367,13 @@ def node_playwright_test(state: IssueState) -> dict:
     fixture's seeder class and file are both absent and stopped before the
     browser started; that run logs BLOCKED rather than FAILED, and
     route_after_playwright hands it to node_pause_dependency.
+    A separate SPA uses its existing API/webServer setup; no Laravel backend
+    is mounted into its sandbox and the fixture-report validation is unchanged.
     """
     logger.debug("→ node_playwright_test")
     logger.info("Running Playwright E2E tests (attempt %d) …", state.get("attempt", 0))
 
-    result = tool_playwright_run_tests(state["repo_path"])
+    result = tool_playwright_run_tests(state.get("frontend_path") or state["repo_path"])
     detail = result.get("result", {}) if result["success"] else {}
     passed = bool(detail.get("passed", False))
     output = detail.get("output", "") if result["success"] else result.get("error", "")
@@ -1341,8 +1423,15 @@ def node_pause_dependency(state: IssueState) -> dict:
     subject = state.get("subject", f"issue-{issue_id}")
     requirement = state.get("fixture_request") or {}
 
+    written = list(state.get("written_files") or [])
+    backend_prefix = (state.get("project_context") or {}).get("application_root", "")
+    if backend_prefix:
+        written = [
+            Path(path).relative_to(backend_prefix).as_posix() for path in written
+            if Path(path).is_relative_to(backend_prefix)
+        ]
     result = tool_issue_pause_for_fixture(
-        issue_id, state["repo_path"], requirement, list(state.get("written_files") or [])
+        issue_id, state["repo_path"], requirement, written
     )
     detail = result["result"] if result["success"] else {}
     status = detail.get("status")
@@ -1480,7 +1569,7 @@ def node_commit(state: IssueState) -> dict:
         f"Closes #{issue_id}"
     )
     pushed = tool_gitlab_commit_and_push(
-        state["repo_path"], state["branch_name"], commit_message
+        state.get("git_root") or state["repo_path"], state["branch_name"], commit_message
     )
     if not pushed["success"]:
         # Unexpected git error – outer handler would have reopened
@@ -1517,6 +1606,8 @@ def node_commit(state: IssueState) -> dict:
         subject=subject,
         description=(
             f"## Summary\n{provider_line}\n\n{state.get('plan', '')}\n\n"
+            f"Application subdirectory: `{state.get('project_context', {}).get('application_root') or '.'}` "
+            f"(clean configured GitLab target; no local rejected patch applied).\n\n"
             f"## Test output\n"
             f"_Stack: {state.get('stack', 'php')} · "
             f"scope: {state.get('scope', 'fullstack')} · "

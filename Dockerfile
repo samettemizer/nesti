@@ -8,6 +8,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+ARG TARGETARCH
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) checksum=5669ddc46b99e942cc96078f4a4e36d5e62103348f4c05179ede27802fdd87a9 ;; \
+      arm64) checksum=ac2c028697199479acb321db1e3d68caee9f2ba492ed73caa3cd13f3829bf913 ;; \
+      *) echo "Unsupported D2 architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/d2lang/d2/releases/download/v0.9.0/d2-v0.9.0-linux-${TARGETARCH}.tar.gz', '/tmp/d2.tar.gz')"; \
+    echo "$checksum  /tmp/d2.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/d2.tar.gz -C /tmp; \
+    install /tmp/d2-v0.9.0/bin/d2 /usr/local/bin/d2; \
+    rm -rf /tmp/d2.tar.gz /tmp/d2-v0.9.0
+
+ENV NESTI_CONTAINER=1
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -25,7 +40,7 @@ COPY . .
 # Supply only a non-secret, operator-approved file from the build context, never .private/.
 ARG NESTI_RERANKER_PROFILE=""
 RUN python scripts/prepare_reranker.py --output /opt/nesti-reranker --profile "$NESTI_RERANKER_PROFILE"
-RUN echo '#!/bin/bash\npython /orchestrator/scripts/oauth.py "$@"' > /usr/local/bin/nesti && chmod +x /usr/local/bin/nesti
+RUN printf '#!/bin/sh\ncd /orchestrator && exec python -m scripts.oauth "$@"\n' > /usr/local/bin/nesti && chmod +x /usr/local/bin/nesti
 
 ENTRYPOINT ["python", "main.py"]
 CMD ["--loop"]

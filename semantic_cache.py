@@ -3,14 +3,14 @@ semantic_cache.py – Redis-backed short-term vector memory.
 
 Two vector indices on Redis 8's built-in query engine (``FT.CREATE``):
 
-* **Solution cache** (``nesti_solution_idx``, keys ``nesti:memory:solution:<iid>``)
-  One row per successfully merged issue: subject, stack, MR URL and the plan
-  that produced it.  Written by ``node_commit``, read by ``node_plan`` —
-  tomorrow's issue sees how a similar one was solved yesterday.
+* **Solution cache** (``nesti_solution_<namespace>_idx``, keys
+  ``nesti:memory:<namespace>:solution:<iid>``).
+  One row per MR-opened issue: subject, stack, MR URL and the plan that
+  produced it. Written by ``node_commit``; merge status remains unverified.
   TTL ``NESTI_SOLUTION_TTL_DAYS`` (default 90).
 
-* **Episodic memory** (``nesti_episode_idx``, keys
-  ``nesti:memory:episode:<iid>:<attempt>:<layer>``)
+* **Episodic memory** (``nesti_episode_<namespace>_idx``, keys
+  ``nesti:memory:<namespace>:episode:<iid>:<attempt>:<layer>``)
   One row per failed attempt of the issue in flight.  Written by
   ``node_on_layer_failure``, read by ``node_code``.  The attempt that just
   failed is already verbatim in the conversation history, so recall returns
@@ -24,6 +24,9 @@ Resilience:
     Nothing here raises.  Redis unreachable, a pre-8 Redis without the query
     engine, or an unavailable embedder all make ``available`` False; reads
     then return ``[]`` and writes return ``False``.  Each cause is logged once.
+    Missing configured project identity disables private memory. Legacy solutions
+    migrate only after independent GitLab project/MR verification; episodes and
+    conversations have no provenance and are never migrated.
 """
 
 import array
@@ -31,6 +34,7 @@ import logging
 import os
 import re
 import time
+from urllib.parse import urlsplit
 
 import redis
 from redis.commands.search.field import NumericField, TagField, TextField, VectorField
@@ -44,13 +48,11 @@ except ImportError:  # pragma: no cover - depends on the installed redis-py
 from conversation_store import ConversationStore
 from embedding import get_embedder
 from layer_output import condense
+from project_context import project_namespace
 
 logger = logging.getLogger(__name__)
 
-SOLUTION_INDEX: str = "nesti_solution_idx"
-SOLUTION_PREFIX: str = "nesti:memory:solution:"
-EPISODE_INDEX: str = "nesti_episode_idx"
-EPISODE_PREFIX: str = "nesti:memory:episode:"
+_LEGACY_SOLUTION_PREFIX = "nesti:memory:solution:"
 _PLAN_STORE_LIMIT: int = 6_000      # chars of plan persisted per solution
 _EPISODE_OUTPUT_LIMIT: int = 1_200  # chars of *condensed* layer output persisted
 
@@ -61,8 +63,24 @@ _DEFAULT_SOLUTION_MIN_SCORE = 0.80
 _DEFAULT_EPISODE_MIN_SCORE = 0.60
 _KNN_LIMIT_CAP = 10
 
-_SOLUTION_FIELDS = ("issue_id", "subject", "plan", "mr_url", "stack", "score")
-_EPISODE_FIELDS = ("issue_id", "attempt", "layer", "summary", "score")
+_SOLUTION_FIELDS = ("issue_id", "subject", "plan", "mr_url", "stack", "created_at", "score")
+_EPISODE_FIELDS = ("issue_id", "attempt", "layer", "summary", "created_at", "score")
+
+# Verify the observed source and copy its current TTL in the same atomic action.
+_MIGRATE_SOLUTION = """
+if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+local current = redis.call('HGETALL', KEYS[1])
+if #current == 0 or #current ~= #ARGV - 1 then return -1 end
+for i = 2, #ARGV, 2 do
+    if redis.call('HGET', KEYS[1], ARGV[i]) ~= ARGV[i + 1] then return -1 end
+end
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl == -2 or ttl == 0 then return -1 end
+redis.call('HSET', KEYS[2], unpack(current))
+redis.call('HSET', KEYS[2], 'embedding', ARGV[1])
+if ttl > 0 then redis.call('PEXPIRE', KEYS[2], ttl) end
+return 1
+"""
 
 
 def _s(value) -> str:
@@ -105,14 +123,48 @@ def _layer_slug(layer: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (layer or "unknown").lower()).strip("-") or "unknown"
 
 
+def _merge_request_iid(url: str, base_url: str, project_path: str) -> int | None:
+    """Accept only a credential-free MR URL for the configured host/project."""
+    try:
+        if any(ord(char) < 33 for char in url):
+            return None
+        parsed, base = urlsplit(url), urlsplit(base_url.rstrip("/"))
+        if (base.scheme not in {"http", "https"} or not base.netloc
+                or base.username is not None or base.password is not None
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment
+                or parsed.scheme != base.scheme
+                or parsed.netloc.lower() != base.netloc.lower()):
+            return None
+        path = project_path.strip("/").removesuffix(".git")
+        prefix = f"{base.path.rstrip('/')}/{path}/-/merge_requests/"
+        if not path or not parsed.path.startswith(prefix):
+            return None
+        iid = parsed.path[len(prefix):]
+        return int(iid) if re.fullmatch(r"[1-9][0-9]*", iid) else None
+    except (ValueError, TypeError):
+        return None
+
+
 class SemanticMemory:
-    """Solution cache + episodic memory on Redis 8's vector search."""
+    """Project-scoped MR precedents and failure episodes on Redis vector search."""
 
     def __init__(self) -> None:
         self._url: str = os.environ.get("REDIS_URL", _DEFAULT_REDIS_URL)
         self._ok: bool = False
         self._engine: bool = False
         self._redis = None
+        try:
+            self.namespace = project_namespace()
+        except ValueError:
+            self.namespace = ""
+        self.solution_index = f"nesti_solution_{self.namespace}_idx"
+        self.episode_index = f"nesti_episode_{self.namespace}_idx"
+        self.solution_prefix = f"nesti:memory:{self.namespace}:solution:"
+        self.episode_prefix = f"nesti:memory:{self.namespace}:episode:"
+        if not self.namespace:
+            logger.info("Private vector memory disabled: project identity is missing or invalid.")
+            return
 
         embedder = get_embedder()
         if not embedder.enabled:
@@ -158,8 +210,9 @@ class SemanticMemory:
         return {
             "available": self.available,
             "url": self._url,
-            "solutions": self._num_docs(SOLUTION_INDEX),
-            "episodes": self._num_docs(EPISODE_INDEX),
+            "namespace": self.namespace,
+            "solutions": self._num_docs(self.solution_index),
+            "episodes": self._num_docs(self.episode_index),
             "engine": "redis-query-engine" if self._engine else "unavailable",
         }
 
@@ -176,14 +229,14 @@ class SemanticMemory:
         stack: str,
         mr_url: str,
     ) -> bool:
-        """Store (or overwrite) the solution of one merged issue."""
+        """Store an MR-opened solution as a precedent, not proof of a merged result."""
         if not self.available:
             return False
         try:
             vector = get_embedder().embed_documents([f"{subject}\n{description}"])
             if not vector:
                 return False
-            key = f"{SOLUTION_PREFIX}{issue_id}"
+            key = f"{self.solution_prefix}{issue_id}"
             pipe = self._redis.pipeline(transaction=True)
             pipe.hset(
                 key,
@@ -205,10 +258,10 @@ class SemanticMemory:
             return False
 
     def find_similar_solutions(self, text: str, limit: int = 2) -> list[dict]:
-        """Merged issues similar to *text*, most similar first, above the score floor."""
+        """MR precedents similar to *text*, above the floor; merge status is unverified."""
         if not text or not text.strip() or limit <= 0 or not self.available:
             return []
-        rows = self._knn(SOLUTION_INDEX, "*", text, limit, _SOLUTION_FIELDS)
+        rows = self._knn(self.solution_index, "*", text, limit, _SOLUTION_FIELDS)
         floor = _env_float("NESTI_SOLUTION_MIN_SCORE", _DEFAULT_SOLUTION_MIN_SCORE)
         results: list[dict] = []
         for doc, similarity in rows:
@@ -221,6 +274,7 @@ class SemanticMemory:
                     "plan": _s(getattr(doc, "plan", "")),
                     "mr_url": _s(getattr(doc, "mr_url", "")),
                     "stack": _s(getattr(doc, "stack", "")),
+                    "created_at": int(float(_s(getattr(doc, "created_at", 0)) or 0)),
                     "similarity": round(similarity, 3),
                 }
             )
@@ -239,7 +293,7 @@ class SemanticMemory:
             vector = get_embedder().embed_documents([f"{layer} failure: {summary}"])
             if not vector:
                 return False
-            key = f"{EPISODE_PREFIX}{issue_id}:{attempt}:{_layer_slug(layer)}"
+            key = f"{self.episode_prefix}{issue_id}:{attempt}:{_layer_slug(layer)}"
             pipe = self._redis.pipeline(transaction=True)
             pipe.hset(
                 key,
@@ -281,7 +335,7 @@ class SemanticMemory:
             return []
         issue = int(issue_id)
         prefilter = f"(@issue_id:[{issue} {issue}] @attempt:[-inf {int(attempt) - 2}])"
-        rows = self._knn(EPISODE_INDEX, prefilter, text, limit, _EPISODE_FIELDS)
+        rows = self._knn(self.episode_index, prefilter, text, limit, _EPISODE_FIELDS)
         floor = _env_float("NESTI_EPISODE_MIN_SCORE", _DEFAULT_EPISODE_MIN_SCORE)
         results: list[dict] = []
         for doc, similarity in rows:
@@ -293,6 +347,7 @@ class SemanticMemory:
                     "attempt": int(float(_s(getattr(doc, "attempt", 0)) or 0)),
                     "layer": _s(getattr(doc, "layer", "")),
                     "summary": _s(getattr(doc, "summary", "")),
+                    "created_at": int(float(_s(getattr(doc, "created_at", 0)) or 0)),
                     "similarity": round(similarity, 3),
                 }
             )
@@ -305,11 +360,69 @@ class SemanticMemory:
         try:
             # Issue-scoped pattern bounded by max_attempts × 4 layers: a handful
             # of keys, never a database-wide scan in practice.
-            keys = self._redis.keys(f"{EPISODE_PREFIX}{int(issue_id)}:*")
+            keys = self._redis.keys(f"{self.episode_prefix}{int(issue_id)}:*")
             return int(self._redis.delete(*keys)) if keys else 0
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("Failed to forget episodes for issue #%s: %s", issue_id, exc)
             return 0
+
+    def migrate_legacy_solutions(self) -> dict:
+        """Import attributable legacy solutions without replacing or deleting data.
+
+        The startup caller invokes this once before polling. Every source requires
+        independent GitLab verification and current embedding. An outage leaves
+        originals intact for the next startup; no episode/history key is scanned.
+        """
+        result = {"available": False, "migrated": 0, "skipped": 0, "reason": ""}
+        if not self.available:
+            result["reason"] = "Private memory or embedding unavailable."
+            return result
+        try:
+            from gitlab_issues_client import GitLabIssuesClient
+
+            client = GitLabIssuesClient()
+            project = client.get_project()
+            project_id = project.get("id")
+            project_path = client.project_path.strip("/").removesuffix(".git")
+            if (type(project_id) is not int or project_id <= 0
+                    or project.get("path_with_namespace") != project_path
+                    or project_namespace() != self.namespace):
+                result["reason"] = "Configured GitLab project identity could not be verified."
+                return result
+            for key in self._redis.scan_iter(match=f"{_LEGACY_SOLUTION_PREFIX}*", count=100):
+                raw = self._redis.hgetall(key)
+                issue_id = _s(raw.get(b"issue_id"))
+                url = _s(raw.get(b"mr_url"))
+                iid = _merge_request_iid(url, client.base_url, project_path)
+                if (not re.fullmatch(r"[1-9][0-9]*", issue_id)
+                        or _s(key) != f"{_LEGACY_SOLUTION_PREFIX}{issue_id}"
+                        or iid is None):
+                    result["skipped"] += 1
+                    continue
+                destination = f"{self.solution_prefix}{issue_id}"
+                if self._redis.exists(destination):
+                    result["skipped"] += 1
+                    continue
+                mr = client.get_merge_request(iid)
+                if (mr.get("project_id") != project_id or mr.get("iid") != iid
+                        or mr.get("web_url") != url):
+                    result["skipped"] += 1
+                    continue
+                subject, plan = _s(raw.get(b"subject")), _s(raw.get(b"plan"))
+                vector = get_embedder().embed_documents([f"{subject}\n{plan}"])
+                if not vector:
+                    result["reason"] = "Embedding unavailable; legacy solutions retained."
+                    return result
+                fields = [item for pair in raw.items() for item in pair]
+                copied = self._redis.eval(
+                    _MIGRATE_SOLUTION, 2, key, destination, _to_blob(vector[0]), *fields
+                )
+                result["migrated" if copied == 1 else "skipped"] += 1
+            result["available"] = True
+        except Exception as exc:  # pylint: disable=broad-except
+            result["reason"] = f"Legacy solution migration unavailable ({type(exc).__name__})."
+            logger.warning("%s Originals retained for a later startup.", result["reason"])
+        return result
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -349,14 +462,13 @@ class SemanticMemory:
         logger.info(
             "Semantic memory ready on %s (indices %s, %s; %d dims).",
             self._url,
-            SOLUTION_INDEX,
-            EPISODE_INDEX,
+            self.solution_index,
+            self.episode_index,
             get_embedder().dim,
         )
         return True
 
-    @staticmethod
-    def _index_schemas(dim: int) -> tuple:
+    def _index_schemas(self, dim: int) -> tuple:
         """
         ``(index, key prefix, fields)`` for both indices.
 
@@ -372,8 +484,8 @@ class SemanticMemory:
         )
         return (
             (
-                SOLUTION_INDEX,
-                SOLUTION_PREFIX,
+                self.solution_index,
+                self.solution_prefix,
                 (
                     NumericField("issue_id"),
                     TextField("subject"),
@@ -383,8 +495,8 @@ class SemanticMemory:
                 ),
             ),
             (
-                EPISODE_INDEX,
-                EPISODE_PREFIX,
+                self.episode_index,
+                self.episode_prefix,
                 (
                     NumericField("issue_id"),
                     NumericField("attempt"),
@@ -446,3 +558,8 @@ def get_semantic_memory() -> SemanticMemory:
     if _SEMANTIC_MEMORY is None:
         _SEMANTIC_MEMORY = SemanticMemory()
     return _SEMANTIC_MEMORY
+
+
+def migrate_legacy_solutions() -> dict:
+    """Run the configured project's verified legacy-solution import at startup."""
+    return get_semantic_memory().migrate_legacy_solutions()

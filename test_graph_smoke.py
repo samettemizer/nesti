@@ -36,6 +36,9 @@ os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"   # unreachable → memory fal
 os.environ["MAX_CODE_RETRIES"] = "2"                 # → max_attempts = 3
 os.environ["NESTI_STACK"] = "auto"                   # exercise real detection
 os.environ["NESTI_RERANKER_ENABLED"] = "false"
+os.environ["GITLAB_URL"] = "https://gitlab.example.test"
+os.environ["GITLAB_PROJECT_PATH"] = "fixtures/project"
+os.environ.pop("NESTI_PROJECT_PATH", None)
 os.environ.pop("TELEGRAM_BOT_TOKEN", None)
 os.environ.pop("TELEGRAM_CHAT_ID", None)
 os.environ.pop("DEEPSEEK_API_KEY", None)
@@ -1328,6 +1331,7 @@ from llm_client import LLMClient  # noqa: E402
 class _StubCoder:
     def __init__(self, name, available=True, fail=False):
         self.name, self.label, self.available, self.fail = name, name, available, fail
+        self.model, self.billing = f"{name}-model", "test provider"
 
     def generate_code(self, system_prompt, user_prompt, messages=None):
         if self.fail:
@@ -2127,6 +2131,7 @@ with tempfile.TemporaryDirectory(prefix="nesti-api-context-") as root:
         path = Path(root, relative)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8")
+    put_contract("composer.json", json.dumps({"autoload": {"psr-4": {"App\\": "app/"}}}))
     put_contract("routes/api.php", "<?php\nuse App\\Http\\Controllers\\TaskController;\n")
     controller = (
         "<?php\nuse App\\Http\\Requests\\StoreTaskRequest;\n"

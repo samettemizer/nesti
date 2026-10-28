@@ -1,9 +1,9 @@
 """
 prompt_builder.py – constructs all prompts used by the orchestrator.
 
-The orchestrator now drives a Laravel 13 + PrimeVue 5 codebase: backend code is
-Laravel, frontend code is Vue 3 with PrimeVue components mounted through Laravel
-Vite.
+Nesti scaffolds Laravel 13 + PrimeVue 5 applications. Existing applications keep
+their discovered versions, paths, bindings and served entry architecture; source
+and human project rules travel through the existing ``repo_context`` contract.
 
 Task scope
 ──────────
@@ -125,9 +125,9 @@ _SCOPE_BOUNDARY = {
   would verify such a file.""",
     "frontend": """\
 - No backend files: no migration, model, factory, seeder, controller, FormRequest, API
-  Resource, service, routes/api.php entry or PHPUnit test. The backend the UI needs is listed
-  under Existing Repository State; use it as it is. Page plumbing is frontend work: a Blade
-  view or a routes/web.php entry that serves the page is allowed.""",
+  Resource, service, API route entry or PHPUnit test. The backend the UI needs is listed
+  under Existing Repository State; use it as it is. Page plumbing is frontend work only in
+  legacy integrated layouts; a configured separate SPA must never add Blade or PHP page wiring.""",
     "fullstack": "",
 }
 
@@ -149,12 +149,12 @@ You are a senior Laravel {_LARAVEL_MAJOR} architect working on the "{_GITLAB_PRO
 The repository IS a Laravel application; this issue concerns its backend.""",
     "frontend": f"""\
 You are a senior PrimeVue {_PRIMEVUE_MAJOR} frontend architect working on the "{_GITLAB_PROJECT}" project.
-The repository IS a Laravel application whose frontend is Vue 3 with PrimeVue components
-mounted through Laravel Vite; this issue concerns that frontend.""",
+Use the observed frontend entry chain and separate application directories from Existing
+Repository State; this issue concerns that frontend.""",
     "fullstack": f"""\
 You are a senior Laravel {_LARAVEL_MAJOR} architect and PrimeVue {_PRIMEVUE_MAJOR} frontend architect working on the
-"{_GITLAB_PROJECT}" project. The repository IS a Laravel application: backend code is Laravel,
-frontend code is Vue 3 with PrimeVue components mounted through Laravel Vite.""",
+"{_GITLAB_PROJECT}" project. Backend code is Laravel; frontend code follows the observed
+Vue/PrimeVue application entry chain and directory boundaries.""",
 }
 
 _CODING_ROLE = {
@@ -163,8 +163,8 @@ You are a senior Laravel {_LARAVEL_MAJOR} backend developer working on the "{_GI
 on the "{_DEFAULT_BRANCH}" branch.""",
     "frontend": f"""\
 You are a senior Vue 3 + PrimeVue {_PRIMEVUE_MAJOR} frontend developer working on the "{_GITLAB_PROJECT}"
-project on the "{_DEFAULT_BRANCH}" branch. The repository is a Laravel application; its
-frontend is mounted through Laravel Vite.""",
+project on the "{_DEFAULT_BRANCH}" branch. Follow the observed frontend entry chain and
+application directories; never assume the SPA is mounted through Laravel.""",
     "fullstack": f"""\
 You are a senior Laravel {_LARAVEL_MAJOR} + PrimeVue {_PRIMEVUE_MAJOR} developer working on the "{_GITLAB_PROJECT}" project
 on the "{_DEFAULT_BRANCH}" branch.""",
@@ -202,14 +202,15 @@ SEEDER REMOVAL — only when the issue explicitly asks to remove an existing see
 - A deletion still runs the normal PHPUnit gate; do not skip, weaken or mock it."""
 
 _PLAN_FRONTEND_STANDARDS = f"""\
-- For UI work, name the **PrimeVue components** to be used (by their PrimeVue {_PRIMEVUE_MAJOR} names)
-  instead of describing raw HTML, and the Vue component files under resources/js/components/.
+- For UI work, name the **PrimeVue components** supported by the installed version
+  (PrimeVue {_PRIMEVUE_MAJOR} for Nesti-scaffolded apps) and the observed Vue component paths.
 - Name the existing routes and response shapes the UI relies on, as listed under Existing
   Repository State.
-- Name how the feature reaches the served page: the entry chain (routes/web.php → Blade view →
-  resources/js/app.js) and the exact change to it — e.g. app.component('TaskTable', TaskTable)
-  before app.mount('#app') plus <task-table></task-table> inside <div id="app">, or rendering
-  from an existing App.vue root. Keep the PrimeVue/Aura setup and every existing registration.
+- Name how the feature reaches the served page through its actual route, view, entry and
+  root chain. Follow the installed component-registration style; register before mount.
+  Preserve existing PrimeVue plugins, theme and registrations, including Aura when present.
+  The routes/web.php → Blade → resources/js/app.js chain and resources/js/components/
+  are defaults for Nesti-scaffolded apps, not a layout to impose on existing projects.
   An App.vue no entry imports, or a component only a test mounts, is not on the page."""
 
 # The E2E data contract the planner and the coder share (frontend_runner +
@@ -294,17 +295,18 @@ CODING STANDARDS:
 
 _BACKEND_STANDARDS = """\
 LARAVEL BACKEND (PHP):
-- PSR-12. Controllers in app/Http/Controllers stay thin; business logic goes to app/Services
-  or model methods.
-- Validation lives in FormRequest classes (app/Http/Requests) with a rules() method, or in an
-  explicit $request->validate([...]) call — Scramble can only document those two forms.
-- Eloquent models in app/Models with $fillable, $casts, relationships and HasFactory.
-- API responses go through API Resources (app/Http/Resources) extending JsonResource.
-- API routes go in routes/api.php and are served under the /api prefix. Web routes in
-  routes/web.php.
-- Feature tests in tests/Feature use the RefreshDatabase trait; unit tests in tests/Unit.
-- Do not create or modify: composer.json beyond adding a package you actually need,
-  phpunit.xml, bootstrap/app.php, config/scramble.php.
+- PSR-12. Keep controllers thin and follow the existing business-logic/repository boundaries,
+  Composer namespaces and dependency bindings. Do not introduce app/Services or
+  app/Repositories merely to normalize an existing domain architecture.
+- Validation uses typed FormRequest rules() or an explicit $request->validate([...]) call
+  so Scramble can infer the contract. Keep models' $fillable, $casts, relationships and
+  HasFactory in sync; API Resources extend JsonResource.
+- For Nesti-scaffolded apps the defaults are app/Http/{Controllers,Requests,Resources},
+  app/Models, routes/api.php under /api, routes/web.php and tests/{Feature,Unit}.
+  Existing projects use their observed source, route and test paths instead.
+- Database-backed feature tests use RefreshDatabase; keep real behavior covered.
+- Change composer.json, phpunit.xml or bootstrap/app.php only when the issue requires it;
+  preserve existing registrations and configuration. Never weaken config/scramble.php.
 
 API DOCUMENTATION (Scramble, dedoc/scramble is already installed):
 - Every route under /api must end up in the generated OpenAPI document. The pipeline runs
@@ -322,21 +324,20 @@ API DOCUMENTATION (Scramble, dedoc/scramble is already installed):
 
 _FRONTEND_STANDARDS = f"""\
 PRIMEVUE FRONTEND (Vue 3):
-- Vue 3 Composition API with <script setup>. Never @vue/compat, never the Options API.
-- Use PrimeVue {_PRIMEVUE_MAJOR} components instead of hand-written markup: tables → DataTable + Column,
-  forms → InputText / Select / DatePicker / Checkbox / InputNumber, actions → Button,
-  modals → Dialog / ConfirmDialog, feedback → Toast / Message, uploads → FileUpload,
-  navigation → Menubar / Breadcrumb / Tabs.
-- Import components per file: import DataTable from 'primevue/datatable'; the import path is
-  the lowercase component name (OrganizationChart → 'primevue/organizationchart').
-- The PrimeVue plugin and the Aura preset are already registered in resources/js/app.js
-  (app.use(PrimeVue, {{ theme: {{ preset: Aura }} }}) with Aura from '@primeuix/themes/aura').
-  Never re-register or reconfigure them, and keep every existing import, app.use(...) and
-  app.component(...) line. A global service (ToastService, ConfirmationService) adds only its line.
-- A feature must reach the page the app serves (routes/web.php → its Blade view → the @vite
-  entry resources/js/app.js or app.ts). Make the import/registration/mount change it needs and
-  keep the existing root architecture:
-  - In-DOM template (createApp({{}}) mounted on <div id="app"> of resources/views/app.blade.php):
+- Use the installed Vue 3 component style; new Nesti-scaffolded apps use Composition API
+  with <script setup>. Never introduce @vue/compat or convert existing architecture.
+- Use components supported by the installed PrimeVue version (PrimeVue {_PRIMEVUE_MAJOR} is
+  Nesti's scaffold default): tables → DataTable + Column, forms → appropriate input controls,
+  actions → Button, modals → Dialog, feedback → Toast / Message.
+- Follow the installed component-registration style, whether local imports, global
+  registration or configured auto-imports. A local import uses its documented package path.
+- Preserve the existing PrimeVue plugin, theme, imports, app.use(...) and registrations.
+  Aura at resources/js/app.js is only Nesti's scaffold default, not a required theme or path.
+  Do not add or reconfigure a theme. Add a global service only when the feature needs it.
+- A feature must reach the page the app serves through its observed route/view/entry chain.
+  The routes/web.php → Blade → @vite resources/js/app.js chain is a legacy scaffold default,
+  never permitted for a configured separate SPA. Make the required registration before mount:
+  - Legacy in-DOM template (only without a separate application layout):
     import the component, add app.component('TaskTable', TaskTable) before app.mount('#app'),
     and put <task-table></task-table> inside <div id="app"> of the served Blade view. In-DOM
     tags, props and events are kebab-case (:page-size, @row-select); never self-close a custom tag.
@@ -348,16 +349,15 @@ PRIMEVUE FRONTEND (Vue 3):
   never reconstruct it from a fragment or replace the boot code by guess; state the assumption.
 - An explicit element choice in the issue takes precedence over the PrimeVue preference;
   for example, a requested native input type="date" must stay a native date input.
-- Components live in resources/js/components/<Name>.vue; Vitest specs in
-  resources/js/components/__tests__/<Name>.test.js; Playwright specs in e2e/<feature>.spec.js.
+- Use the existing component and test locations. Nesti-scaffolded defaults are
+  resources/js/components/<Name>.vue, its __tests__/<Name>.test.js and e2e/<feature>.spec.js.
 - Extend the existing component test suite and reuse its mount helper and plugin setup.
-  A new suite still mounts with the PrimeVue plugin (and the existing Aura preset); importing
-  the component alone does not provide $primevue.config.
-- vite.config.js, vitest.config.js, playwright.config.js and package.json already exist. You
-  may ADD an npm dependency to package.json when the task truly needs one; never remove an
-  existing dependency, never change the pinned "@playwright/test": "1.50.0", and never rewrite
-  the three config files.
-- Tailwind CSS 4 is available for layout utilities.
+  A new suite uses the installed PrimeVue plugin/theme setup; importing a component alone
+  does not provide $primevue.config. Do not impose Aura on another installed theme.
+- Preserve the actual Vite/Vitest/Playwright configs and their aliases. Add a dependency or
+  change test configuration only when the task needs it; never remove an existing dependency
+  or change the exact "@playwright/test": "1.50.0" sandbox pin.
+- Use Tailwind layout utilities only when the existing application has Tailwind installed.
 - In Vitest, assert user-visible behaviour through rendered text, interactions and emitted
   events. Do not pin a library's incidental defaults (null versus undefined, unset props),
   exact component/column counts or full prop arrays. Remove those brittle assertions when
@@ -394,15 +394,15 @@ _TEST_PHPUNIT = """\
 - PHPUnit (`php artisan test`) runs whenever the change creates, modifies or deletes PHP, so
   every PHP change ships a Feature or Unit test. Migrations are executed before the suite:
   a broken migration fails the layer.
-- The OpenAPI layer runs when the change touches routes/api.php, app/Http/Controllers,
-  app/Http/Resources, or app/Http/Requests."""
+- The OpenAPI layer runs for changed API routes, HTTP controllers/resources/requests under
+  discovered PHP roots, and conservatively for unresolved application routing changes."""
 
 _TEST_FRONTEND_LAYERS = """\
 - Vitest and then Playwright run when the change touches the frontend (.vue, JavaScript, CSS,
-  Blade views, package.json, e2e/). Playwright drives the real application: the sandbox runs
-  the migrations and DatabaseSeeder, then the fixtures declared in e2e/nesti-fixtures.json,
-  `npm run build`, and playwright.config.js serves the app with `php artisan serve` on
-  http://127.0.0.1:8000.
+  Blade views, package.json, e2e/). Playwright drives the real application. In an integrated
+  Laravel workspace the sandbox prepares migrations/DatabaseSeeder/declared fixtures.
+  A separate SPA runs build/tests in its own directory and serves its own entry via its
+  Playwright webServer (e.g. vite preview), never a Laravel Blade page.
 - Test the integration on the served page: at least one Playwright spec opens it (page.goto('/')
   or the feature's web route) and asserts the feature with real API data. A directly mounted
   component or a mocked API proves nothing about integration.
@@ -532,6 +532,23 @@ def _task_scope_block(scope: str, documentation: str) -> str:
         lines.append(_DOCUMENTATION_OUT_OF_SCOPE)
     if scope != "frontend":
         lines.append(_SCRAMBLE_DOCUMENTS_THE_API)
+    lines.append(
+        "- PROJECT AUTHORITY: current cloned source and human project rules override stale "
+        "inferred facts.\n  Existing projects keep observed paths, versions, bindings, entry "
+        "chain and registration style;\n  conventional paths and Laravel/PrimeVue scaffold "
+        "defaults never authorize an architecture rewrite.\n  Migration protection, security, "
+        "API completeness and real test gates remain mandatory.\n  External shared rules are "
+        "instructions only: never copy shared working-tree source or .omp files into the clone."
+    )
+    lines.append(
+        "- SEPARATE APPLICATION LAYOUT, when supplied in Existing Repository State, is mandatory: "
+        "FILE and DELETE paths are relative to the git repository root, including backend/SPA prefixes. "
+        "Laravel is API-only; Vue, JS, CSS, package manifests, Vitest and Playwright belong to the "
+        "selected non-overlapping SPA directory. Never introduce Inertia, Livewire or Blade-mounted "
+        "Vue in that backend. An absent SPA is not permission to create one inside Laravel or invent "
+        "a directory: report the missing configured frontend. Backend-only changes leave the SPA "
+        "untouched. These boundaries override legacy integrated scaffold examples and reference docs."
+    )
     return "\n".join(lines)
 
 

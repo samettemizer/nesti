@@ -181,6 +181,8 @@ class ProviderBoundaryTests(unittest.TestCase):
                 class Provider:
                     available = True
                     label = name = "offline test provider"
+                    model = "actual-test-model"
+                    billing = "subscription"
 
                     def __init__(self, fail):
                         self.fail = fail
@@ -209,6 +211,31 @@ class ProviderBoundaryTests(unittest.TestCase):
                     self.assertEqual((system, user), (_SYSTEM, "unused"))
                     self.assertIs(messages, _MESSAGES)
                     self.assertEqual(snapshot, original)
+
+    def test_planner_attribution_tracks_fallback_and_is_an_immutable_copy(self):
+        class Provider:
+            available = True
+            name = label = "consumer"
+            model = "served-model"
+            billing = "subscription"
+
+            def generate_plan(self, *_):
+                return "plan"
+
+        provider = Provider()
+        chain = llm.LLMClient.__new__(llm.LLMClient)
+        chain._planners = [provider]
+        with patch.object(llm, "telegram_notify"):
+            self.assertEqual(chain.generate_plan("system", "user"), "plan")
+            attribution = chain.last_planner_attribution()
+            provider.model = "later-selection"
+            self.assertEqual(chain.last_planner_attribution()["model"], "served-model")
+            attribution["model"] = "caller-edit"
+            self.assertEqual(chain.last_planner_attribution()["model"], "served-model")
+            provider.available = False
+            with self.assertRaisesRegex(RuntimeError, "exhausted"):
+                chain.generate_plan("system", "user")
+        self.assertEqual(chain.last_planner_attribution()["model"], "unknown")
 
 
 if __name__ == "__main__":

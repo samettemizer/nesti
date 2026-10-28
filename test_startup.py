@@ -36,7 +36,8 @@ def check(condition: bool, label: str) -> None:
 def _run_startup(
     *, enabled: str | None = None, index_status: int = 0,
     index_error: Exception | None = None, ready_error: Exception | None = None,
-    loop: bool = False,
+    loop: bool = False, project_status: str | None = None,
+    project_error: Exception | None = None, recover_project: bool = False,
 ) -> tuple[list[str], int | None]:
     events: list[str] = []
 
@@ -62,17 +63,38 @@ def _run_startup(
         events.append("engine")
         return SimpleNamespace(run_once=poll)
 
+    def boost(root: str, *, force: bool) -> dict:
+        events.append("boost")
+        if recover_project and events.count("boost") > 1:
+            return {"status": "completed"}
+        if project_error:
+            raise project_error
+        return {"status": project_status}
+
     environment = {} if enabled is None else {"NESTI_MEMORY_ENABLED": enabled}
+    if project_status is not None or project_error is not None:
+        environment["NESTI_PROJECT_PATH"] = "/fixture"
     with (
-        patch.dict(os.environ, environment, clear=True),
+        tempfile.TemporaryDirectory() as directory,
+        patch.dict(os.environ, {
+            **environment,
+            "NESTI_PROJECT_PATH": directory if "NESTI_PROJECT_PATH" in environment else "",
+        }, clear=True),
         patch.object(embedding, "_EMBEDDER", None),
         patch.dict(sys.modules, {"task_engine": SimpleNamespace(TaskEngine=engine)}),
+        patch.dict(sys.modules, {
+            "project_boost": SimpleNamespace(boost_project=boost),
+            "semantic_cache": SimpleNamespace(migrate_legacy_solutions=lambda: {"available": False, "reason": "test outage"}),
+        }),
         patch.object(sys, "argv", ["main.py", *(["--loop"] if loop else [])]),
         patch.object(startup, "_setup_logging"),
         patch.object(startup, "_wait_for_qdrant", side_effect=ready),
+        patch.object(startup.time, "sleep", side_effect=lambda _: events.append("wait")),
         patch.object(startup.logger, "exception"),
         patch.object(index_skills, "main", side_effect=index),
     ):
+        (Path(directory) / "artisan").touch()
+        (Path(directory) / "composer.json").write_text('{"require":{"laravel/framework":"^13.0"}}', encoding="utf-8")
         try:
             startup.main()
         except SystemExit as exc:
@@ -93,6 +115,18 @@ check(_run_startup(ready_error=RuntimeError("Qdrant not ready"), loop=True)
 for disabled in ("0", "false", "no", "off", " FALSE "):
     check(_run_startup(enabled=disabled) == (["engine", "poll"], 0),
           f"memory disabled ({disabled!r}) skips readiness and indexing")
+
+for status in ("completed", "skipped"):
+    check(_run_startup(project_status=status) == (["ready", "index", "boost", "engine", "poll"], 0),
+          f"shared project {status} initialization precedes polling")
+for options in ({"project_status": "conflicts"}, {"project_error": RuntimeError("unsafe project")}):
+    check(_run_startup(**options) == (["ready", "index", "boost"], 1),
+          "unsafe or conflicted shared project stops before engine construction")
+    check(_run_startup(loop=True, recover_project=True, **options)
+          == (["ready", "index", "boost", "wait", "boost", "engine", "poll"], None),
+          "loop waits through project failure or conflict and polls only after initialization succeeds")
+check(_run_startup(enabled="false", project_status="completed") == (["boost", "engine", "poll"], 0),
+      "shared project initialization does not require vector memory")
 
 
 # Only Qdrant's first-start readiness is retried, not indexing itself.

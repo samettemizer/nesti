@@ -17,6 +17,12 @@ services:
       - /tmp:/tmp
       # Optional: persist logs on the host
       - ./logs:/orchestrator/logs
+      - nesti_state_data:${NESTI_STATE_DIR:-/var/lib/nesti}
+      - type: bind
+        source: ${NESTI_PROJECT_PATH:-/tmp}
+        target: ${NESTI_PROJECT_PATH:-/mnt/nesti-unconfigured}
+        bind:
+          create_host_path: false
     ports:
       # nesti /provider login antigravity runs a short-lived local HTTP
       # listener (scripts/oauth.py AntigravityProvider) to capture Google's
@@ -25,9 +31,16 @@ services:
       # Bound to localhost only, matching nesti-redis's port below — never
       # exposed to the network.
       - "127.0.0.1:51121:51121"
+      # /arch is available with the standard startup, on the Docker host only.
+      - "127.0.0.1:8787:8787"
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-60}
+      - NESTI_STATE_DIR=${NESTI_STATE_DIR:-/var/lib/nesti}
+      # Trust only the explicitly mounted project, never every host repository.
+      - GIT_CONFIG_COUNT=1
+      - GIT_CONFIG_KEY_0=safe.directory
+      - GIT_CONFIG_VALUE_0=${NESTI_PROJECT_PATH:-/mnt/nesti-unconfigured}
     command: ["--loop"]
     depends_on:
       nesti-redis:
@@ -73,6 +86,18 @@ services:
       # docker_run_tests operate on /tmp workspaces that the host Docker
       # daemon must be able to see when mounting the sandbox container.
       - /tmp:/tmp
+      - nesti_state_data:${NESTI_STATE_DIR:-/var/lib/nesti}
+      - type: bind
+        source: ${NESTI_PROJECT_PATH:-/tmp}
+        target: ${NESTI_PROJECT_PATH:-/mnt/nesti-unconfigured}
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      - NESTI_STATE_DIR=${NESTI_STATE_DIR:-/var/lib/nesti}
+      - GIT_CONFIG_COUNT=1
+      - GIT_CONFIG_KEY_0=safe.directory
+      - GIT_CONFIG_VALUE_0=${NESTI_PROJECT_PATH:-/mnt/nesti-unconfigured}
     stdin_open: true
     tty: true
     depends_on:
@@ -102,6 +127,13 @@ services:
     image: ${DOCKER_SANDBOX_PHP_IMAGE:-nesti-sandbox-php}
     scale: 0
 
+  nesti-sandbox-boost:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox.boost
+    image: ${DOCKER_SANDBOX_BOOST_IMAGE:-nesti-sandbox-boost}
+    scale: 0
+
   nesti-sandbox-node:
     build:
       context: .
@@ -123,4 +155,6 @@ volumes:
     driver: local
   # Same lifecycle: survives `down`, removed only by `docker-compose down -v`.
   nesti_qdrant_data:
+    driver: local
+  nesti_state_data:
     driver: local
