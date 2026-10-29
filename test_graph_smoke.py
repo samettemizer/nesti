@@ -96,7 +96,7 @@ def reset_calls(issue_id: int) -> None:
     calls.update({
         "issue_id": issue_id, "issues": [], "docker": 0, "escalate": 0,
         "openapi": 0, "vitest": 0, "playwright": 0,
-        "bootstrap": [], "layers": [],
+        "bootstrap": [], "layers": [], "layer_paths": [],
         "pushes": [], "mrs": [], "history_at_commit": None, "workspaces": [],
         "plan_prompts": [], "plan_systems": [], "code_prompts": [], "code_systems": [],
         "plan_messages": [], "code_messages": [],
@@ -165,6 +165,9 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             # Real markers, so detection is not faked — only the repo is.
             open(os.path.join(target_path, "artisan"), "w").close()
             open(os.path.join(target_path, "composer.json"), "w").close()
+            # plugin-vue makes clone_layout resolve the integrated layout ("."/".").
+            with open(os.path.join(target_path, "vite.config.js"), "w") as handle:
+                handle.write("import vue from '@vitejs/plugin-vue';\n")
         if vue_repo:
             os.makedirs(os.path.join(target_path, "resources", "js", "components"))
             open(os.path.join(target_path, "resources", "js", "components",
@@ -172,8 +175,8 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
         return {"success": True, "result": {"repo_path": target_path}}
     nodes.tool_gitlab_clone = fake_clone
 
-    def fake_bootstrap(repo_path):
-        calls["bootstrap"].append(repo_path)
+    def fake_bootstrap(repo_path, spa_path=""):
+        calls["bootstrap"].append((repo_path, spa_path) if spa_path else repo_path)
         return {"success": True, "result": {
             "created": bootstrap_created,
             "mode": "scaffold" if bootstrap_created else "top-up",
@@ -210,6 +213,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
         def fake(workspace_path):
             calls[key] += 1
             calls["layers"].append(key)
+            calls["layer_paths"].append((key, workspace_path))
             passed = outcomes[min(calls[key] - 1, len(outcomes) - 1)]
             result = {"passed": passed, "output": pass_out if passed else fail_out}
             if key == "playwright":
@@ -230,6 +234,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     def fake_openapi(workspace_path):
         calls["openapi"] += 1
         calls["layers"].append("openapi")
+        calls["layer_paths"].append(("openapi", workspace_path))
         passed = openapi_outcomes[min(calls["openapi"] - 1, len(openapi_outcomes) - 1)]
         if passed:
             return {"success": True, "result": {
@@ -1959,6 +1964,8 @@ class _IssueHTTP:
                 labels.append(label)
         if "state_event" in json:
             candidate["state"] = "closed" if json["state_event"] == "close" else "opened"
+        if "description" in json:
+            candidate["description"] = json["description"]
         if self.apply_put:
             self.issues[iid] = candidate
         return _FakeResponse(candidate)
@@ -2018,6 +2025,38 @@ http.issues[9]["state"] = "opened"
 http.issues[9]["labels"] = ["human"]
 check(not client.pause_issue(9) and not client.resume_issue(9) and not client.reopen_issue(9),
       "manual opt-out is never reversed")
+
+print("\n── Scenario 12d-omp: OMP escalation issue tools ──")
+import graph.tools as _issue_tools  # noqa: E402
+omp_http = _IssueHTTP()
+_real_issue_client = _issue_tools.GitLabIssuesClient
+_issue_tools.GitLabIssuesClient = omp_http.client
+created = _issue_tools.tool_issue_create("OMP task", "Scope: backend\n\nDo it.")
+check(created["success"] and "labels" not in omp_http.requests[0][2],
+      "issue_create sends no labels")
+omp_iid = created["result"]["id"]
+_ordinary_post = omp_http.post
+omp_http.post = lambda url, json=None, timeout=None: (
+    _FakeResponse({"error": "down"}, 500) if url.endswith("/notes")
+    else _ordinary_post(url, json=json, timeout=timeout))
+resolved = _issue_tools.tool_issue_resolve(omp_iid, "anthropic/model")
+check(not resolved["success"] and omp_http.issues[omp_iid]["state"] == "opened",
+      "issue_resolve with a failing note leaves the issue open")
+omp_http.post = _ordinary_post
+omp_http.add_issue(31, ["nesti"])
+check(not _issue_tools.tool_issue_resolve(31, "m")["success"]
+      and omp_http.issues[31]["state"] == "opened",
+      "issue_resolve refuses an opted-in issue")
+handed = _issue_tools.tool_issue_handoff(omp_iid, "must_fix: tests")
+check(handed["success"] and "nesti" in omp_http.issues[omp_iid]["labels"]
+      and omp_http.issues[omp_iid]["description"].endswith(
+          "## Third attempt (OMP team, advised) — rejected\n\nmust_fix: tests\n"),
+      "issue_handoff adds the label and appends the section, read back")
+resolved = _issue_tools.tool_issue_resolve(omp_http.add_issue(32, [])["iid"], "m")
+check(resolved["success"] and omp_http.issues[32]["state"] == "closed"
+      and omp_http.notes[32][-1]["body"] == "omp-developer / model: m",
+      "issue_resolve closes with the model comment")
+_issue_tools.GitLabIssuesClient = _real_issue_client
 
 http.add_issue(10, ["nesti", "nesti::in-progress", "human"])
 ordinary_put = http.put
@@ -2663,6 +2702,110 @@ check(_condense("", 500) == "", "empty input stays empty")
 check(_condense("boom", 0) == "", "a non-positive budget yields nothing")
 check(_condense("boom", 500) == "boom", "short output passes through untouched")
 
+
+# ═════ Scenario 33: separated (monorepo) layout ═════
+print("\n── Scenario 33: separated backend/ + frontend/ layout ──")
+from pathlib import Path                                 # noqa: E402
+import project_layout                                    # noqa: E402
+from docker_runner import DockerRunner                   # noqa: E402
+from graph.tools import tool_laravel_bootstrap           # noqa: E402
+
+
+def _put(root, relative, body=""):
+    path = os.path.join(root, relative)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+
+
+def _monorepo(root):
+    _put(root, "backend/artisan")
+    _put(root, "backend/composer.json", '{"require": {"dedoc/scramble": "^0.12"}}')
+    _put(root, "backend/routes/api.php", "<?php\n")
+    _put(root, "backend/vite.config.js", "export default {};\n")
+    _put(root, "frontend/package.json", json.dumps({
+        "type": "module", "dependencies": {"vue": "^3.5.0", "primevue": "^4.4.1"}}))
+    _put(root, "frontend/playwright.config.js", "// EXISTING\n")
+
+
+mono = tempfile.mkdtemp(prefix="nesti-mono-")
+try:
+    _monorepo(mono)
+    sep = lambda files: tool_detect_stack(mono, files, "backend", "frontend")["result"]
+    r = sep(["backend/app/Http/Controllers/X.php", "backend/routes/api.php"])
+    check(r["run_phpunit"] and r["run_openapi"] and not r["run_frontend"],
+          "separated: backend controller + api.php → PHPUnit + OpenAPI, no frontend layers")
+    _put(mono, "frontend/src/components/X.vue", "<template/>")
+    r = sep(["frontend/src/components/X.vue"])
+    check(r["run_frontend"] and not r["run_phpunit"] and not r["run_openapi"],
+          "separated: frontend .vue → Vitest/Playwright, no PHPUnit")
+    _put(mono, "backend/resources/js/X.vue", "<template/>")
+    r = sep(["backend/resources/js/X.vue"])
+    check(not r["run_frontend"] and r["run_phpunit"],
+          "separated: a .vue under backend/ never counts as frontend")
+
+    try:
+        DockerRunner.write_files(
+            "### DELETE: backend/database/migrations/2024_x.php\n", mono)
+        _refused = False
+    except ValueError:
+        _refused = True
+    check(_refused, "write_files refuses to DELETE backend/database/migrations/*")
+
+    boot = tool_laravel_bootstrap(
+        os.path.join(mono, "backend"), spa_path=os.path.join(mono, "frontend"))
+    check(boot["success"], "bootstrap with spa_path skips the backend vite.config.js plugin-vue guard")
+    check(os.path.isfile(os.path.join(mono, "backend/tests/Feature/OpenApiDocumentationTest.php"))
+          and os.path.isfile(os.path.join(mono, "frontend/vitest.config.js")),
+          "bootstrap writes the backend OpenAPI test and the SPA vitest config")
+    check(open(os.path.join(mono, "frontend/playwright.config.js")).read() == "// EXISTING\n",
+          "an existing SPA playwright.config.js stays untouched")
+    _pkg = json.load(open(os.path.join(mono, "frontend/package.json")))
+    check("vitest" in _pkg["devDependencies"]
+          and _pkg["devDependencies"]["@playwright/test"] == "1.50.0"
+          and _pkg["dependencies"]["primevue"] == "^4.4.1",
+          "SPA package.json gains vitest/@playwright/test 1.50.0 and keeps primevue ^4.4.1")
+finally:
+    shutil.rmtree(mono, ignore_errors=True)
+
+_state_dir = tempfile.mkdtemp(prefix="nesti-state-")
+_saved_layout = (project_layout.STATE_DIR, project_layout.LAYOUT_FILE)
+project_layout.STATE_DIR = Path(_state_dir)
+project_layout.LAYOUT_FILE = Path(_state_dir, "layout.json")
+project_layout.LAYOUT_FILE.write_text(json.dumps(
+    {"schema": 1, "layout": {"backend": "backend", "frontend": "frontend"}}))
+try:
+    reset_calls(133)
+    patch_tools(docker_outcomes=[True], code_responses=[
+        "### FILE: backend/routes/api.php\n```php\n<?php\n```\n\n"
+        "### FILE: backend/app/Http/Controllers/X.php\n```php\n<?php\n```\n\n"
+        "### FILE: frontend/src/components/X.vue\n```vue\n<template/>\n```\n"])
+
+    def mono_clone(target_path):
+        os.makedirs(target_path, exist_ok=True)
+        calls["workspaces"].append(os.path.dirname(target_path))
+        _monorepo(target_path)
+        return {"success": True, "result": {"repo_path": target_path}}
+    nodes.tool_gitlab_clone = mono_clone
+    f = compiled.invoke(initial(133), config={"recursion_limit": 60})
+    _clone = os.path.join(calls["workspaces"][0], "repo")
+    _paths = dict(calls["layer_paths"])
+    check(f["mr_url"] and f["layout"] == {"backend": "backend", "frontend": "frontend"},
+          "monorepo graph run reaches the MR with the saved separated layout")
+    check(_paths.get("docker") == os.path.join(_clone, "backend")
+          and _paths.get("openapi") == os.path.join(_clone, "backend"),
+          "PHPUnit and OpenAPI receive <clone>/backend")
+    check(_paths.get("vitest") == os.path.join(_clone, "frontend")
+          and _paths.get("playwright") == os.path.join(_clone, "frontend"),
+          "Vitest and Playwright receive <clone>/frontend")
+    check(calls["bootstrap"] == [(os.path.join(_clone, "backend"), os.path.join(_clone, "frontend"))],
+          "node_bootstrap tops up backend/ with the SPA path")
+    check("REPOSITORY LAYOUT (strict)" in calls["code_systems"][0]
+          and "primevue ^4.4.1" in calls["code_systems"][0],
+          "the coding prompt carries the layout block with installed SPA versions")
+finally:
+    project_layout.STATE_DIR, project_layout.LAYOUT_FILE = _saved_layout
+    shutil.rmtree(_state_dir, ignore_errors=True)
 
 # ═════ Scenario 13: TaskEngine thin wrapper ═════
 print("\n── Scenario 13: TaskEngine.run_once() ──")
