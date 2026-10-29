@@ -22,7 +22,7 @@ graph/state.py               IssueState, the data contract between nodes
 graph/tools.py               tool_* functions returning {"success": bool, ...}
 graph/nodes.py               nodes; each returns a partial IssueState
 graph/edges.py, builder.py   one router per test layer; compiled `graph`
-mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,skills,memory,oauth}.py
+mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,skills,memory,oauth,project}.py
 llm_client.py                provider cascade — the only module that calls LLMs
 prompt_builder.py            plan + code prompts composed per task scope, FILE-block output format
 issue_scope.py               backend/frontend/fullstack task scope + documentation-request check
@@ -38,12 +38,15 @@ reranker.py                  opt-in CPU rerank of retrieved docs (NESTI_RERANKER
                              deps in requirements-reranker.txt (orchestrator image only)
 layer_output.py              condenses sandbox output to its meaningful tail
 telegram_notifier.py         fire-and-forget alerts
-scripts/                     oauth.py (`nesti` CLI), fetch_skills.py, index_skills.py,
+project_layout.py            NESTI_PROJECT_PATH backend/SPA layout → state/layout.json; clone_layout for the pipeline
+project_boost.py             `nesti /boost`: Laravel Boost infer-conventions → <project>/.omp rules + skills
+architecture_view.py         `nesti /arch`: offline Plotly page state/architecture.html
+scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetch_skills.py, index_skills.py,
                              preflight.py, seed_live_issues.py, e2e_fixtures.php,
                              prepare_reranker.py (build-time model artifact),
                              evaluate_reranker.py + reranker_evaluation.py (offline quality gate)
-skills/, templates/laravel/  vendored doc corpus (primevue/laravel/practices),
-                             bootstrap templates
+skills/, templates/          vendored doc corpus (primevue/laravel/practices),
+                             bootstrap templates (laravel/, spa/), boost/ SPA discovery skill
 test_graph_smoke.py          offline regression net (.venv/bin/python test_graph_smoke.py)
 test_live_laravel.py         opt-in real-container proof (Docker + network)
 ```
