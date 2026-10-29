@@ -300,7 +300,8 @@ class DockerRunner:
             path = relative.as_posix()
             if path in operations:
                 raise ValueError(f"Duplicate or conflicting file changes for {path}.")
-            if deleting and relative.parts[:2] == ("database", "migrations"):
+            if deleting and any(relative.parts[i:i + 2] == ("database", "migrations")
+                                for i in range(len(relative.parts) - 1)):
                 raise ValueError(f"Migrations cannot be deleted: {path}.")
             target = root
             for part in relative.parts:
