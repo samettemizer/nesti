@@ -212,6 +212,13 @@ _PLAN_FRONTEND_STANDARDS = f"""\
   from an existing App.vue root. Keep the PrimeVue/Aura setup and every existing registration.
   An App.vue no entry imports, or a component only a test mounts, is not on the page."""
 
+_PLAN_SPA_STANDARDS = """\
+- For UI work, name the **PrimeVue components** to be used instead of describing raw HTML.
+- Follow the SPA's existing structure shown under Existing Repository State (router module,
+  pages folder, stores, API client modules) instead of resources/js/components.
+- The feature reaches the page through the existing router; keep the plugin/theme
+  registrations in src/main.*."""
+
 # The E2E data contract the planner and the coder share (frontend_runner +
 # scripts/e2e_fixtures.php consume e2e/nesti-fixtures.json).
 _PLAN_E2E_DATA = """\
@@ -320,6 +327,39 @@ API DOCUMENTATION (Scramble, dedoc/scramble is already installed):
   assertion like assertArrayHasKey('/api/tasks', $doc['paths']) fails even when the route is
   correctly documented. tests/Feature/OpenApiDocumentationTest.php already covers the wiring."""
 
+_VITEST_GUIDANCE = """\
+- In Vitest, assert user-visible behaviour through rendered text, interactions and emitted
+  events. Do not pin a library's incidental defaults (null versus undefined, unset props),
+  exact component/column counts or full prop arrays. Remove those brittle assertions when
+  extending an existing test; keep the required behaviour covered. A DataTable with zero rows
+  still renders an empty-message row: assert that message, not an empty list of tr elements.
+- Drive Vitest interactions through DOM controls (radio/checkbox: await setValue(true)) or
+  the child component's public update:modelValue event, not assignments to wrapper.vm state.
+  Clicking a detached label in jsdom need not activate its input; use the input or public event.
+  Import nextTick from 'vue' and mount/flushPromises from '@vue/test-utils'; nextTick is NOT
+  exported by @vue/test-utils. Import every component passed to findComponent explicitly.
+  Await mount's initial fetch before interacting; after a manually emitted event, await
+  nextTick(), then flushPromises() for resulting fetches before asserting rows or table props.
+  Advance fake timers for debounced work.
+- For paginated fetch mocks, derive each response from the requested URL's page/search/sort
+  and one fixed dataset; meta.total describes that dataset, not the current page length.
+  Mounting and changing a filter can both fetch page 1: do not exhaust mockResolvedValueOnce
+  pages and silently fall back to unrelated default rows. Test a filtered result spanning
+  two pages, including its total, last-page rows and reset to page 1 after a filter change.
+  Configure that mock before mount and keep it active for every fetch in the test. Example
+  for a page-only API (adapt the envelope and supported search/sort to the existing contract):
+    fetchMock.mockImplementation(async input => {
+      const page = Number(new URL(input, 'http://localhost').searchParams.get('page') || 1);
+      return { ok: true, json: async () => ({
+        data: dataset.slice((page - 1) * pageSize, page * pageSize),
+        meta: { total: dataset.length, per_page: pageSize, current_page: page }
+      }) };
+    });
+  For locally paginated filtered results, assert visible rows and paginator props, not the
+  last fetch's page number: changing local pages need not send any HTTP request.
+- On failure, check the test's interaction, update timing and mock contract before changing
+  working application code. Repair invalid test setup without weakening the expected behaviour."""
+
 _FRONTEND_STANDARDS = f"""\
 PRIMEVUE FRONTEND (Vue 3):
 - Vue 3 Composition API with <script setup>. Never @vue/compat, never the Options API.
@@ -358,37 +398,23 @@ PRIMEVUE FRONTEND (Vue 3):
   existing dependency, never change the pinned "@playwright/test": "1.50.0", and never rewrite
   the three config files.
 - Tailwind CSS 4 is available for layout utilities.
-- In Vitest, assert user-visible behaviour through rendered text, interactions and emitted
-  events. Do not pin a library's incidental defaults (null versus undefined, unset props),
-  exact component/column counts or full prop arrays. Remove those brittle assertions when
-  extending an existing test; keep the required behaviour covered. A DataTable with zero rows
-  still renders an empty-message row: assert that message, not an empty list of tr elements.
-- Drive Vitest interactions through DOM controls (radio/checkbox: await setValue(true)) or
-  the child component's public update:modelValue event, not assignments to wrapper.vm state.
-  Clicking a detached label in jsdom need not activate its input; use the input or public event.
-  Import nextTick from 'vue' and mount/flushPromises from '@vue/test-utils'; nextTick is NOT
-  exported by @vue/test-utils. Import every component passed to findComponent explicitly.
-  Await mount's initial fetch before interacting; after a manually emitted event, await
-  nextTick(), then flushPromises() for resulting fetches before asserting rows or table props.
-  Advance fake timers for debounced work.
-- For paginated fetch mocks, derive each response from the requested URL's page/search/sort
-  and one fixed dataset; meta.total describes that dataset, not the current page length.
-  Mounting and changing a filter can both fetch page 1: do not exhaust mockResolvedValueOnce
-  pages and silently fall back to unrelated default rows. Test a filtered result spanning
-  two pages, including its total, last-page rows and reset to page 1 after a filter change.
-  Configure that mock before mount and keep it active for every fetch in the test. Example
-  for a page-only API (adapt the envelope and supported search/sort to the existing contract):
-    fetchMock.mockImplementation(async input => {{
-      const page = Number(new URL(input, 'http://localhost').searchParams.get('page') || 1);
-      return {{ ok: true, json: async () => ({{
-        data: dataset.slice((page - 1) * pageSize, page * pageSize),
-        meta: {{ total: dataset.length, per_page: pageSize, current_page: page }}
-      }}) }};
-    }});
-  For locally paginated filtered results, assert visible rows and paginator props, not the
-  last fetch's page number: changing local pages need not send any HTTP request.
-- On failure, check the test's interaction, update timing and mock contract before changing
-  working application code. Repair invalid test setup without weakening the expected behaviour."""
+""" + _VITEST_GUIDANCE
+
+_SPA_STANDARDS = """\
+PRIMEVUE SPA (Vue 3):
+- Vue 3 Composition API with <script setup>, in the SPA's language (TypeScript when
+  tsconfig.json exists). Never @vue/compat, never the Options API.
+- Use PrimeVue components instead of hand-written markup. Import them per file unless the
+  project registers them globally.
+- Keep every plugin, theme and component registration in src/main.*.
+- Register a new page in the existing router; call the API through the existing HTTP
+  client/service module.
+- Components and Vitest specs follow the existing locations shown under Existing Repository
+  State (else src/components/__tests__/<Name>.spec.(ts|js)); Playwright specs go in
+  <frontend>/e2e/<feature>.spec.(ts|js).
+- vitest.config.js and playwright.config.js already exist: never rewrite them. package.json may
+  only gain dependencies; "@playwright/test": "1.50.0" stays exact.
+""" + _VITEST_GUIDANCE
 
 _TEST_PHPUNIT = """\
 - PHPUnit (`php artisan test`) runs whenever the change creates, modifies or deletes PHP, so
@@ -431,6 +457,12 @@ _TEST_E2E_DATA = {
     "fullstack": _E2E_FIXTURE_RULE + """
   A model or /api collection this change adds ships its own factory and seeder.""",
 }
+
+_TEST_SPA_LAYERS = """\
+- Vitest and then Playwright run when the change touches the SPA folder. Playwright builds the
+  SPA (`npm run build`) and serves it with `vite preview` on http://127.0.0.1:4173; the Laravel
+  API is NOT running. Every spec stubs each /api request it triggers with page.route(...) and
+  realistic JSON shaped like the backend's API Resources. Never declare e2e/nesti-fixtures.json."""
 
 _TEST_LOCATORS = """\
 - Use precise Playwright locators: getByRole('radio', { name: 'Done', exact: true }),
@@ -535,21 +567,58 @@ def _task_scope_block(scope: str, documentation: str) -> str:
     return "\n".join(lines)
 
 
-def _planning_system_prompt(scope: str, documentation: str) -> str:
+def _is_separated(layout: dict | None) -> bool:
+    """True for a layout whose Laravel API lives in its own folder, not the clone root."""
+    return bool(layout) and layout.get("backend") not in (None, ".")
+
+
+def _layout_block(layout: dict, spa_versions: dict) -> str:
+    """The REPOSITORY LAYOUT block for a separated layout."""
+    backend, frontend = layout["backend"], layout.get("frontend")
+    text = (
+        f"REPOSITORY LAYOUT (strict): The Laravel API lives in {backend}/; every backend path in "
+        "these instructions (app/…, routes/…, database/…, tests/…) is relative to it — write "
+        f"FILE paths as {backend}/app/…. "
+    )
+    if not frontend:
+        return text + "This project has no SPA: never create .vue, JavaScript or CSS files."
+    text += (
+        f"The Vue SPA lives in {frontend}/, a separate application (FILE paths {frontend}/src/…, "
+        f"{frontend}/e2e/…); it reaches the API only over HTTP. Never put Vue, JavaScript or CSS "
+        f"into {backend}/."
+    )
+    if spa_versions:
+        text += (
+            " Installed SPA dependencies: "
+            + ", ".join(f"{name} {constraint}" for name, constraint in spa_versions.items())
+            + " — use the APIs of these installed majors."
+        )
+    return text
+
+
+def _planning_system_prompt(scope: str, documentation: str, layout: dict | None = None) -> str:
     """The planning system prompt for *scope* (already normalised)."""
+    separated = _is_separated(layout)
     standards = [_PLAN_COMMON_STANDARDS]
     if scope != "frontend":
         standards += [_PLAN_BACKEND_STANDARDS, _SEEDER_REMOVAL_STANDARDS]
-    if scope != "backend":
+    if scope != "backend" and not separated:
         standards.append(_PLAN_FRONTEND_STANDARDS)
-    standards.append(_PLAN_TEST_STANDARDS[scope])
+    elif scope != "backend" and layout.get("frontend"):
+        standards.append(_PLAN_SPA_STANDARDS)
+    standards.append(
+        _PLAN_TEST_STANDARDS[scope].replace("\n" + _PLAN_E2E_DATA, "") if separated
+        else _PLAN_TEST_STANDARDS[scope]
+    )
 
     sections = [
         _PLANNING_ROLE[scope],
         "Your task in this phase is a concise IMPLEMENTATION PLAN — no code yet.",
         _task_scope_block(scope, documentation),
-        _PONYTAIL_FULL,
     ]
+    if separated:
+        sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
+    sections.append(_PONYTAIL_FULL)
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
     sections.append("PLANNING STANDARDS:\n" + "\n".join(standards))
@@ -557,23 +626,32 @@ def _planning_system_prompt(scope: str, documentation: str) -> str:
     return "\n\n".join(sections)
 
 
-def _coding_system_prompt(scope: str, documentation: str) -> str:
+def _coding_system_prompt(scope: str, documentation: str, layout: dict | None = None) -> str:
     """The coding system prompt for *scope* (already normalised)."""
+    separated = _is_separated(layout)
+    spa = separated and bool(layout.get("frontend"))
     testing = ["TESTING (layers follow the files you create, modify or delete):"]
     if scope != "frontend":
         testing.append(_TEST_PHPUNIT)
-    if scope != "backend":
+    if scope != "backend" and not separated:
         testing += [_TEST_FRONTEND_LAYERS, _TEST_E2E_DATA[scope], _TEST_LOCATORS]
+    elif scope != "backend" and spa:
+        testing += [_TEST_SPA_LAYERS, _TEST_LOCATORS]
     testing.append(_TEST_SCOPE_NOTE[scope])
 
-    sections = [_CODING_ROLE[scope], _task_scope_block(scope, documentation), _PONYTAIL_FULL]
+    sections = [_CODING_ROLE[scope], _task_scope_block(scope, documentation)]
+    if separated:
+        sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
+    sections.append(_PONYTAIL_FULL)
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
     sections.append(_CODING_STANDARDS)
     if scope != "frontend":
         sections += [_BACKEND_STANDARDS, _SEEDER_REMOVAL_STANDARDS]
-    if scope != "backend":
+    if scope != "backend" and not separated:
         sections.append(_FRONTEND_STANDARDS)
+    elif scope != "backend" and spa:
+        sections.append(_SPA_STANDARDS)
     sections.append("\n".join(testing))
     sections.append(_CODE_OUTPUT_FORMAT)
     return "\n\n".join(sections)
@@ -775,6 +853,7 @@ def build_plan_prompt(
     scope: str = "fullstack",
     scope_evidence: str = "",
     metrics: dict | None = None,
+    layout: dict | None = None,
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the planning phase.
@@ -867,7 +946,9 @@ Write the plan now. No code, no preamble.\
 """,
     }
     user_prompt = "".join(sections.values())
-    system_prompt = _planning_system_prompt(scope, documentation_request(subject, description))
+    system_prompt = _planning_system_prompt(
+        scope, documentation_request(subject, description), layout
+    )
     if metrics is not None:
         metrics.update({f"{name}_chars": len(text) for name, text in sections.items()})
         metrics.update(system_chars=len(system_prompt), user_chars=len(user_prompt))
@@ -884,6 +965,7 @@ def build_code_prompt(
     recalled_failures: "list[dict] | None" = None,
     scope: str = "fullstack",
     metrics: dict | None = None,
+    layout: dict | None = None,
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the code-generation phase.
@@ -969,7 +1051,9 @@ Implement the approved plan above:
 """,
     }
     user_prompt = "".join(sections.values())
-    system_prompt = _coding_system_prompt(scope, documentation_request(subject, description))
+    system_prompt = _coding_system_prompt(
+        scope, documentation_request(subject, description), layout
+    )
     if metrics is not None:
         metrics.update({f"{name}_chars": len(text) for name, text in sections.items()})
         metrics.update(system_chars=len(system_prompt), user_chars=len(user_prompt))
