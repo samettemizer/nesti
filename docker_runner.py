@@ -134,6 +134,16 @@ _SCRAMBLE_INSTALL_COMMAND = [
     ]),
 ]
 
+# Boost commands register only under APP_ENV=local; the cache paths keep the
+# app's own bootstrap/cache untouched.
+_BOOST_ENV = {
+    "APP_ENV": "local", "BOOST_ENABLED": "true", "BOOST_RULES_ENABLED": "true",
+    "HOME": "/tmp", "COMPOSER_HOME": "/tmp/composer", "COMPOSER_MEMORY_LIMIT": "-1",
+    "APP_CONFIG_CACHE": "/tmp/nesti-config.php", "APP_ROUTES_CACHE": "/tmp/nesti-routes.php",
+    "APP_SERVICES_CACHE": "/tmp/nesti-services.php", "APP_PACKAGES_CACHE": "/tmp/nesti-packages.php",
+    "APP_EVENTS_CACHE": "/tmp/nesti-events.php",
+}
+
 
 class DockerRunner:
     def __init__(self):
@@ -193,6 +203,19 @@ class DockerRunner:
         """
         return self._run(
             repo_path, _SCRAMBLE_INSTALL_COMMAND, self.bootstrap_timeout, "scramble-install"
+        )
+
+    def run_boost_script(self, app_path: str, script: str, *, network: bool) -> tuple[bool, str]:
+        """
+        Run a Laravel Boost *script* in the real app at *app_path* as its owner.
+
+        Returns ``(success, output)`` — success is True on exit code 0.
+        """
+        st = os.stat(app_path)
+        return self._run(
+            app_path, ["bash", "-lc", script], self.bootstrap_timeout, "boost",
+            user=f"{st.st_uid}:{st.st_gid}", environment=_BOOST_ENV,
+            network_disabled=not network,
         )
 
     # ------------------------------------------------------------------
