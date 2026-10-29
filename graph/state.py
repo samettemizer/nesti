@@ -63,6 +63,7 @@ class IssueState(TypedDict, total=False):
     scope: str                         # "backend" | "frontend" | "fullstack" — prompts only
     code_response: str                 # latest coder output
     repo_path: str                     # local clone path
+    layout: dict                       # {"backend": str|None, "frontend": str|None}; "." = clone root
     branch_name: str                   # git branch
     workspace: str                     # tempdir path
 

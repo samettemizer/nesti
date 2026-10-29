@@ -117,6 +117,7 @@ _IMPLICIT_METHODS = frozenset({"HEAD", "OPTIONS"})
 # destination.  Scaffold mode writes all of them over the skeleton Nesti just
 # created; top-up mode writes only _TOPUP_TEMPLATES, and only when absent.
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "laravel"
+_SPA_TEMPLATES_DIR = _TEMPLATES_DIR.parent / "spa"
 
 _SCAFFOLD_TEMPLATES = (
     "vite.config.js",
@@ -449,7 +450,71 @@ def _change_sides(written_files: "list[str] | None") -> tuple[bool, bool]:
     return backend, frontend
 
 
-def tool_detect_stack(workspace_path: str, written_files: "list[str] | None" = None) -> dict:
+def _under(files: "list[str] | None", folder: str) -> "list[str] | None":
+    """*files* inside *folder*, relative to it; ``None`` stays ``None``."""
+    if files is None or folder == ".":
+        return files
+    prefix = folder + "/"
+    return [
+        p[len(prefix):] for p in (f.replace("\\", "/").removeprefix("./") for f in files)
+        if p.startswith(prefix)
+    ]
+
+
+def _detect_separated(
+    workspace_path: str, written_files: "list[str] | None", backend_dir: str, frontend_dir: str
+) -> dict:
+    """``tool_detect_stack`` for a separated layout: each side gated on its own folder."""
+    root = Path(workspace_path)
+    backend = root / backend_dir
+    is_laravel = (backend / _LARAVEL_MARKER).is_file()
+    has_api_routes = (backend / _API_ROUTES_FILE).is_file()
+    backend_files = _under(written_files, backend_dir)
+    frontend_files = _under(written_files, frontend_dir) if frontend_dir else []
+    run_openapi = is_laravel and has_api_routes and _touches_api(backend_files)
+
+    override = os.environ.get("NESTI_STACK", "auto").strip().lower()
+    if override in _VALID_STACKS:
+        stack, source, vue_files = override, "override", []
+        has_vue = stack in ("vue", "fullstack")
+        has_php = stack in ("php", "fullstack")
+    elif override not in ("", "auto"):
+        return _err(
+            f"Invalid NESTI_STACK={override!r} – expected 'auto' or one of {_VALID_STACKS}."
+        )
+    else:
+        _, has_php = _scan_workspace(str(backend))
+        vue_files = [
+            f"{frontend_dir}/{f}" for f in _scan_workspace(str(root / frontend_dir))[0]
+        ] if frontend_dir else []
+        has_vue = bool(vue_files)
+        stack = ("fullstack" if has_php else "vue") if has_vue else ("php" if has_php else "unknown")
+        source = "auto"
+
+    touches_backend = written_files is None or bool(backend_files)
+    touches_frontend = bool(frontend_dir) and (written_files is None or bool(frontend_files))
+    run_frontend = has_vue and touches_frontend
+    run_phpunit = touches_backend or not run_frontend
+    return _ok({
+        "stack": stack,
+        "has_vue": has_vue,
+        "has_php": has_php,
+        "run_phpunit": run_phpunit,
+        "run_frontend": run_frontend,
+        "vue_files": vue_files,
+        "source": source,
+        "is_laravel": is_laravel,
+        "has_api_routes": has_api_routes,
+        "run_openapi": run_openapi,
+    })
+
+
+def tool_detect_stack(
+    workspace_path: str,
+    written_files: "list[str] | None" = None,
+    backend_dir: str = ".",
+    frontend_dir: str = ".",
+) -> dict:
     """
     Determine which test layers apply to the code in workspace_path.
 
@@ -492,12 +557,17 @@ def tool_detect_stack(workspace_path: str, written_files: "list[str] | None" = N
     Omitting *written_files* (MCP callers) yields the conservative answer for
     all three gates: every layer the repository supports runs.
 
+    *backend_dir*/*frontend_dir* name the layout's folders ("." = root,
+    frontend "" = no SPA); anything but "."/"." gates each side on its folder.
+
     Detection is automatic; set NESTI_STACK to php / vue / fullstack to pin the
     *stack* when a repository's layout misleads the scan.  NESTI_STACK never
     pins the Laravel markers: those are two cheap is_file() checks that cannot
     be misled.
     """
     try:
+        if (backend_dir, frontend_dir) != (".", "."):
+            return _detect_separated(workspace_path, written_files, backend_dir, frontend_dir)
         root = Path(workspace_path)
         is_laravel = (root / _LARAVEL_MARKER).is_file()
         has_api_routes = (root / _API_ROUTES_FILE).is_file()
@@ -565,11 +635,13 @@ def _has_scramble(root: Path) -> bool:
     return False
 
 
-def _apply_templates(repo_path: str, names: tuple[str, ...], overwrite: bool) -> list[str]:
+def _apply_templates(
+    repo_path: str, names: tuple[str, ...], overwrite: bool, source_dir: Path = _TEMPLATES_DIR
+) -> list[str]:
     """Copy bootstrap templates into the repository.  Returns the paths written."""
     applied: list[str] = []
     for rel in names:
-        source = _TEMPLATES_DIR / rel
+        source = source_dir / rel
         if not source.is_file():
             raise FileNotFoundError(f"bootstrap template missing: {source}")
         dest = Path(repo_path, rel)
@@ -643,7 +715,7 @@ def _append_gitignore(repo_path: str) -> list[str]:
     return missing
 
 
-def tool_laravel_bootstrap(repo_path: str) -> dict:
+def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
     """
     Make *repo_path* a Laravel 13 + Scramble + PrimeVue application.
 
@@ -666,6 +738,11 @@ def tool_laravel_bootstrap(repo_path: str) -> dict:
     • non-Laravel PHP project (composer.json without artisan) → success=False.
       Scaffolding a Laravel skeleton over a foreign application would destroy
       it, so this is reported as the configuration error it is.
+
+    *spa_path* (separated layout: *repo_path* is the Laravel API folder) tops
+    up the SPA folder instead: it skips the vite.config.js guard, writes only
+    the Scramble wiring test into the backend and the absent
+    vitest/playwright configs plus missing package.json keys into the SPA.
     """
     try:
         root = Path(repo_path)
@@ -678,7 +755,7 @@ def tool_laravel_bootstrap(repo_path: str) -> dict:
                 "and not greenfield"
             )
 
-        if not has_artisan:
+        if not has_artisan and not spa_path:
             passed, output = DockerRunner().run_bootstrap(repo_path)
             if not passed:
                 return _err(f"Laravel skeleton bootstrap failed:\n{output}")
@@ -702,7 +779,7 @@ def tool_laravel_bootstrap(repo_path: str) -> dict:
 
         # ── top-up: an existing Laravel application ──────────────────────────
         vite_config = root / "vite.config.js"
-        if vite_config.is_file():
+        if not spa_path and vite_config.is_file():
             vite_source = vite_config.read_text(encoding="utf-8", errors="replace")
             if "@vitejs/plugin-vue" not in vite_source:
                 # Generating .vue files a repository cannot compile would burn
@@ -720,13 +797,26 @@ def tool_laravel_bootstrap(repo_path: str) -> dict:
                 return _err(f"dedoc/scramble installation failed:\n{output}")
             notes.append("installed dedoc/scramble")
 
-        applied = _apply_templates(repo_path, _TOPUP_TEMPLATES, overwrite=False)
+        if spa_path:
+            applied = _apply_templates(
+                repo_path, ("tests/Feature/OpenApiDocumentationTest.php",), overwrite=False
+            )
+            ignored = _append_gitignore(repo_path)
+            applied += [
+                f"{Path(spa_path).name}/{rel}" for rel in _apply_templates(
+                    spa_path, ("vitest.config.js", "playwright.config.js"),
+                    overwrite=False, source_dir=_SPA_TEMPLATES_DIR,
+                )
+            ]
+            package = _merge_package_json(spa_path, overwrite=False)
+        else:
+            applied = _apply_templates(repo_path, _TOPUP_TEMPLATES, overwrite=False)
+            package = _merge_package_json(repo_path, overwrite=False)
+            ignored = _append_gitignore(repo_path)
         if applied:
             notes.append("added " + ", ".join(applied))
-        package = _merge_package_json(repo_path, overwrite=False)
         if package:
             notes.append(f"added {len(package)} package.json key(s)")
-        ignored = _append_gitignore(repo_path)
         if ignored:
             notes.append("extended .gitignore")
 

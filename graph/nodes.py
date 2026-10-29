@@ -63,6 +63,7 @@ resumed by TaskEngine's reconciliation only after that child's MR is merged.
 """
 
 import logging
+import json
 import os
 import re
 import shutil
@@ -86,6 +87,7 @@ from graph.tools import (
 )
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
+from project_layout import LayoutError, clone_layout
 from conversation_store import ConversationStore
 from prompt_builder import (
     build_plan_prompt, build_code_prompt, drop_injected_chunks, format_catalog_for_prompt,
@@ -423,17 +425,19 @@ def _inventory_listing(directory: Path) -> list[str]:
 
 
 def _quoted_entry_files(
-    root: Path, scope: str = "fullstack", referenced_files: list[tuple[str, str]] | None = None
+    root: Path, scope: str = "fullstack", referenced_files: list[tuple[str, str]] | None = None,
+    prefix: str = "", quoted: tuple[tuple[str, str], ...] = _INVENTORY_QUOTED_FILES,
 ) -> list[str]:
     """Quote complete task targets and entry bodies within one budget, never fragments."""
     fixed_files = [
-        (relative, language) for relative, language in _INVENTORY_QUOTED_FILES
+        (relative, language) for relative, language in quoted
         if scope != "backend" or relative == "database/seeders/DatabaseSeeder.php"
     ]
     files = dict((referenced_files or []) + fixed_files)
     entries: list[tuple[str | None, str]] = []
     for relative, language in files.items():
         path = root / relative
+        relative = prefix + relative
         if path.is_symlink():
             entries.append((None, f"\n{relative}: exists, body omitted (symbolic link)."))
             continue
@@ -502,9 +506,27 @@ def _api_contract_files(root: Path, routes: str) -> list[tuple[str, str]]:
     return list(files.items())
 
 
+_BACKEND_INVENTORY_DIRS = tuple(
+    entry for entry in _INVENTORY_DIRS if entry[0] not in ("resources/js/components", "e2e")
+)
+_SPA_INVENTORY_DIRS = (("src", 80), ("e2e", 40))
+_SPA_QUOTED_FILES = tuple(
+    (name, name.rsplit(".", 1)[-1]) for name in (
+        "src/main.ts", "src/main.js", "src/App.vue", "index.html", "vite.config.ts",
+        "vite.config.js", "vitest.config.js", "vitest.config.ts", "playwright.config.js",
+        "playwright.config.ts", "package.json",
+    )
+)
+
+
+def _is_separated(layout: dict | None) -> bool:
+    """True for a layout whose backend lives in its own folder, not the clone root."""
+    return bool(layout) and layout.get("backend") not in (None, ".")
+
+
 def _repo_inventory(
     repo_path: str, scope: str = "fullstack", task_text: str = "",
-    previous_files: list[str] | None = None,
+    previous_files: list[str] | None = None, layout: dict | None = None,
 ) -> str:
     """
     Describe what the cloned repository already contains, for the prompts.
@@ -534,100 +556,28 @@ def _repo_inventory(
         if not root.is_dir():
             return ""
 
-        lines: list[str] = []
-        referenced_files: list[tuple[str, str]] = [("package.json", "json")] if scope != "backend" else []
-        referenced_files = [
-            (path, Path(path).suffix.lstrip(".")) for path in (previous_files or [])
-        ] + referenced_files
-        api_files: list[tuple[str, str]] = []
-        test_files: list[str] = []
-        for relative, cap in _INVENTORY_DIRS:
-            directory = root / relative
-            if not directory.is_dir():
-                continue
-            names = _inventory_listing(directory)
-            if not names:
-                continue
-            shown = names[:cap]
-            suffix = f" … (+{len(names) - cap} more)" if len(names) > cap else ""
-            lines.append(f"- {relative}/: {', '.join(shown)}{suffix}")
-            for name in names:
-                path = f"{relative}/{name}"
-                basename = name.rsplit("/", 1)[-1]
-                if re.search(r"\.(?:test|spec)\.[cm]?[jt]sx?$", name):
-                    test_files.append(path)
-                pattern = rf"(?<![\w./-])(?:{re.escape(path)}|{re.escape(basename)})(?![\w./-])"
-                if task_text and re.search(pattern, task_text):
-                    language = Path(name).suffix.lstrip(".")
-                    referenced_files.append((path, language))
-
-        targets = {(root / path).resolve() for path, _ in referenced_files if path.endswith(".vue")}
-        e2e_names = {re.sub(r"(?<!^)(?=[A-Z])", "-", path.stem).lower() for path in targets}
-        # shortcut: relative SFC imports; Vite aliases need a resolver for alias-only suites.
-        for relative in test_files if targets else []:
-            path = root / relative
-            if relative.startswith("e2e/") and path.name.split(".")[0] in e2e_names:
-                referenced_files.append((relative, path.suffix.lstrip(".")))
-                continue
-            if not path.resolve().is_relative_to(root.resolve()):
-                continue
-            try:
-                with path.open(encoding="utf-8") as handle:
-                    body = handle.read(_MAX_QUOTED_FILE_CHARS + 1)
-            except (OSError, UnicodeDecodeError):
-                continue
-            imports = re.findall(r"""from\s*['"](\.[^'"]+\.vue)['"]""", body)
-            if any((path.parent / name).resolve() in targets for name in imports):
-                referenced_files.append((relative, path.suffix.lstrip(".")))
-
-        api_context = task_text
-        if scope == "frontend":
-            for relative, _ in referenced_files:
-                path = root / relative
-                if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
-                    continue
-                try:
-                    with path.open(encoding="utf-8") as handle:
-                        api_context += "\n" + handle.read(_MAX_QUOTED_FILE_CHARS)
-                except (OSError, UnicodeDecodeError):
-                    continue
-
-        for relative in _INVENTORY_ROUTE_FILES:
-            route_file = root / relative
-            if not route_file.is_file():
-                continue
-            try:
-                body = route_file.read_text(encoding="utf-8", errors="replace").strip()
-            except OSError as exc:
-                lines.append(f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}).")
-                continue
-            if relative == "routes/api.php":
-                contract_routes = body
-                if (
-                    scope == "frontend" and (targets or "/api/" in task_text)
-                    and not re.search(r"(?:Route::|->)(?:prefix|group)\s*\(", body)
-                ):
-                    # shortcut: literal ungrouped routes; grouped routes keep all contracts.
-                    relevant = [
-                        route for route in re.findall(r"Route::[^;]+;", body)
-                        if any(
-                            re.search(rf"{re.escape('/api/' + uri.strip('/'))}(?![\w-])", api_context)
-                            for uri in re.findall(r"""Route::\w+\(\s*['"]([^'"]+)['"]""", route)
-                        )
-                    ]
-                    aliases = "\n".join(relevant)
-                    imports = []
-                    for name, alias in re.findall(r"use\s+(App\\[\w\\]+)(?:\s+as\s+(\w+))?;", body):
-                        alias = alias or name.rsplit("\\", 1)[-1]
-                        if re.search(rf"\b{re.escape(alias)}::", aliases):
-                            imports.append(f"use {name};")
-                    contract_routes = "\n".join(imports + relevant)
-                api_files = _api_contract_files(root, contract_routes)
-            if len(body) > _MAX_ROUTE_FILE_CHARS:
-                body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
-            lines.append(f"\nCurrent {relative}:\n```php\n{body}\n```")
-
-        lines += _quoted_entry_files(root, scope, referenced_files + api_files)
+        if not _is_separated(layout):
+            lines = _inventory_lines(
+                root, "", scope, task_text, previous_files,
+                _INVENTORY_DIRS, _INVENTORY_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
+            )
+        else:
+            backend = root / layout["backend"]
+            app = backend / "app"
+            custom = tuple(
+                (f"app/{d.name}", 40) for d in sorted(app.iterdir()) if d.is_dir()
+                and d.name != "Http" and f"app/{d.name}" not in dict(_BACKEND_INVENTORY_DIRS)
+            ) if app.is_dir() else ()
+            lines = _inventory_lines(
+                backend, layout["backend"] + "/", scope, task_text, previous_files,
+                _BACKEND_INVENTORY_DIRS + custom,
+                (("database/seeders/DatabaseSeeder.php", "php"),), _INVENTORY_ROUTE_FILES,
+            )
+            if scope != "backend" and layout.get("frontend"):
+                lines += _inventory_lines(
+                    root / layout["frontend"], layout["frontend"] + "/", scope, task_text,
+                    previous_files, _SPA_INVENTORY_DIRS, _SPA_QUOTED_FILES, (),
+                )
 
         if not lines:
             return (
@@ -643,6 +593,112 @@ def _repo_inventory(
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("Could not build the repository inventory: %s", exc)
         return ""
+
+
+def _inventory_lines(
+    root: Path, prefix: str, scope: str, task_text: str, previous_files: list[str] | None,
+    dirs: tuple[tuple[str, int], ...], quoted: tuple[tuple[str, str], ...],
+    route_files: tuple[str, ...],
+) -> list[str]:
+    """Inventory lines for one application folder; every emitted path is *prefix* + relative."""
+    if not root.is_dir():
+        return []
+    lines: list[str] = []
+    referenced_files: list[tuple[str, str]] = [("package.json", "json")] if scope != "backend" else []
+    referenced_files = [
+        (path[len(prefix):], Path(path).suffix.lstrip("."))
+        for path in (previous_files or []) if path.startswith(prefix)
+    ] + referenced_files
+    api_files: list[tuple[str, str]] = []
+    test_files: list[str] = []
+    for relative, cap in dirs:
+        directory = root / relative
+        if not directory.is_dir():
+            continue
+        names = _inventory_listing(directory)
+        if not names:
+            continue
+        shown = names[:cap]
+        suffix = f" … (+{len(names) - cap} more)" if len(names) > cap else ""
+        lines.append(f"- {prefix}{relative}/: {', '.join(shown)}{suffix}")
+        for name in names:
+            path = f"{relative}/{name}"
+            basename = name.rsplit("/", 1)[-1]
+            if re.search(r"\.(?:test|spec)\.[cm]?[jt]sx?$", name):
+                test_files.append(path)
+            pattern = rf"(?<![\w./-])(?:{re.escape(prefix + path)}|{re.escape(basename)})(?![\w./-])"
+            if task_text and re.search(pattern, task_text):
+                language = Path(name).suffix.lstrip(".")
+                referenced_files.append((path, language))
+
+    targets = {(root / path).resolve() for path, _ in referenced_files if path.endswith(".vue")}
+    e2e_names = {re.sub(r"(?<!^)(?=[A-Z])", "-", path.stem).lower() for path in targets}
+    # shortcut: relative SFC imports; Vite aliases need a resolver for alias-only suites.
+    for relative in test_files if targets else []:
+        path = root / relative
+        if relative.startswith("e2e/") and path.name.split(".")[0] in e2e_names:
+            referenced_files.append((relative, path.suffix.lstrip(".")))
+            continue
+        if not path.resolve().is_relative_to(root.resolve()):
+            continue
+        try:
+            with path.open(encoding="utf-8") as handle:
+                body = handle.read(_MAX_QUOTED_FILE_CHARS + 1)
+        except (OSError, UnicodeDecodeError):
+            continue
+        imports = re.findall(r"""from\s*['"](\.[^'"]+\.vue)['"]""", body)
+        if any((path.parent / name).resolve() in targets for name in imports):
+            referenced_files.append((relative, path.suffix.lstrip(".")))
+
+    api_context = task_text
+    if scope == "frontend":
+        for relative, _ in referenced_files:
+            path = root / relative
+            if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+                continue
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    api_context += "\n" + handle.read(_MAX_QUOTED_FILE_CHARS)
+            except (OSError, UnicodeDecodeError):
+                continue
+
+    for relative in route_files:
+        route_file = root / relative
+        if not route_file.is_file():
+            continue
+        try:
+            body = route_file.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError as exc:
+            lines.append(f"\n{prefix}{relative}: exists, body omitted (unreadable: {type(exc).__name__}).")
+            continue
+        if relative == "routes/api.php":
+            contract_routes = body
+            if (
+                scope == "frontend" and (targets or "/api/" in task_text)
+                and not re.search(r"(?:Route::|->)(?:prefix|group)\s*\(", body)
+            ):
+                # shortcut: literal ungrouped routes; grouped routes keep all contracts.
+                relevant = [
+                    route for route in re.findall(r"Route::[^;]+;", body)
+                    if any(
+                        re.search(rf"{re.escape('/api/' + uri.strip('/'))}(?![\w-])", api_context)
+                        for uri in re.findall(r"""Route::\w+\(\s*['"]([^'"]+)['"]""", route)
+                    )
+                ]
+                aliases = "\n".join(relevant)
+                imports = []
+                for name, alias in re.findall(r"use\s+(App\\[\w\\]+)(?:\s+as\s+(\w+))?;", body):
+                    alias = alias or name.rsplit("\\", 1)[-1]
+                    if re.search(rf"\b{re.escape(alias)}::", aliases):
+                        imports.append(f"use {name};")
+                contract_routes = "\n".join(imports + relevant)
+            api_files = _api_contract_files(root, contract_routes)
+        if len(body) > _MAX_ROUTE_FILE_CHARS:
+            body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
+        lines.append(f"\nCurrent {prefix}{relative}:\n```php\n{body}\n```")
+
+    lines += _quoted_entry_files(root, scope, referenced_files + api_files, prefix, quoted)
+    return lines
 
 
 def _last_failure_output(state: IssueState) -> tuple[str, str]:
@@ -707,6 +763,34 @@ def _test_report(state: IssueState) -> str:
     )
 
 
+_INTEGRATED_LAYOUT = {"backend": ".", "frontend": "."}
+_SPA_VERSION_PACKAGES = ("vue", "primevue", "@primeuix/themes", "vue-router", "pinia", "typescript", "axios")
+
+
+def _layer_path(state: IssueState, side: str) -> str:
+    """Absolute folder of the layout's *side* ("backend"/"frontend") inside the clone."""
+    layout = state.get("layout") or _INTEGRATED_LAYOUT
+    return os.path.normpath(os.path.join(state["repo_path"], layout[side]))
+
+
+def _prompt_layout(state: IssueState) -> dict | None:
+    """The layout for the prompts, with the SPA's installed versions for a separated one."""
+    layout = state.get("layout")
+    if not _is_separated(layout):
+        return layout
+    versions: dict[str, str] = {}
+    if layout.get("frontend"):
+        try:
+            package = json.loads(
+                Path(_layer_path(state, "frontend"), "package.json").read_text(encoding="utf-8")
+            )
+            installed = {**package.get("devDependencies", {}), **package.get("dependencies", {})}
+            versions = {name: installed[name] for name in _SPA_VERSION_PACKAGES if name in installed}
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Could not read the SPA package.json: %s", exc)
+    return {**layout, "spa_versions": versions}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Nodes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -749,12 +833,19 @@ def node_setup(state: IssueState) -> dict:
         shutil.rmtree(workspace, ignore_errors=True)
         raise RuntimeError(f"Branch creation failed: {branched['error']}")
 
+    try:
+        layout = clone_layout(Path(repo_path))
+    except LayoutError as exc:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise RuntimeError(f"Project layout: {exc}") from exc
+
     branch_name = branched["result"]["branch_name"]
     logger.debug("← node_setup (workspace=%s, branch=%s)", workspace, branch_name)
     return {
         "workspace": workspace,
         "repo_path": repo_path,
         "branch_name": branch_name,
+        "layout": layout,
     }
 
 
@@ -770,7 +861,16 @@ def node_bootstrap(state: IssueState) -> dict:
     reopens the issue with that reason without leaking a tempdir.
     """
     logger.debug("→ node_bootstrap")
-    result = tool_laravel_bootstrap(state["repo_path"])
+    layout = state.get("layout") or {}
+    if layout.get("backend") is None and layout.get("frontend") is None:
+        result = tool_laravel_bootstrap(state["repo_path"])
+        layout = _INTEGRATED_LAYOUT
+    else:
+        result = tool_laravel_bootstrap(
+            _layer_path(state, "backend"),
+            spa_path=_layer_path(state, "frontend")
+            if layout["frontend"] not in (None, ".") else "",
+        )
     if not result["success"]:
         shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
         raise RuntimeError(f"Laravel bootstrap failed: {result['error']}")
@@ -787,7 +887,7 @@ def node_bootstrap(state: IssueState) -> dict:
             detail["reason"],
         )
     logger.debug("← node_bootstrap (created=%s)", detail["created"])
-    return {"is_laravel": True, "bootstrapped": detail["created"]}
+    return {"is_laravel": True, "bootstrapped": detail["created"], "layout": layout}
 
 
 def node_load_skills(state: IssueState) -> dict:
@@ -871,7 +971,9 @@ def node_plan(state: IssueState) -> dict:
         max_topic_docs=topics,
         max_practice_docs=1,
     )
-    repo_context = _repo_inventory(state.get("repo_path", ""), decision.scope, issue_text)
+    repo_context = _repo_inventory(
+        state.get("repo_path", ""), decision.scope, issue_text, layout=state.get("layout")
+    )
 
     # memory: how similar issues were solved before (Redis solution
     # cache) and the corpus passages the keyword catalog missed (Qdrant).
@@ -903,6 +1005,7 @@ def node_plan(state: IssueState) -> dict:
         retrieved_chunks=retrieved,
         past_solutions=past_solutions,
         scope=decision.scope,
+        layout=_prompt_layout(state),
         scope_evidence=decision.evidence(),
         metrics=metrics,
     )
@@ -966,7 +1069,9 @@ def node_code(state: IssueState) -> dict:
     # Rebuilt every attempt: the previous attempt's own files are part of the
     # repository now, and a retry must see them rather than re-inventing them.
     previous_files = state.get("written_files") or []
-    repo_context = _repo_inventory(state.get("repo_path", ""), scope, haystack, previous_files)
+    repo_context = _repo_inventory(
+        state.get("repo_path", ""), scope, haystack, previous_files, state.get("layout")
+    )
 
     # memory.  A narrow scope filters the doc search from the first
     # attempt.  A fullstack scope falls back to the detected stack, and only
@@ -1011,6 +1116,7 @@ def node_code(state: IssueState) -> dict:
         retrieved_chunks=retrieved,
         recalled_failures=recalled,
         scope=scope,
+        layout=_prompt_layout(state),
         metrics=metrics,
     )
     base_user_chars = len(user_prompt)
@@ -1120,7 +1226,11 @@ def node_detect_stack(state: IssueState) -> dict:
 
     # route_after_code admits only responses with accepted file operations.
 
-    result = tool_detect_stack(state["repo_path"], state.get("written_files"))
+    layout = state.get("layout") or _INTEGRATED_LAYOUT
+    result = tool_detect_stack(
+        state["repo_path"], state.get("written_files"),
+        backend_dir=layout["backend"], frontend_dir=layout["frontend"] or "",
+    )
     if not result["success"]:
         # Detection is advisory: a scan error must never strand an issue.
         # Fall back to previous behaviour and run the PHP layer.
@@ -1207,7 +1317,7 @@ def node_test(state: IssueState) -> dict:
 
 
     logger.info("Running tests (attempt %d) …", state.get("attempt", 0))
-    result = tool_docker_run_tests(state["repo_path"])
+    result = tool_docker_run_tests(_layer_path(state, "backend"))
     passed = result.get("result", {}).get("passed", False) if result["success"] else False
     output = (
         result.get("result", {}).get("output", "")
@@ -1231,7 +1341,7 @@ def node_openapi_test(state: IssueState) -> dict:
     logger.debug("→ node_openapi_test")
     logger.info("Exporting OpenAPI document (attempt %d) …", state.get("attempt", 0))
 
-    result = tool_openapi_export(state["repo_path"])
+    result = tool_openapi_export(_layer_path(state, "backend"))
     if result["success"]:
         detail = result["result"]
         passed = detail.get("passed", False)
@@ -1265,7 +1375,7 @@ def node_vitest_test(state: IssueState) -> dict:
     logger.debug("→ node_vitest_test")
     logger.info("Running Vitest component tests (attempt %d) …", state.get("attempt", 0))
 
-    result = tool_vitest_run_tests(state["repo_path"])
+    result = tool_vitest_run_tests(_layer_path(state, "frontend"))
     passed = result.get("result", {}).get("passed", False) if result["success"] else False
     output = (
         result.get("result", {}).get("output", "")
@@ -1291,7 +1401,7 @@ def node_playwright_test(state: IssueState) -> dict:
     logger.debug("→ node_playwright_test")
     logger.info("Running Playwright E2E tests (attempt %d) …", state.get("attempt", 0))
 
-    result = tool_playwright_run_tests(state["repo_path"])
+    result = tool_playwright_run_tests(_layer_path(state, "frontend"))
     detail = result.get("result", {}) if result["success"] else {}
     passed = bool(detail.get("passed", False))
     output = detail.get("output", "") if result["success"] else result.get("error", "")

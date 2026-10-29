@@ -22,7 +22,12 @@ from graph.tools import (
 
 
 @app.tool()
-def detect_stack(workspace_path: str, written_files: list[str] | None = None) -> dict:
+def detect_stack(
+    workspace_path: str,
+    written_files: list[str] | None = None,
+    backend_dir: str = ".",
+    frontend_dir: str = ".",
+) -> dict:
     """
     Detect which test layers apply to the code at workspace_path.
     Returns stack ("php" | "vue" | "fullstack" | "unknown"), has_vue, has_php,
@@ -35,8 +40,10 @@ def detect_stack(workspace_path: str, written_files: list[str] | None = None) ->
     written_files yields the conservative answer: every layer the repository
     supports runs.
     Call this first to decide which of the run tools below to use.
+    backend_dir/frontend_dir name a separated layout's folders ("." = root,
+    frontend_dir "" = no SPA).
     """
-    return tool_detect_stack(workspace_path, written_files)
+    return tool_detect_stack(workspace_path, written_files, backend_dir, frontend_dir)
 
 
 @app.tool()
@@ -89,7 +96,7 @@ def openapi_export(workspace_path: str) -> dict:
 
 
 @app.tool()
-def laravel_bootstrap(repo_path: str) -> dict:
+def laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
     """
     Ensure repo_path is a Laravel 13 + Scramble + PrimeVue application.
     Three outcomes: a greenfield directory (no artisan, no composer.json) is
@@ -98,5 +105,7 @@ def laravel_bootstrap(repo_path: str) -> dict:
     a non-Laravel PHP project (composer.json without artisan) is refused with
     success=False rather than scaffolded over.
     Returns created: bool, mode: str, reason: str, and output: str.
+    spa_path (separated layout, repo_path = the Laravel API folder) tops up
+    that Vue SPA folder with the Vitest/Playwright configs and package.json keys.
     """
-    return tool_laravel_bootstrap(repo_path)
+    return tool_laravel_bootstrap(repo_path, spa_path)
