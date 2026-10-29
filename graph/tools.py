@@ -38,6 +38,7 @@ Notes
 import json
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -664,11 +665,16 @@ def _merge_package_json(repo_path: str, overwrite: bool) -> list[str]:
     """
     path = Path(repo_path, "package.json")
     data: dict = {}
+    indent = 4
     if path.is_file():
+        raw = path.read_text(encoding="utf-8")
         try:
-            data = json.loads(path.read_text(encoding="utf-8")) or {}
+            data = json.loads(raw) or {}
         except Exception as exc:  # pylint: disable=broad-except
             raise ValueError(f"package.json is not valid JSON: {exc}") from exc
+        # Keep a foreign repository's indentation so the MR diff stays minimal.
+        if match := re.search(r"\n( +)\"", raw):
+            indent = len(match.group(1))
 
     changed: list[str] = []
     if overwrite:
@@ -698,7 +704,7 @@ def _merge_package_json(repo_path: str, overwrite: bool) -> list[str]:
             bucket[key] = value
             changed.append(f"{section}.{key}")
 
-    path.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(data, indent=indent, ensure_ascii=False) + "\n", encoding="utf-8")
     return changed
 
 
