@@ -60,6 +60,7 @@ _TEST_COMMAND = [
         _TRAP_OWNER,
         "composer install --no-interaction --prefer-dist --no-progress;",
         "if [ -f artisan ]; then",
+        'export DB_CONNECTION=sqlite DB_DATABASE="$PWD/database/database.sqlite";',
         "[ -f .env ] || cp .env.example .env;",
         "php artisan key:generate --force;",
         "php artisan config:clear;",
@@ -204,6 +205,10 @@ class DockerRunner:
         command: list[str],
         timeout: int,
         label: str,
+        *,
+        user: str | None = None,
+        environment: dict[str, str] | None = None,
+        network_disabled: bool = False,
     ) -> tuple[bool, str]:
         """
         Run *command* inside the sandbox image against *workspace_path*.
@@ -227,6 +232,9 @@ class DockerRunner:
                     }
                 },
                 working_dir=self.workdir,
+                user=user,
+                environment=environment,
+                network_disabled=network_disabled,
                 remove=False,
                 stdout=True,
                 stderr=True,

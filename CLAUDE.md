@@ -111,12 +111,16 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 21. **`@playwright/test` is pinned exactly, never with a caret**, and its
     version and the E2E image's base tag change together.
 22. **Sandbox base images are pinned and coupled.** `Dockerfile.sandbox` is
-    `php:8.3-cli` (Laravel 13's floor is `^8.3`), `Dockerfile.sandbox.node` is
+    `php:8.4-cli` with `pdo_pgsql bcmath gd intl` (managed projects such as
+    aptman require `^8.4`; composer's platform check fails on 8.3), and its CMD
+    stays byte-identical to `docker_runner._TEST_COMMAND`. `Dockerfile.sandbox.node` is
     `node:22-alpine` (`vitest@5` requires Node `^22.12`; `node:20-alpine` is
     too old), and `Dockerfile.sandbox.e2e` is
     `mcr.microsoft.com/playwright:v1.50.0-noble` **plus** an explicit Node 22
     install — the image itself ships Node 20, which `vite`/`vitest` refuse.
-    Noble rather than jammy because Ubuntu 24.04 carries `php8.3-cli`.
+    Noble rather than jammy because Ubuntu 24.04 carries `php8.3-cli`; that PHP
+    serves only integrated layouts (separated SPAs run E2E without PHP), so an
+    integrated `^8.4` app may fail its Playwright PHP prep (untested).
 23. **`routes/api.php` must stay fully documented.** `tool_openapi_export`
     compares `php artisan scramble:export` output against
     `php artisan route:list --json` and fails the attempt when any `/api` route
