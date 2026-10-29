@@ -70,6 +70,7 @@ def _run_startup(
         patch.object(sys, "argv", ["main.py", *(["--loop"] if loop else [])]),
         patch.object(startup, "_setup_logging"),
         patch.object(startup, "_wait_for_qdrant", side_effect=ready),
+        patch.object(startup, "_prepare_project"),
         patch.object(startup.logger, "exception"),
         patch.object(index_skills, "main", side_effect=index),
     ):
