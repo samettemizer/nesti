@@ -8,8 +8,12 @@ unchanged.
 
 from mcp_server.server import app
 from graph.tools import (
+    tool_issue_create,
     tool_issue_get,
+    tool_issue_handoff,
     tool_issue_list_pending,
+    tool_issue_notes,
+    tool_issue_resolve,
     tool_issue_set_status,
 )
 
@@ -48,3 +52,45 @@ def issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
     Optionally add a note to the issue.
     """
     return tool_issue_set_status(issue_id, status, note)
+
+
+@app.tool()
+def issue_create(title: str, description: str) -> dict:
+    """
+    Create one GitLab issue WITHOUT any label, so Nesti ignores it until it is
+    handed off. Title and description must be non-blank.
+    Returns id, web_url and labels (empty).
+    """
+    return tool_issue_create(title, description)
+
+
+@app.tool()
+def issue_resolve(issue_id: int, model: str) -> dict:
+    """
+    Close an open issue that does not carry the opt-in label, after posting
+    exactly the comment "omp-developer / model: <model>". model is one
+    non-blank line of at most 200 characters. When the comment cannot be
+    posted the issue stays open and success is false. Refused for a closed
+    issue or one already handed to Nesti.
+    """
+    return tool_issue_resolve(issue_id, model)
+
+
+@app.tool()
+def issue_handoff(issue_id: int, report: str) -> dict:
+    """
+    Transfer an open, unlabelled issue to Nesti: append
+    "## Third attempt (OMP team, advised) — rejected" followed by the report to
+    the description and add the opt-in GITLAB_ISSUE_LABEL, verified by
+    read-back. Nesti owns the issue afterwards.
+    """
+    return tool_issue_handoff(issue_id, report)
+
+
+@app.tool()
+def issue_notes(issue_id: int) -> dict:
+    """
+    List the non-system notes of an issue, oldest first, as
+    {id, author, created_at, body}.
+    """
+    return tool_issue_notes(issue_id)

@@ -321,10 +321,14 @@ class GitLabIssuesClient:
         logger.info("Issue #%s locked (label %r added).", iid, self.in_progress_label)
         return True
 
-    def close_issue(self, iid: int, note: str = "") -> bool:
-        """Comment, drop the lock label and close the issue."""
-        if note:
-            self._comment(iid, note)
+    def close_issue(self, iid: int, note: str = "", require_note: bool = False) -> bool:
+        """Comment, drop the lock label and close the issue.
+
+        With *require_note* a failed comment aborts before the issue closes.
+        """
+        if note and not self._comment(iid, note) and require_note:
+            logger.error("Issue #%s left open: the required note was not posted.", iid)
+            return False
         try:
             updated = self._update(
                 iid,
@@ -346,6 +350,40 @@ class GitLabIssuesClient:
             return False
         logger.info("Issue #%s closed.", iid)
         return True
+
+    def handoff_issue(self, iid: int, appendix: str) -> bool:
+        """Append *appendix* to an open, unlabelled issue and add the opt-in label."""
+        raw = self._get_raw(iid)
+        if raw.get("state") != "opened" or self.issue_label in (raw.get("labels") or []):
+            logger.error("Issue #%s not handed off: closed or already opted in.", iid)
+            return False
+        try:
+            updated = self._update(iid, {
+                "description": (raw.get("description") or "").rstrip()
+                + "\n\n" + appendix.strip() + "\n",
+                "add_labels": self.issue_label,
+            })
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Failed to hand off issue #%s: %s", iid, exc)
+            return False
+        if (updated.get("state") != "opened"
+                or self.issue_label not in (updated.get("labels") or [])
+                or not _normalise_text(updated.get("description")).endswith(
+                    _normalise_text(appendix.strip()))):
+            logger.error("Issue #%s hand-off did not read back.", iid)
+            return False
+        logger.info("Issue #%s handed off (label %r added).", iid, self.issue_label)
+        return True
+
+    def list_notes(self, iid: int) -> list[dict]:
+        """Non-system notes of issue *iid*, oldest first."""
+        return [
+            {"id": n.get("id"), "author": (n.get("author") or {}).get("username"),
+             "created_at": n.get("created_at"), "body": n.get("body")}
+            for n in self._paginate(f"{self._project_api}/issues/{iid}/notes",
+                                    {"sort": "asc", "order_by": "created_at"})
+            if not n.get("system")
+        ]
 
     def reopen_issue(self, iid: int, note: str = "") -> bool:
         """

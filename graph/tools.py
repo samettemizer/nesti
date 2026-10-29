@@ -52,6 +52,7 @@ from gitlab_issues_client import GitLabIssuesClient
 from issue_dependencies import FixtureDependencies
 from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
+import project_layout
 from skill_catalog import catalog_status, select_skills
 from skill_loader import load_skills
 from vector_store import get_document_memory
@@ -255,6 +256,86 @@ def tool_issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
         return _ok({"issue_id": issue_id, "status": status})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_set_status(%s, %s) failed: %s", issue_id, status, exc)
+        return _err(exc)
+
+
+def tool_project_layout() -> dict:
+    """The orchestrator's resolved layout.json record (read-only)."""
+    try:
+        record = project_layout.load_layout()
+        if record is None:
+            return _err("layout.json not found: run nesti /arch on the orchestrator")
+        return _ok(record)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_project_layout() failed: %s", exc)
+        return _err(exc)
+
+
+def tool_issue_create(title: str, description: str) -> dict:
+    """
+    Create one unlabelled issue (Nesti ignores it until handed off).
+    result: {"id", "web_url", "labels"}.
+    """
+    if not title.strip() or not description.strip():
+        return _err("title and description must be non-blank.")
+    try:
+        issue = GitLabIssuesClient().create_issue(title, description)
+        return _ok({"id": issue["id"], "web_url": issue["web_url"], "labels": issue["labels"]})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_create() failed: %s", exc)
+        return _err(exc)
+
+
+def tool_issue_resolve(issue_id: int, model: str) -> dict:
+    """
+    Close an open, not-opted-in issue with the note ``omp-developer / model: <model>``.
+    The issue stays open when the note cannot be posted.
+    result: {"issue_id", "status": "closed", "comment"}.
+    """
+    model = model.strip()
+    if not model or "\n" in model or len(model) > 200:
+        return _err("model must be one non-blank line of at most 200 characters.")
+    try:
+        client = GitLabIssuesClient()
+        issue = client.get_issue(issue_id)
+        if issue["state"] != "opened":
+            return _err(f"Issue #{issue_id} is not open.")
+        if client.issue_label in issue["labels"]:
+            return _err(f"Issue #{issue_id} was handed to Nesti.")
+        comment = f"omp-developer / model: {model}"
+        if not client.close_issue(issue_id, note=comment, require_note=True):
+            return _err(f"GitLab rejected closing issue #{issue_id}.")
+        return _ok({"issue_id": issue_id, "status": "closed", "comment": comment})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_resolve(%s) failed: %s", issue_id, exc)
+        return _err(exc)
+
+
+def tool_issue_handoff(issue_id: int, report: str) -> dict:
+    """
+    Append the rejection report to the issue and add the opt-in label.
+    result: {"issue_id", "label"}.
+    """
+    if not report.strip():
+        return _err("report must be non-blank.")
+    try:
+        client = GitLabIssuesClient()
+        if not client.handoff_issue(
+                issue_id,
+                "## Third attempt (OMP team, advised) — rejected\n\n" + report.strip()):
+            return _err(f"GitLab rejected the hand-off of issue #{issue_id}.")
+        return _ok({"issue_id": issue_id, "label": client.issue_label})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_handoff(%s) failed: %s", issue_id, exc)
+        return _err(exc)
+
+
+def tool_issue_notes(issue_id: int) -> dict:
+    """Non-system notes of an issue, oldest first: [{"id","author","created_at","body"}]."""
+    try:
+        return _ok(GitLabIssuesClient().list_notes(issue_id))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_notes(%s) failed: %s", issue_id, exc)
         return _err(exc)
 
 
