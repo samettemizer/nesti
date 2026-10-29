@@ -17,6 +17,9 @@ services:
       - /tmp:/tmp
       # Optional: persist logs on the host
       - ./logs:/orchestrator/logs
+      # Project root: identical host/container path because Boost sandboxes are bind-mounted by the host daemon.
+      - "${NESTI_PROJECT_PATH:?Set NESTI_PROJECT_PATH in .env}:${NESTI_PROJECT_PATH:?Set NESTI_PROJECT_PATH in .env}"
+      - ./state:/orchestrator/state
     ports:
       # nesti /provider login antigravity runs a short-lived local HTTP
       # listener (scripts/oauth.py AntigravityProvider) to capture Google's
@@ -73,6 +76,7 @@ services:
       # docker_run_tests operate on /tmp workspaces that the host Docker
       # daemon must be able to see when mounting the sandbox container.
       - /tmp:/tmp
+      - ./state:/app/state:ro
     stdin_open: true
     tty: true
     depends_on:

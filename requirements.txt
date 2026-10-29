@@ -20,3 +20,4 @@ qdrant-client>=1.19,<1.20
 # Qdrant document index and the Redis 8 semantic cache. The model weights are
 # baked into both images at build time (see Dockerfile).
 fastembed>=0.5,<1
+plotly>=7.1,<8

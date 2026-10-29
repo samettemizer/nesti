@@ -25,7 +25,7 @@ COPY . .
 # Supply only a non-secret, operator-approved file from the build context, never .private/.
 ARG NESTI_RERANKER_PROFILE=""
 RUN python scripts/prepare_reranker.py --output /opt/nesti-reranker --profile "$NESTI_RERANKER_PROFILE"
-RUN echo '#!/bin/bash\npython /orchestrator/scripts/oauth.py "$@"' > /usr/local/bin/nesti && chmod +x /usr/local/bin/nesti
+RUN printf '#!/bin/sh\ncd /orchestrator && exec python -m scripts.oauth "$@"\n' > /usr/local/bin/nesti && chmod +x /usr/local/bin/nesti
 
 ENTRYPOINT ["python", "main.py"]
 CMD ["--loop"]

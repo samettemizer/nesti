@@ -13,3 +13,6 @@
 # Private agent context and working notes (mirrors .gitignore).
 **/.omp
 .private
+
+# Runtime state is bind-mounted, never baked in.
+state/

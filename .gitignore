@@ -33,3 +33,7 @@ WATCHDOG.yml
 .idea/
 *.swp
 *.swo
+
+# Runtime state (layout.json, architecture.html)
+state/*
+!state/.gitkeep
