@@ -1079,6 +1079,8 @@ def print_help() -> None:
     print("  /provider model <name> <model-id>      Persist a model selection (currently: openrouter)")
     print("  /provider model <name> --reset        Restore the environment model setting")
     print("  /usage                                 Show usage/quota for authenticated consumers")
+    print("  /boost                                 Run Laravel Boost convention discovery and rebuild <NESTI_PROJECT_PATH>/.omp")
+    print("  /arch [--json]                         Show the project architecture (host launcher opens the page) or print layout.json")
 
 
 def _model_price(value: str | None) -> str:
@@ -1245,7 +1247,7 @@ def _format_usage_line(name: str, usage: Dict[str, Any]) -> str:
 
 
 def main() -> None:
-    """Dispatch provider operations without making inference calls."""
+    """Dispatch CLI commands; only /boost (and /arch resolving a new layout) call an LLM."""
     if len(sys.argv) < 2:
         print_help()
         sys.exit(0)
@@ -1264,6 +1266,13 @@ def main() -> None:
             print(f"Error fetching models: {exc}")
             sys.exit(1)
         return
+
+    if cmd == "/boost":
+        from project_boost import cli_boost
+        sys.exit(cli_boost(args))
+    if cmd == "/arch":
+        from architecture_view import cli_arch
+        sys.exit(cli_arch(args))
 
     store = TokenStore()
     if not store.available:

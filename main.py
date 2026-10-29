@@ -6,7 +6,9 @@ Usage:
     python main.py --loop     # keep polling until interrupted
 
 When memory is enabled, refresh the skill index before importing the engine;
-an indexing failure exits without polling GitLab.
+an indexing failure exits without polling GitLab. Then resolve the project
+layout (NESTI_PROJECT_PATH) and, while ``<project>/.omp`` is missing, run
+Laravel Boost discovery once (`nesti /boost` refreshes it later).
 """
 
 import argparse
@@ -65,6 +67,38 @@ def _wait_for_qdrant() -> None:
     raise RuntimeError(f"Qdrant was not ready within {_QDRANT_STARTUP_TIMEOUT} seconds.")
 
 
+def _prepare_project(loop: bool, poll_interval: int) -> None:
+    """Resolve the project layout, then run Boost once while ``<project>/.omp`` is missing."""
+    from project_layout import ensure_layout, project_root
+
+    while True:
+        try:
+            root = project_root()
+            record = ensure_layout(root)
+            break
+        except Exception as exc:
+            logger.exception("Project layout unavailable; GitLab polling disabled: %s", exc)
+            if not loop:
+                sys.exit(1)
+            time.sleep(poll_interval)
+
+    if (root / ".omp").exists():
+        logger.info(".omp present at %s; startup Boost skipped (run `nesti /boost` to refresh).", root)
+    elif record["mode"] == "greenfield":
+        logger.info("Greenfield project: .omp is created after the first scaffold is merged and pulled.")
+    else:
+        from telegram_notifier import notify as telegram_notify
+
+        try:
+            from llm_client import LLMClient
+            from project_boost import run_boost
+
+            run_boost(root, record, LLMClient())
+        except Exception as exc:
+            logger.exception("Startup Boost failed; polling continues without .omp: %s", exc)
+            telegram_notify(f"⚠️ Nesti startup Boost failed: {exc}")
+
+
 def main() -> None:
     """Refresh enabled memory, then process issues once or in a polling loop."""
     _setup_logging()
@@ -100,6 +134,8 @@ def main() -> None:
             sys.exit(1)
     else:
         logger.info("Vector memory disabled; skipping skill indexing.")
+
+    _prepare_project(args.loop, args.poll_interval)
 
     from task_engine import TaskEngine
 
