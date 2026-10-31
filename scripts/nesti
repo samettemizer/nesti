@@ -11,8 +11,8 @@ case "${1-} ${2-}" in
   *) page= ;;
 esac
 if [ -n "$page" ]; then
-  if command -v python3 >/dev/null 2>&1; then python3 -m webbrowser -n "file://$page" >/dev/null 2>&1 &
+  if [ "$(uname -s)" = Darwin ]; then open "$page"
+  elif command -v python3 >/dev/null 2>&1; then python3 -m webbrowser -n "file://$page" >/dev/null 2>&1 &
   elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$page" >/dev/null 2>&1 &
-  elif command -v open >/dev/null 2>&1; then open "$page"
   else echo "Open file://$page in your browser."; fi
 fi
