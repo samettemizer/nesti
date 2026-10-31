@@ -74,5 +74,5 @@ def cli_stats(args: list[str]) -> int:
     print(f"Recorded: {llm} LLM requests, {len(events) - llm} tool runs.")
     print(f"Stats view: {out}")
     if not os.path.exists("/.dockerenv"):
-        webbrowser.open(out.as_uri())
+        webbrowser.open_new(out.as_uri())
     return 0

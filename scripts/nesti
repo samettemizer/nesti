@@ -1,5 +1,5 @@
 #!/bin/sh
-# Host-side `nesti`: forwards to the container CLI; /arch and /stats then open their page in the host browser.
+# Host-side `nesti`: forwards to the container CLI; /arch and /stats then open their page in a new host browser window.
 set -e
 here=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)
 if [ -t 0 ]; then tty=-it; else tty=-i; fi
@@ -11,7 +11,8 @@ case "${1-} ${2-}" in
   *) page= ;;
 esac
 if [ -n "$page" ]; then
-  if command -v xdg-open >/dev/null 2>&1; then xdg-open "$page" >/dev/null 2>&1 &
+  if command -v python3 >/dev/null 2>&1; then python3 -m webbrowser -n "file://$page" >/dev/null 2>&1 &
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$page" >/dev/null 2>&1 &
   elif command -v open >/dev/null 2>&1; then open "$page"
   else echo "Open file://$page in your browser."; fi
 fi
