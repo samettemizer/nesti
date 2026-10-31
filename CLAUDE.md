@@ -41,6 +41,7 @@ telegram_notifier.py         fire-and-forget alerts
 project_layout.py            NESTI_PROJECT_PATH backend/SPA layout → state/layout.json; clone_layout for the pipeline
 project_boost.py             `nesti /boost`: Laravel Boost infer-conventions → <project>/.omp rules + skills
 architecture_view.py         `nesti /arch`: offline Plotly page state/architecture.html
+stats/                       usage events (LLM attempts + tool runs) → Redis nesti:stats:events; view.py: `nesti /stats` → state/stats.html
 scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetch_skills.py, index_skills.py,
                              preflight.py, seed_live_issues.py, e2e_fixtures.php,
                              prepare_reranker.py (build-time model artifact),
@@ -114,8 +115,8 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 21. **`@playwright/test` is pinned exactly, never with a caret**, and its
     version and the E2E image's base tag change together.
 22. **Sandbox base images are pinned and coupled.** `Dockerfile.sandbox` is
-    `php:8.4-cli` with `pdo_pgsql bcmath gd intl` (managed projects such as
-    aptman require `^8.4`; composer's platform check fails on 8.3), and its CMD
+    `php:8.4-cli` with `pdo_pgsql bcmath gd intl` (managed projects may
+    require `^8.4`; composer's platform check fails on 8.3), and its CMD
     stays byte-identical to `docker_runner._TEST_COMMAND`. `Dockerfile.sandbox.node` is
     `node:22-alpine` (`vitest@5` requires Node `^22.12`; `node:20-alpine` is
     too old), and `Dockerfile.sandbox.e2e` is
@@ -187,6 +188,11 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     In-DOM Blade custom tags are kebab-case and never self-closing.
 34. **A rejected claim stops before clone/bootstrap/LLM.** Cleanup is the
     terminal path; never log an unapplied lock and continue.
+35. **Usage recording never changes behaviour.** The `stats` hooks never
+    raise into callers and never alter a tool's return value or an attempt's
+    exception. They record only counters, model/provider names, durations and
+    error text, never prompts or responses. New code for statistics goes into
+    `stats/`; existing modules keep one-line hooks only.
 
 ---
 
@@ -217,6 +223,10 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `llm_client.py` | `scripts/oauth.py` | `PROVIDERS[key].fresh_credentials(token_data)` → usable `token_data`; caller persists it when it differs |
 | `llm_client.py` | callers | `BaseLLMClient.available` → `bool`, cheap and side-effect free; consulted before every attempt |
 | `graph/tools.py` | `vector_store.py` / `semantic_cache.py` | memory tools degrade gracefully (`success=True`, empty list or `stored=False`) when memory unavailable; `success=False` only on genuine exception |
+| `llm_client.py` | `stats` | `with stats.llm_request(role, provider)` per cascade attempt; `_log_usage` → `stats.usage(raw)` |
+| `graph/tools.py` | `stats` | `stats.instrument(globals())`; result unchanged; recorded only inside a run |
+| `task_engine.py` | `stats` | `begin(issue_id, subject)` before `graph.invoke`, `end()` in `finally` |
+| `scripts/oauth.py` | `stats.view` | `cli_stats(args)` → exit code |
 
 ---
 
