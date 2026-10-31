@@ -277,7 +277,7 @@ docker exec nesti-orchestrator python scripts/preflight.py
 
 ## MCP Server
 
-`nesti-mcp` exposes the shared issue, GitLab, sandbox, skill, memory and quota
+`nesti-mcp` exposes the shared issue, GitLab, sandbox, skill, memory, quota and usage statistics
 tools over stdio. It runs alongside the orchestrator and makes no LLM calls.
 
 Connect Claude Code:

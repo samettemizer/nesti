@@ -22,7 +22,7 @@ graph/state.py               IssueState, the data contract between nodes
 graph/tools.py               tool_* functions returning {"success": bool, ...}
 graph/nodes.py               nodes; each returns a partial IssueState
 graph/edges.py, builder.py   one router per test layer; compiled `graph`
-mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,skills,memory,oauth,project}.py
+mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,skills,memory,oauth,project,stats}.py
 llm_client.py                provider cascade — the only module that calls LLMs
 prompt_builder.py            plan + code prompts composed per task scope, FILE-block output format
 issue_scope.py               backend/frontend/fullstack task scope + documentation-request check
@@ -41,7 +41,8 @@ telegram_notifier.py         fire-and-forget alerts
 project_layout.py            NESTI_PROJECT_PATH backend/SPA layout → state/layout.json; clone_layout for the pipeline
 project_boost.py             `nesti /boost`: Laravel Boost infer-conventions → <project>/.omp rules + skills
 architecture_view.py         `nesti /arch`: offline Plotly page state/architecture.html
-stats/                       usage events (LLM attempts + tool runs) → Redis nesti:stats:events; view.py: `nesti /stats` → state/stats.html
+stats/                       usage events (LLM attempts + tool runs) → Redis nesti:stats:events; view.py: `nesti /stats` → state/stats.html;
+                             report.py: JSON summary behind the `stats_summary` MCP tool
 scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetch_skills.py, index_skills.py,
                              preflight.py, seed_live_issues.py, e2e_fixtures.php,
                              prepare_reranker.py (build-time model artifact),
@@ -227,6 +228,7 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `graph/tools.py` | `stats` | `stats.instrument(globals())`; result unchanged; recorded only inside a run |
 | `task_engine.py` | `stats` | `begin(issue_id, subject)` before `graph.invoke`, `end()` in `finally` |
 | `scripts/oauth.py` | `stats.view` | `cli_stats(args)` → exit code |
+| `mcp_server/tools/stats.py` | `stats.report` | `summary(since_hours, project)` → `{"success": bool, "result"\|"error"}`; never raises; `cost_usd` `None` when nothing is priced |
 
 ---
 
