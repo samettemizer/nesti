@@ -1081,6 +1081,7 @@ def print_help() -> None:
     print("  /usage                                 Show usage/quota for authenticated consumers")
     print("  /boost                                 Run Laravel Boost convention discovery and rebuild <NESTI_PROJECT_PATH>/.omp")
     print("  /arch [--json]                         Show the project architecture (host launcher opens the page) or print layout.json")
+    print("  /stats                                 Render LLM request and tool-run statistics (host launcher opens the page)")
 
 
 def _model_price(value: str | None) -> str:
@@ -1273,6 +1274,9 @@ def main() -> None:
     if cmd == "/arch":
         from architecture_view import cli_arch
         sys.exit(cli_arch(args))
+    if cmd == "/stats":
+        from stats.view import cli_stats
+        sys.exit(cli_stats(args))
 
     store = TokenStore()
     if not store.available:

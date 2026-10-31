@@ -1,0 +1,537 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Nesti stats</title>
+<style>
+:root{--bg:#0b0b0c;--card:#131316;--bd:#26262a;--tx:#e6e6e6;--mu:#8a8a8f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px system-ui,sans-serif}
+header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:16px;padding:10px 20px;background:var(--bg);border-bottom:1px solid var(--bd)}
+nav{display:flex;gap:2px}
+nav a{color:var(--mu);text-decoration:none;padding:6px 10px;border-radius:6px}
+nav a.on{color:var(--tx);background:var(--card)}
+a.link{color:var(--tx);text-decoration:none;font-size:13px}
+.grow{flex:1}
+select,input{background:var(--card);color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:5px 8px;font:inherit;font-size:13px}
+input{width:260px}
+.seg{display:inline-flex;border:1px solid var(--bd);border-radius:8px;padding:2px;gap:2px}
+.seg button{background:none;border:1px solid transparent;color:var(--mu);padding:3px 10px;border-radius:6px;cursor:pointer;font:inherit;font-size:12px}
+.seg button.on{background:#1f1f23;color:var(--tx);border-color:var(--bd)}
+main{padding:16px 20px 60px;max-width:1520px;margin:auto}
+h1{font-size:22px;margin:8px 0 4px}
+h3{margin:0;font-size:14.5px;font-weight:600}
+h4{margin:14px 0 8px;font-size:12.5px;color:var(--mu);font-weight:600}
+.muted{color:var(--mu);font-size:12.5px}
+.mono,.n,td,.kpi .val{font-family:ui-monospace,monospace}
+.kpis{display:grid;margin-top:16px;border:1px solid var(--bd);border-radius:10px;background:var(--card);overflow:hidden}
+.k4{grid-template-columns:repeat(4,minmax(0,1fr))}.k5{grid-template-columns:repeat(5,minmax(0,1fr))}.k8{grid-template-columns:repeat(8,minmax(0,1fr))}
+.kpi{padding:14px 16px;border-left:1px solid var(--bd);min-width:0}
+.kpi:first-child{border-left:0}
+.kpi .lab{font-size:12.5px;color:#cfcfd4}
+.kpi .val{font-size:21px;font-weight:600;margin-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.k8 .kpi .val{font-size:16px}
+.kpi .sub{color:var(--mu);font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kpi svg{width:100%;margin-top:10px}
+.two{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:16px;margin-top:16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-top:16px;min-width:0}
+.two .card{margin-top:0}
+.ch{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}
+.ch>div:last-child{display:flex;gap:8px;align-items:center}
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{color:var(--mu);font:500 12.5px system-ui,sans-serif;text-align:left;padding:8px;border-bottom:1px solid var(--bd);white-space:nowrap}
+td{padding:8px;border-bottom:1px solid var(--bd);vertical-align:middle}
+td.t{font-family:system-ui,sans-serif}
+.n{text-align:right!important;white-space:nowrap}
+tr.click{cursor:pointer}
+tr.click:hover,tr.open{background:#1a1a1e}
+tr.detail>td{background:#0f0f11;padding:16px 20px}
+.sub2{color:var(--mu);font-size:12px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:8px;flex:none}
+.flex{display:flex;align-items:center}
+.bar{display:inline-block;width:60px;height:4px;background:var(--bd);border-radius:2px;vertical-align:middle;margin-left:8px;overflow:hidden}
+.bar i{display:block;height:100%}
+.badge{padding:2px 8px;border-radius:10px;font-size:12px}
+.b0{background:#1f1f23;color:var(--mu)}.b1{background:#3a2a10;color:#f5b453}.b2{background:#3a1515;color:#f87171}
+.mix{display:flex;height:8px;border-radius:4px;overflow:hidden;gap:2px;background:var(--bd)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12.5px;margin-top:10px}
+.line{display:flex;justify-content:space-between;gap:12px;padding:7px 0;font-size:13px}
+.line.click{cursor:pointer}.line.click:hover{background:#1a1a1e}
+.st{font-size:12px;white-space:nowrap}
+.st::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:currentColor}
+.st.ok{color:#4ade80}.st.bad{color:#f87171}
+.chip{display:inline-block;padding:1px 7px;margin-left:6px;border:1px solid var(--bd);border-radius:10px;font-size:11px;color:var(--mu)}
+.empty{color:var(--mu);padding:30px;text-align:center;font-family:system-ui,sans-serif}
+.err{color:#f87171}
+pre.err{white-space:pre-wrap;word-break:break-word;margin:0}
+.sig{word-break:break-word}
+.warn{color:#f5b453;margin-top:8px;font-size:13px}
+.dgrid{display:grid;grid-template-columns:minmax(260px,1fr) minmax(0,2fr);gap:24px}
+.facts{display:grid;grid-template-columns:1fr 1fr;gap:10px 20px}
+.cnt{margin-bottom:8px}
+</style><script>/*PLOTLY*/</script></head><body>
+<header><b>Nesti stats</b><nav id="tabs"></nav><span class="grow"></span>
+<select id="project" data-sel="project"></select><div id="ranges" class="seg"></div></header>
+<main id="main"></main>
+<script>const D = /*DATA*/;
+const PAL = ["#5ad8e6","#e94fbd","#a78bfa","#f5b453","#4ade80","#6b8afd","#f87171","#2dd4bf","#facc15","#fb923c"], OTHER = "#6b7280";
+const TOKC = ["#6b8afd","#5ad8e6","#f5b453","#e94fbd"], TOKN = ["Uncached input","Cache read","Cache write","Output"];
+const COSTN = ["Input","Cache read","Cache write","Output"], OKC = "#5ad8e6", BADC = "#f87171";
+const now = D.generated * 1000, HOUR = 3600e3, DAY = 24 * HOUR;
+const RANGES = {"1h": HOUR, "24h": DAY, "7d": 7 * DAY, "30d": 30 * DAY, "90d": 90 * DAY, "All": Infinity};
+const RTXT = {"1h": "in the last hour", "24h": "in the last 24 hours", "7d": "in the last 7 days",
+  "30d": "in the last 30 days", "90d": "in the last 90 days", "All": "since recording began"};
+const TABS = {overview: "Overview", models: "Models", providers: "Providers", costs: "Costs",
+  requests: "Requests", errors: "Errors", traces: "Traces", tools: "Tools"};
+const ui = {tab: "overview", range: "7d", project: "", seg: {}, open: {}, q: {}, status: "All", hourProvider: "", tool: ""};
+let F = [], L = [], T = [], B = [], post = [];
+
+const sum = a => a.reduce((x, y) => x + y, 0);
+const div = (a, b) => b ? a / b : null;
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[c]);
+const pad = n => String(n).padStart(2, "0");
+const newest = l => [...l].sort((a, b) => b.t - a.t);
+const cnt = l => l.length, toks = l => sum(l.map(e => e.tokens)), costs = l => sum(l.map(e => e.cost));
+const fails = l => l.filter(e => !e.ok).length;
+function group(list, keyOf) {
+  const m = new Map();
+  for (const e of list) { const k = keyOf(e); if (!m.has(k)) m.set(k, []); m.get(k).push(e); }
+  return m;
+}
+const rank = (m, score) => [...m.keys()].sort((a, b) => score(m.get(b)) - score(m.get(a)));
+const colorsOf = keys => new Map(keys.map((k, i) => [k, PAL[i % 10]]));
+
+// enrich: once, LLM events get price-derived fields
+D.events.forEach((e, i) => {
+  e.i = i;
+  if (e.kind !== "llm") return;
+  const p = Object.hasOwn(D.prices, e.model) ? D.prices[e.model] : null, tok = e.tok || [0, 0, 0, 0];
+  e.tok = tok;
+  e.priced = !!p;
+  e.parts = p ? tok.map((n, j) => n * p[j]) : [0, 0, 0, 0];
+  e.cost = sum(e.parts);
+  e.saved = p ? tok[1] * (p[0] - p[1]) : 0;
+  e.tokens = sum(tok);
+  e.sig = e.error ? e.error.replace(/[0-9a-f]{8,}|\d+/gi, "#").slice(0, 300) : null;
+});
+
+function agg(list) {
+  const a = {n: list.length, failed: 0, U: 0, CR: 0, CW: 0, O: 0, cost: 0, saved: 0, priced: 0, unpriced: 0, first: Infinity, last: -Infinity};
+  let okN = 0, okDur = 0, outO = 0, outDur = 0;
+  for (const e of list) {
+    if (!e.ok) a.failed++;
+    a.U += e.tok[0]; a.CR += e.tok[1]; a.CW += e.tok[2]; a.O += e.tok[3];
+    a.cost += e.cost; a.saved += e.saved;
+    e.priced ? a.priced++ : a.unpriced++;
+    a.first = Math.min(a.first, e.t); a.last = Math.max(a.last, e.t);
+    if (e.ok) { okN++; okDur += e.dur; if (e.tok[3] > 0) { outO += e.tok[3]; outDur += e.dur; } }
+  }
+  a.tokens = a.U + a.CR + a.CW + a.O;
+  a.errRate = div(a.failed, a.n);
+  a.cacheRate = div(a.CR, a.U + a.CR + a.CW);
+  a.savedPct = div(a.saved, a.cost + a.saved);
+  a.tps = div(outO, outDur);
+  a.avgDur = div(okDur, okN);
+  return a;
+}
+
+// buckets: hourly up to 24h, else daily; local time, contiguous to now
+function buckets() {
+  const hourly = RANGES[ui.range] <= DAY;
+  const start = ui.range === "All" ? F.reduce((m, e) => Math.min(m, e.t * 1000), now) : now - RANGES[ui.range];
+  const d = new Date(start);
+  hourly ? d.setMinutes(0, 0, 0) : d.setHours(0, 0, 0, 0);
+  B = [];
+  while (d.getTime() <= now) { B.push(d.getTime()); hourly ? d.setHours(d.getHours() + 1) : d.setDate(d.getDate() + 1); }
+  B.hourly = hourly;
+}
+function bidx(ms) {
+  let lo = 0, hi = B.length - 1, r = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (B[m] <= ms) { r = m; lo = m + 1; } else hi = m - 1; }
+  return r;
+}
+function series(list, fn) {
+  const g = B.map(() => []);
+  for (const e of list) { const i = bidx(e.t * 1000); if (i >= 0) g[i].push(e); }
+  return g.map(fn);
+}
+function xstr(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+const X = () => B.map(xstr);
+const timeAxis = () => ({type: "date", tickformat: B.hourly ? "%H:00" : "%b %d", hoverformat: B.hourly ? "%b %d %H:00" : "%b %d"});
+
+// formatters
+const fmtInt = n => n == null ? "–" : Math.round(n).toLocaleString("en-US");
+const fmtNum = n => n == null ? "–" : n.toFixed(1);
+function fmtTok(n) {
+  if (n == null) return "–";
+  for (const [u, s] of [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]])
+    if (n >= u) { const v = n / u; return (v < 100 ? +v.toFixed(1) : Math.round(v)) + s; }
+  return String(Math.round(n));
+}
+function fmtUSD(v) {
+  if (v == null) return "–";
+  if (v === 0) return "$0";
+  if (v < 0.01) return "$" + v.toFixed(4);
+  return "$" + v.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+const fmtPct = r => r == null ? "–" : (r * 100).toFixed(1) + "%";
+function fmtDur(s) {
+  if (s == null) return "–";
+  if (s < 60) return s.toFixed(1) + "s";
+  if (s < 3600) return `${Math.floor(s / 60)}m ${pad(Math.floor(s % 60))}s`;
+  return `${Math.floor(s / 3600)}h ${pad(Math.floor(s % 3600 / 60))}m`;
+}
+function ago(t) {
+  const s = (now - t * 1000) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  const d = Math.floor(s / 86400);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
+}
+function fmtDate(t) {
+  const d = new Date(t * 1000);
+  return `${d.toLocaleDateString("en-US", {month: "short", day: "numeric"})}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// widgets
+const kpi = (label, value, sub, sp, color) =>
+  `<div class="kpi"><div class="lab">${label}</div><div class="val">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ""}${sp ? spark(sp, color || OKC) : ""}</div>`;
+function spark(v, color) {
+  if (v.length < 2) v = [v[0] || 0, v[0] || 0];
+  const max = Math.max(...v) || 1;
+  const pts = v.map((y, i) => `${(i / (v.length - 1) * 100).toFixed(2)},${(27 - y / max * 25).toFixed(2)}`).join(" ");
+  return `<svg width="100" height="28" viewBox="0 0 100 28" preserveAspectRatio="none"><polygon points="0,28 ${pts} 100,28" fill="${color}" opacity=".15"/><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
+}
+const bar = (f, c) => `<span class="bar"><i style="width:${Math.max(0, Math.min(1, f || 0)) * 100}%;background:${c}"></i></span>`;
+const badge = r => `<span class="badge ${!r ? "b0" : r < 0.1 ? "b1" : "b2"}">${fmtPct(r)}</span>`;
+const segv = (key, opts) => ui.seg[key] || opts[0];
+const seg = (key, opts) => `<div class="seg">${opts.map(o => `<button data-act="seg" data-k="${key}" data-v="${o}" class="${o === segv(key, opts) ? "on" : ""}">${o}</button>`).join("")}</div>`;
+const legend = items => `<div class="legend">${items.map(([n, c, x]) => `<span><i class="dot" style="background:${c}"></i>${n}${x != null ? ` <span class="muted mono">${x}</span>` : ""}</span>`).join("")}</div>`;
+const mix = (vals, colors) => { const t = sum(vals) || 1; return `<div class="mix">${vals.map((v, i) => v > 0 ? `<i style="flex:${v / t};background:${colors[i]}"></i>` : "").join("")}</div>`; };
+function table(cols, rows, o = {}) {
+  const head = cols.map(([h, c]) => `<th class="${c || ""}">${h}</th>`).join("");
+  const body = rows.map(r => {
+    const can = !!(o.key && o.detail && r.click !== false), open = can && ui.open[o.key] === String(r.id);
+    const act = r.act || (can ? `data-act="open" data-k="${o.key}" data-v="${esc(r.id)}"` : "");
+    const tr = `<tr class="${act ? "click" : ""} ${open ? "open" : ""}" ${act}${r.title ? ` title="${esc(r.title)}"` : ""}>${r.cells.map((c, i) => `<td class="${cols[i][1] || ""}">${c}</td>`).join("")}</tr>`;
+    return open ? tr + `<tr class="detail"><td colspan="${cols.length}">${o.detail(String(r.id))}</td></tr>` : tr;
+  }).join("");
+  return `<div class="tw"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+function plot(id, traces, layout = {}) {
+  post.push(() => {
+    const ax = {gridcolor: "#26262a", zerolinecolor: "#26262a", linecolor: "#26262a"};
+    Plotly.newPlot(id, traces, {
+      paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: {color: "#8a8a8f", size: 11},
+      barmode: "stack", height: 260, margin: {t: 10, l: 45, r: 10, b: 30}, hovermode: "x unified",
+      legend: {orientation: "h", x: 0, y: -0.15, yanchor: "top"}, ...layout,
+      xaxis: {...ax, ...layout.xaxis}, yaxis: {...ax, ...layout.yaxis},
+    }, {displayModeBar: false, responsive: true});
+  });
+  return `<div id="${id}"></div>`;
+}
+function stacked(list, keyOf, order, colors, val, name = k => k) {
+  const top = order.slice(0, 6), rest = new Set(order.slice(6)), g = group(list, keyOf), x = X();
+  const tr = top.map(k => ({type: "bar", name: esc(name(k, g.get(k))), x, y: series(g.get(k), val), marker: {color: colors.get(k)}}));
+  if (rest.size) {
+    const l = list.filter(e => rest.has(keyOf(e)));
+    tr.push({type: "bar", name: esc(name(`Other (${rest.size})`, l)), x, y: series(l, val), marker: {color: OTHER}});
+  }
+  return tr;
+}
+const card = (title, sub, body, right = "") =>
+  `<section class="card"><div class="ch"><div><h3>${title}</h3>${sub ? `<div class="muted">${sub}</div>` : ""}</div><div>${right}</div></div>${body}</section>`;
+const EMPTY = `<div class="empty">No data in this range.</div>`;
+const head = (t, s) => `<h1>${t}</h1><div class="muted">${s}</div>`;
+const who = (m, p) => `<div>${esc(m)}</div><div class="sub2">${esc(p)}</div>`;
+const dotWho = (c, m, p) => `<div class="flex"><i class="dot" style="background:${c}"></i><div>${who(m, p)}</div></div>`;
+const status = ok => ok ? `<span class="st ok">OK</span>` : `<span class="st bad">Failed</span>`;
+const issueCell = e => e.issue != null ? `<span title="${esc(e.title)}">#${esc(e.issue)}</span>` : "–";
+const proj = p => p ? esc(p) : "(none)";
+const usd = e => e.priced ? fmtUSD(e.cost) : "–";
+const fact = (lab, val) => `<div><div class="muted">${lab}</div><div class="mono">${val}</div></div>`;
+const search = (k, ph) => `<input data-q="${k}" placeholder="${ph}" value="${esc(ui.q[k] || "")}">`;
+const select = (k, all, opts) => `<select data-sel="${k}"><option value="">${all}</option>${opts.map(o => `<option value="${esc(o)}"${o === ui[k] ? " selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+const hit = (q, fields) => !q || fields.join(" ").toLowerCase().includes(q.toLowerCase());
+
+const VIEWS = {
+  overview() {
+    const a = agg(L), parts = [a.U, a.CR, a.CW, a.O], x = X();
+    const am = segv("activity", ["Requests", "Tokens", "Cost"]);
+    const traces = am === "Requests"
+      ? [{type: "bar", name: "OK", x, y: series(L, l => l.length - fails(l)), marker: {color: OKC}},
+         {type: "bar", name: "Failed", x, y: series(L, fails), marker: {color: BADC}}]
+      : [{type: "bar", name: am, x, y: series(L, am === "Tokens" ? toks : costs), marker: {color: am === "Tokens" ? OKC : PAL[1]}}];
+    const roles = [["Planner", "plan", PAL[0]], ["Coder", "code", PAL[1]]].map(([n, r, c]) => [n, L.filter(e => e.role === r), c]);
+    const mixBody = mix(parts, TOKC) + legend(TOKN.map((n, i) => [n, TOKC[i], fmtPct(div(parts[i], a.tokens))]))
+      + `<h4>By role</h4>` + mix(roles.map(([, l]) => toks(l)), roles.map(([, , c]) => c))
+      + roles.map(([n, l, c]) => `<div class="line"><span><i class="dot" style="background:${c}"></i>${n} <span class="muted mono">${fmtInt(l.length)} req</span></span><span class="mono">${fmtTok(toks(l))} &nbsp; ${fmtPct(div(toks(l), a.tokens))}</span></div>`).join("");
+    const latest = newest(L).slice(0, 8);
+    return head("Stats overview", `Everything Nesti did across your issues ${RTXT[ui.range]}.`)
+      + `<div class="kpis k5">${kpi("API-equivalent cost", fmtUSD(a.cost), "", series(L, costs), PAL[1])}`
+      + kpi("Requests", fmtInt(a.n), `${fmtInt(a.failed)} failed`, series(L, cnt))
+      + kpi("Tokens", fmtTok(a.tokens), `${fmtTok(a.O)} output`, series(L, toks))
+      + kpi("Cache rate", fmtPct(a.cacheRate), `${fmtPct(a.savedPct)} saved`)
+      + kpi("Error rate", fmtPct(a.errRate), `${fmtInt(a.n - a.failed)} succeeded`, series(L, fails), BADC) + `</div>`
+      + `<div class="kpis k8">${kpi("Uncached input", fmtTok(a.U))}${kpi("Cache read", fmtTok(a.CR))}${kpi("Cache write", fmtTok(a.CW))}${kpi("Output", fmtTok(a.O))}`
+      + kpi("Tokens/s", fmtNum(a.tps)) + kpi("Avg latency", fmtDur(a.avgDur))
+      + kpi("Issue runs", fmtInt(new Set(F.filter(e => e.run).map(e => e.run)).size)) + kpi("Tool runs", fmtInt(T.length)) + `</div>`
+      + `<div class="two">${card("Activity", B.hourly ? "Per hour" : "Per day", L.length ? plot("activity", traces, {xaxis: timeAxis(), showlegend: am === "Requests"}) : EMPTY, seg("activity", ["Requests", "Tokens", "Cost"]))}`
+      + card("Token mix", "Where tokens went", L.length ? mixBody : EMPTY) + `</div>`
+      + card("Latest requests", "Most recent model calls across every issue", latest.length ? table(
+          [["Model"], ["When", "t"], ["Tokens", "n"], ["Cost", "n"], ["Duration", "n"], ["Status", "n"]],
+          latest.map(e => ({id: e.i, cells: [who(e.model, e.provider), ago(e.t), fmtInt(e.tokens), usd(e), fmtDur(e.dur), status(e.ok)]}))) : EMPTY,
+        `<a class="link" href="#requests">All requests →</a>`);
+  },
+
+  models() {
+    const a = agg(L), byModel = group(L, e => e.model), order = rank(byModel, cnt), col = colorsOf(order);
+    const g = group(L, e => e.model + "|" + e.provider), keys = rank(g, cnt), top = order[0];
+    const topProv = top ? rank(group(byModel.get(top), e => e.provider), cnt)[0] : "";
+    const mode = segv("share", ["Share", "Requests"]);
+    const max = keys.length ? g.get(keys[0]).length : 1;
+    const detail = k => {
+      const l = g.get(k), s = agg(l), c = col.get(l[0].model);
+      const bk = [...group(l, e => bidx(e.t * 1000))].filter(([i]) => i >= 0).sort((p, q) => p[0] - q[0]);
+      const per = bk.map(([, ll]) => agg(ll)), x = bk.map(([i]) => xstr(B[i]));
+      return `<div class="dgrid"><div><h4>Efficiency</h4><div class="facts">${fact("Error rate", `${fmtPct(s.errRate)} (${fmtInt(s.failed)} failed)`)}${fact("Cache rate", fmtPct(s.cacheRate))}${fact("Cache savings", fmtPct(s.savedPct))}</div>`
+        + `<h4>Latency</h4><div class="facts">${fact("Avg duration", fmtDur(s.avgDur))}${fact("Tokens/s", fmtNum(s.tps))}</div>`
+        + `<h4>Tokens</h4><div class="facts">${fact("Uncached input", fmtTok(s.U))}${fact("Cache read", fmtTok(s.CR))}${fact("Cache write", fmtTok(s.CW))}${fact("Output", fmtTok(s.O))}</div>`
+        + `<h4>First seen ${ago(s.first)} · last seen ${ago(s.last)}</h4></div>`
+        + `<div><div class="muted">Performance per active ${B.hourly ? "hour" : "day"}</div>` + plot("model-detail", [
+            {type: "scatter", mode: "lines+markers", name: "Tokens/s", x, y: per.map(p => p.tps), line: {color: c}},
+            {type: "scatter", mode: "lines+markers", name: "Avg duration", x, y: per.map(p => p.avgDur), yaxis: "y2", line: {color: "#8a8a8f", dash: "dash"}}],
+          {xaxis: timeAxis(), yaxis2: {overlaying: "y", side: "right", ticksuffix: "s", tickformat: ".1f", showgrid: false, zerolinecolor: "#26262a"}, margin: {t: 10, l: 45, r: 45, b: 30}}) + `</div></div>`;
+    };
+    return head("Models", `Which models did the work ${RTXT[ui.range]}, and how fast they answered.`)
+      + `<div class="kpis k4">${kpi("Models used", fmtInt(byModel.size), `across ${fmtInt(new Set(L.map(e => e.provider)).size)} providers`)}`
+      + kpi("Most used", top ? esc(top) : "–", top ? `${fmtPct(byModel.get(top).length / L.length)} of requests · ${esc(topProv)}` : "")
+      + kpi("Requests", fmtInt(a.n), `${fmtInt(a.failed)} failed`, series(L, cnt))
+      + kpi("API-equivalent cost", fmtUSD(a.cost)) + `</div>`
+      + card("Request share", B.hourly ? "Per hour, by model" : "Per day, by model", L.length ? plot("share",
+          stacked(L, e => e.model, order, col, cnt, (k, l) => `${k} ${fmtPct(l.length / L.length)}`),
+          {xaxis: timeAxis(), barnorm: mode === "Share" ? "percent" : "", yaxis: {ticksuffix: mode === "Share" ? "%" : ""}}) : EMPTY,
+        seg("share", ["Share", "Requests"]))
+      + card("All models", "Click a row for latency and throughput over time", keys.length ? table(
+          [["Model"], ["Requests", "n"], ["Cost", "n"], ["Tokens", "n"], ["Cache rate", "n"], ["Errors", "n"], ["Tokens/s", "n"], ["Avg duration", "n"], ["Trend", "n"]],
+          keys.map(k => {
+            const l = g.get(k), s = agg(l), c = col.get(l[0].model);
+            return {id: k, cells: [dotWho(c, l[0].model, l[0].provider), fmtInt(s.n) + bar(s.n / max, c), s.priced ? fmtUSD(s.cost) : "–",
+              fmtTok(s.tokens), fmtPct(s.cacheRate), badge(s.errRate), fmtNum(s.tps), fmtDur(s.avgDur), spark(series(l, cnt), c)]};
+          }), {key: "models", detail}) : EMPTY);
+  },
+
+  providers() {
+    const a = agg(L), g = group(L, e => e.provider), order = rank(g, toks), col = colorsOf(order);
+    if (!g.has(ui.hourProvider)) ui.hourProvider = "";
+    const maxN = Math.max(1, ...[...g.values()].map(cnt)), maxT = Math.max(1, ...[...g.values()].map(toks));
+    const bm = segv("burn", ["Tokens", "Cost", "Requests"]);
+    const hrs = Array(24).fill(0);
+    for (const e of ui.hourProvider ? g.get(ui.hourProvider) : L) hrs[new Date(e.t * 1000).getHours()] += e.tokens;
+    const peak = hrs.indexOf(Math.max(...hrs));
+    const detail = k => {
+      const s = agg(g.get(k)), parts = [s.U, s.CR, s.CW, s.O];
+      return mix(parts, TOKC) + legend(TOKN.map((n, i) => [n, TOKC[i], `${fmtTok(parts[i])} · ${fmtPct(div(parts[i], s.tokens))}`]));
+    };
+    return head("Providers", `Burn and reliability per provider ${RTXT[ui.range]} — consumer subscriptions and platform APIs side by side.`)
+      + `<div class="kpis k5">${kpi("Providers", fmtInt(g.size), `Most tokens: ${esc(order[0] || "–")}`)}`
+      + kpi("Requests", fmtInt(a.n), `${fmtInt(a.failed)} failed`, series(L, cnt))
+      + kpi("Tokens", fmtTok(a.tokens), "", series(L, toks))
+      + kpi("API-equivalent cost", fmtUSD(a.cost), "", series(L, costs), PAL[1])
+      + kpi("Error rate", fmtPct(a.errRate), `${fmtInt(a.n - a.failed)} succeeded`) + `</div>`
+      + card("Provider totals", "Click a row for its token mix", order.length ? table(
+          [["Provider"], ["Requests", "n"], ["Error rate", "n"], ["Models", "n"], ["Tokens", "n"], ["Share", "n"], ["Cost", "n"], ["Tokens/s", "n"]],
+          order.map(k => {
+            const l = g.get(k), s = agg(l), c = col.get(k);
+            return {id: k, cells: [dotWho(c, k, newest(l)[0].billing), fmtInt(s.n) + bar(s.n / maxN, c), `${fmtInt(s.failed)} ${badge(s.errRate)}`,
+              fmtInt(new Set(l.map(e => e.model)).size), fmtTok(s.tokens) + bar(s.tokens / maxT, c), fmtPct(div(s.tokens, a.tokens)),
+              s.priced ? fmtUSD(s.cost) : "–", fmtNum(s.tps)]};
+          }), {key: "providers", detail}) : EMPTY)
+      + `<div class="two">${card("Burn by provider", B.hourly ? "Per hour" : "Per day", L.length ? plot("burn",
+          stacked(L, e => e.provider, order, col, bm === "Tokens" ? toks : bm === "Cost" ? costs : cnt),
+          {xaxis: timeAxis(), yaxis: {tickprefix: bm === "Cost" ? "$" : ""}}) : EMPTY, seg("burn", ["Tokens", "Cost", "Requests"]))}`
+      + card("Peak burn hours", sum(hrs) ? `Tokens by local hour of day; peak at ${pad(peak)}:00` : "Tokens by local hour of day",
+          sum(hrs) ? plot("hours", [{type: "bar", name: "Tokens", x: hrs.map((_, h) => pad(h) + ":00"), y: hrs,
+            marker: {color: hrs.map((_, h) => h === peak ? "#e94fbd" : PAL[0])}}], {showlegend: false, xaxis: {type: "category", tickangle: 0, dtick: 3}}) : EMPTY,
+          select("hourProvider", "All providers", order)) + `</div>`;
+  },
+
+  costs() {
+    const a = agg(L), byModel = group(L, e => e.model), order = rank(byModel, costs), col = colorsOf(rank(byModel, cnt));
+    const days = new Set(L.map(e => new Date(e.t * 1000).toDateString())).size, top = order[0];
+    const topCost = top ? costs(byModel.get(top)) : 0, cm = segv("cost", ["By model", "By component"]), x = X();
+    const cp = [0, 1, 2, 3].map(j => sum(L.map(e => e.parts[j])));
+    const traces = cm === "By model" ? stacked(L, e => e.model, order, col, costs)
+      : [0, 3, 1, 2].map(j => ({type: "bar", name: COSTN[j], x, y: series(L, l => sum(l.map(e => e.parts[j]))), marker: {color: TOKC[j]}}));
+    const where = mix(cp, TOKC) + `<div style="margin-top:12px">${[0, 3, 1, 2].map(j => `<div class="line"><span><i class="dot" style="background:${TOKC[j]}"></i>${COSTN[j]}</span><span class="mono">${fmtUSD(cp[j])} &nbsp; ${fmtPct(div(cp[j], a.cost))}</span></div>`).join("")}`
+      + `<div class="line" style="border-top:1px solid var(--bd)"><b>Total</b><b class="mono">${fmtUSD(a.cost)}</b></div></div>`;
+    return head("Costs", `What ${RTXT[ui.range]} of usage would cost at public API rates (OpenRouter catalog at generation time). Subscription and local usage without a public price is counted as unpriced, not free.`)
+      + (Object.keys(D.prices).length ? "" : `<div class="warn">Price catalog unavailable when this page was generated.</div>`)
+      + `<div class="kpis k5">${kpi("API-equivalent estimate", fmtUSD(a.cost), `${fmtInt(a.n)} requests`, series(L, costs), PAL[1])}`
+      + kpi("Average per day", fmtUSD(div(a.cost, days)), `over ${fmtInt(days)} active days`)
+      + kpi("Top model", topCost ? esc(top) : "–", topCost ? `${fmtUSD(topCost)} · ${fmtPct(div(topCost, a.cost))} of estimate` : "")
+      + kpi("Per priced request", fmtUSD(div(a.cost, a.priced)), `${fmtInt(a.priced)} priced`)
+      + kpi("Unpriced requests", fmtInt(a.unpriced), a.unpriced ? "no public price" : "all usage priced") + `</div>`
+      + `<div class="two">${card("Daily estimate", B.hourly ? "Per hour" : "Per day", L.length ? plot("cost", traces, {xaxis: timeAxis(), yaxis: {tickprefix: "$"}}) : EMPTY, seg("cost", ["By model", "By component"]))}`
+      + card("Where it went", "API-equivalent estimate by token component", L.length ? where : EMPTY) + `</div>`
+      + card("By model", "Sorted by estimate", order.length ? table(
+          [["Model"], ["Requests", "n"], ["Estimate", "n"], ["Share", "n"], ["Split"], ["Input", "n"], ["Output", "n"], ["Cache read", "n"], ["Cache write", "n"], ["Per request", "n"], ["Unpriced", "n"]],
+          order.map(k => {
+            const l = byModel.get(k), s = agg(l), c = col.get(k), p = [0, 1, 2, 3].map(j => sum(l.map(e => e.parts[j])));
+            return {id: k, cells: [`<div class="flex"><i class="dot" style="background:${c}"></i>${esc(k)}</div>`, fmtInt(s.n),
+              s.priced ? fmtUSD(s.cost) + bar(div(s.cost, topCost), c) : `<span class="muted">unpriced</span>`, fmtPct(div(s.cost, a.cost)),
+              `<div style="width:90px">${mix(p, TOKC)}</div>`, ...[0, 3, 1, 2].map(j => s.priced ? fmtUSD(p[j]) : "–"),
+              fmtUSD(div(s.cost, s.priced)), s.unpriced ? fmtInt(s.unpriced) : "–"]};
+          })) : EMPTY);
+  },
+
+  requests() {
+    const a = agg(L), durs = L.map(e => e.dur).sort((p, q) => p - q);
+    const q = p => durs.length ? durs[Math.min(durs.length - 1, Math.floor(p * durs.length))] : null;
+    const chips = `<div class="seg">${[["All", L.length], ["OK", L.length - a.failed], ["Failed", a.failed]].map(([s, n]) =>
+      `<button data-act="filter" data-k="status" data-v="${s}" class="${ui.status === s ? "on" : ""}">${s} <span class="muted">${fmtInt(n)}</span></button>`).join("")}</div>`;
+    return head("Requests", `Every model call Nesti made ${RTXT[ui.range]}, newest first.`)
+      + `<div class="kpis k5">${kpi("Requests", fmtInt(a.n), L.length ? `since ${ago(a.first)}` : "")}`
+      + kpi("Failed", fmtInt(a.failed), `${fmtPct(a.errRate)} of requests`)
+      + kpi("Tokens", fmtTok(a.tokens)) + kpi("API-equivalent cost", fmtUSD(a.cost))
+      + kpi("Median duration", fmtDur(q(0.5)), `p95 ${fmtDur(q(0.95))}`) + `</div>`
+      + card("Request log", "Click a failed request for its error", `<div id="requests-log">${LOGS.requests()}</div>`,
+        search("requests", "Search model, provider, project, issue…") + chips);
+  },
+
+  errors() {
+    const fl = L.filter(e => !e.ok), sigs = group(fl, e => e.sig), order = rank(sigs, cnt);
+    const bm = group(fl, e => e.model + "|" + e.provider), mOrder = rank(bm, cnt), models = [...new Set(fl.map(e => e.model))];
+    const last = fl.reduce((m, e) => Math.max(m, e.t), 0), max = order.length ? sigs.get(order[0]).length : 1;
+    return head("Errors", `Failed model requests ${RTXT[ui.range]}, grouped by error signature.`)
+      + `<div class="kpis k4">${kpi("Failures", fmtInt(fl.length))}`
+      + kpi("Signatures", fmtInt(sigs.size), order.length ? `top: ${fmtInt(max)} failures` : "")
+      + kpi("Affected models", fmtInt(models.length), esc(models.slice(0, 3).join(", ")))
+      + kpi("Last failure", fl.length ? ago(last) : "–", fl.length ? fmtDate(last) : "") + `</div>`
+      + `<div class="two">${card("Error signatures", "Click one to filter the failures below", order.length ? table(
+          [["Signature"], ["Models"], ["Last seen", "t"], ["Failures", "n"]],
+          order.map(s => {
+            const l = sigs.get(s), [m, p] = rank(group(l, e => e.model + "|" + e.provider), cnt)[0].split("|");
+            return {id: s, act: `data-act="filter" data-k="errors" data-v="${esc(s)}"`, cells: [`<span class="sig">${esc(s)}</span>`, who(m, p),
+              ago(Math.max(...l.map(e => e.t))), fmtInt(l.length) + bar(l.length / max, BADC)]};
+          })) : EMPTY)}`
+      + card("By model", "Failures per model", mOrder.length ? mOrder.map(k => {
+          const l = bm.get(k);
+          return `<div class="line click" data-act="filter" data-k="errors" data-v="${esc(l[0].model)}"><span>${who(l[0].model, l[0].provider)}</span><span class="mono err">${fmtInt(l.length)}</span></div>`;
+        }).join("") : EMPTY) + `</div>`
+      + card("Failures", "Newest first", `<div id="errors-log">${LOGS.errors()}</div>`, search("errors", "Search signature, error, model…"));
+  },
+
+  traces() {
+    return head("Traces", `Issue runs ${RTXT[ui.range]}. Open one to inspect its timeline.`)
+      + card("Sessions", "Newest first", `<div id="traces-log">${LOGS.traces()}</div>`, search("traces", "Filter by title, project, model…"));
+  },
+
+  tools() {
+    const tg = group(T, e => e.tool), tOrder = rank(tg, cnt), col = colorsOf(tOrder);
+    if (!tg.has(ui.tool)) ui.tool = "";
+    const g = group(ui.tool ? tg.get(ui.tool) : T, e => e.tool + "|" + (e.model || "")), keys = rank(g, cnt);
+    const max = keys.length ? g.get(keys[0]).length : 1;
+    return head("Tools", `Pipeline tool runs ${RTXT[ui.range]}, attributed to the model whose output they processed. A test layer whose suite fails counts as an error.`)
+      + card("Tool runs", "Grouped by tool and model", keys.length ? table(
+          [["Tool"], ["Model"], ["Calls", "n"], ["Errors", "n"], ["Avg duration", "n"], ["Last used", "n"]],
+          keys.map(k => {
+            const l = g.get(k), e0 = newest(l)[0], c = col.get(e0.tool), f = fails(l);
+            return {id: k, cells: [`<div class="flex"><i class="dot" style="background:${c}"></i>${esc(e0.tool)}</div>`,
+              e0.model ? who(e0.model, e0.provider) : "–", fmtInt(l.length) + bar(l.length / max, c),
+              `${fmtInt(f)} ${badge(div(f, l.length))}`, fmtDur(div(sum(l.map(e => e.dur || 0)), l.length)), ago(e0.t)]};
+          })) : EMPTY, select("tool", "All tools", tOrder));
+  },
+};
+
+// search-driven logs: re-rendered alone on input so the search box keeps focus
+const LOGS = {
+  requests() {
+    const all = newest(L).filter(e => (ui.status === "All" || (ui.status === "OK") === e.ok)
+      && hit(ui.q.requests, [e.model, e.provider, e.project, e.title, e.issue != null ? "#" + e.issue : ""]));
+    const l = all.slice(0, 500);
+    return `<div class="muted cnt">${fmtInt(l.length)} of ${fmtInt(L.length)} requests${all.length > 500 ? " (newest 500 shown)" : ""}</div>` + (l.length ? table(
+      [["Model"], ["When", "t"], ["Project"], ["Issue"], ["Role"], ["Input", "n"], ["Cache read", "n"], ["Output", "n"], ["Cost", "n"], ["Duration", "n"], ["Status", "n"]],
+      l.map(e => ({id: e.i, click: !e.ok, cells: [who(e.model, e.provider), ago(e.t), proj(e.project), issueCell(e), esc(e.role),
+        fmtTok(e.tok[0]), fmtTok(e.tok[1]), fmtTok(e.tok[3]), usd(e), fmtDur(e.dur), status(e.ok)]})),
+      {key: "requests", detail: id => `<pre class="err">${esc(D.events[+id].error)}</pre>`}) : EMPTY);
+  },
+  errors() {
+    const l = newest(L.filter(e => !e.ok && hit(ui.q.errors, [e.sig, e.error, e.model, e.provider, e.project, e.title]))).slice(0, 500);
+    return l.length ? table([["When", "t"], ["Model"], ["Error"], ["Project"], ["Issue"], ["Role"]],
+      l.map(e => ({id: e.i, cells: [fmtDate(e.t), who(e.model, e.provider),
+        `<span class="err" title="${esc(e.error)}">${esc(e.error.slice(0, 120))}</span>`, proj(e.project), issueCell(e), esc(e.role)]}))) : EMPTY;
+  },
+  traces() {
+    const runs = [...group(F.filter(e => e.run), e => e.run)].map(([run, l]) => {
+      l.sort((p, q) => p.t - q.t);
+      const llm = l.filter(e => e.kind === "llm");
+      return {run, l, llm, tools: l.length - llm.length, models: rank(group(llm, e => e.model), cnt), start: l[0].t,
+        dur: Math.max(...l.map(e => e.t + (e.dur || 0))) - l[0].t, title: l[0].title, issue: l[0].issue, project: l[0].project,
+        attempts: llm.filter(e => e.ok && e.role === "code").length, tokens: toks(llm), cost: costs(llm)};
+    }).filter(s => hit(ui.q.traces, [s.title, s.project, ...s.models, "#" + s.issue])).sort((p, q) => q.start - p.start);
+    const byRun = new Map(runs.map(s => [s.run, s])), maxC = Math.max(0, ...runs.map(s => s.cost)) || 1;
+    const detail = run => {
+      const s = byRun.get(run);
+      return table([["Offset"], ["Kind"], ["Name"], ["Duration", "n"], ["Tokens", "n"], ["Cost", "n"], ["Status", "n"]],
+        s.l.map(e => {
+          const o = Math.round(e.t - s.start), llm = e.kind === "llm";
+          return {id: e.i, title: e.error, cells: [`+${pad(Math.floor(o / 60))}:${pad(o % 60)}`, llm ? esc(e.role) : "tool",
+            llm ? `${esc(e.model)} · ${esc(e.provider)}` : esc(e.tool), fmtDur(e.dur), llm ? fmtInt(e.tokens) : "–", llm ? usd(e) : "–", status(e.ok)]};
+        }));
+    };
+    return runs.length ? table(
+      [["Session"], ["Models"], ["Started", "n"], ["Duration", "n"], ["Requests", "n"], ["Tools", "n"], ["Attempts", "n"], ["Tokens", "n"], ["Cost", "n"]],
+      runs.map(s => ({id: s.run, cells: [`<div class="t"><b>${esc(s.title)}</b></div><div class="sub2">#${esc(s.issue)} · ${proj(s.project)}</div>`,
+        s.models.length ? esc(s.models[0]) + (s.models.length > 1 ? `<span class="chip">+${s.models.length - 1}</span>` : "") : "–",
+        ago(s.start), fmtDur(s.dur), fmtInt(s.llm.length), fmtInt(s.tools), fmtInt(s.attempts), fmtTok(s.tokens), fmtUSD(s.cost) + bar(s.cost / maxC, PAL[0])]})),
+      {key: "traces", detail}) : EMPTY;
+  },
+};
+
+function render() {
+  const h = location.hash.slice(1);
+  ui.tab = Object.hasOwn(TABS, h) ? h : "overview";
+  const from = now - RANGES[ui.range];
+  F = D.events.filter(e => e.t * 1000 >= from && (ui.project === "" || e.project === ui.project));
+  L = F.filter(e => e.kind === "llm");
+  T = F.filter(e => e.kind === "tool");
+  buckets();
+  document.getElementById("tabs").innerHTML = Object.entries(TABS).map(([k, v]) => `<a href="#${k}" class="${k === ui.tab ? "on" : ""}">${v}</a>`).join("");
+  document.getElementById("ranges").innerHTML = Object.keys(RANGES).map(r => `<button data-act="range" data-v="${r}" class="${r === ui.range ? "on" : ""}">${r}</button>`).join("");
+  const main = document.getElementById("main");
+  main.querySelectorAll(".js-plotly-plot").forEach(el => Plotly.purge(el));
+  post = [];
+  main.innerHTML = VIEWS[ui.tab]();
+  post.forEach(f => f());
+}
+
+document.getElementById("project").innerHTML = `<option value="">All projects</option>`
+  + [...new Set(D.events.map(e => e.project).filter(Boolean))].sort().map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+document.addEventListener("click", ev => {
+  const el = ev.target.closest("[data-act]");
+  if (!el) return;
+  const {act, k, v} = el.dataset;
+  if (act === "range") { ui.range = v; ui.open = {}; }
+  else if (act === "seg") ui.seg[k] = v;
+  else if (act === "open") ui.open[k] = ui.open[k] === v ? null : v;
+  else if (act === "filter") { if (k === "status") ui.status = v; else ui.q[k] = v; }
+  render();
+});
+document.addEventListener("change", ev => {
+  const k = ev.target.dataset.sel;
+  if (!k) return;
+  ui[k] = ev.target.value;
+  if (k === "project") ui.open = {};
+  render();
+});
+document.addEventListener("input", ev => {
+  const k = ev.target.dataset.q;
+  if (!k) return;
+  ui.q[k] = ev.target.value;
+  document.getElementById(k + "-log").innerHTML = LOGS[k]();
+});
+window.addEventListener("hashchange", render);
+render();
+</script></body></html>

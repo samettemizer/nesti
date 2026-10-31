@@ -55,6 +55,7 @@ from semantic_cache import get_semantic_memory
 import project_layout
 from skill_catalog import catalog_status, select_skills
 from skill_loader import load_skills
+import stats
 from vector_store import get_document_memory
 
 logger = logging.getLogger(__name__)
@@ -1360,3 +1361,4 @@ def tool_quota_check() -> dict:
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_quota_check failed: %s", exc)
         return _err(exc)
+stats.instrument(globals())  # record tool_* runs for nesti /stats
