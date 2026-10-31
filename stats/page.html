@@ -29,9 +29,13 @@ h4{margin:14px 0 8px;font-size:12.5px;color:var(--mu);font-weight:600}
 .k8 .kpi .val{font-size:16px}
 .kpi .sub{color:var(--mu);font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kpi svg{width:100%;margin-top:10px}
-.two{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:16px;margin-top:16px}
+.two,.half{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:16px;margin-top:16px}
+.half{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-top:16px;min-width:0}
-.two .card{margin-top:0}
+.two .card,.half .card{margin-top:0}
+.share{position:relative;display:flex;justify-content:space-between;gap:12px;padding:5px 8px;margin:6px 0;border-radius:4px;overflow:hidden;font:13px ui-monospace,monospace}
+.share i{position:absolute;left:0;top:0;bottom:0;border-radius:4px;opacity:.22}
+.share span{position:relative;white-space:nowrap}
 .ch{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}
 .ch>div:last-child{display:flex;gap:8px;align-items:center}
 .tw{overflow-x:auto}
@@ -78,7 +82,7 @@ const now = D.generated * 1000, HOUR = 3600e3, DAY = 24 * HOUR;
 const RANGES = {"1h": HOUR, "24h": DAY, "7d": 7 * DAY, "30d": 30 * DAY, "90d": 90 * DAY, "All": Infinity};
 const RTXT = {"1h": "in the last hour", "24h": "in the last 24 hours", "7d": "in the last 7 days",
   "30d": "in the last 30 days", "90d": "in the last 90 days", "All": "since recording began"};
-const TABS = {overview: "Overview", models: "Models", providers: "Providers", costs: "Costs",
+const TABS = {overview: "Overview", projects: "Projects", models: "Models", providers: "Providers", costs: "Costs",
   requests: "Requests", errors: "Errors", traces: "Traces", tools: "Tools"};
 const ui = {tab: "overview", range: "7d", project: "", seg: {}, open: {}, q: {}, status: "All", hourProvider: "", tool: ""};
 let F = [], L = [], T = [], B = [], post = [];
@@ -254,6 +258,11 @@ const fact = (lab, val) => `<div><div class="muted">${lab}</div><div class="mono
 const search = (k, ph) => `<input data-q="${k}" placeholder="${ph}" value="${esc(ui.q[k] || "")}">`;
 const select = (k, all, opts) => `<select data-sel="${k}"><option value="">${all}</option>${opts.map(o => `<option value="${esc(o)}"${o === ui[k] ? " selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
 const hit = (q, fields) => !q || fields.join(" ").toLowerCase().includes(q.toLowerCase());
+const shareRows = (rows, color) => rows.map(([name, f, text]) =>
+  `<div class="share"><i style="width:${Math.max(0, Math.min(1, f || 0)) * 100}%;background:${color}"></i><span>${name}</span><span class="muted">${text}</span></div>`).join("");
+// LLM events per project with their agg(); cost descending, then requests
+const projectGroups = () => [...group(L, e => e.project || "")].map(([p, l]) => ({p, a: agg(l)}))
+  .sort((x, y) => y.a.cost - x.a.cost || y.a.n - x.a.n);
 
 const VIEWS = {
   overview() {
@@ -283,6 +292,20 @@ const VIEWS = {
           [["Model"], ["When", "t"], ["Tokens", "n"], ["Cost", "n"], ["Duration", "n"], ["Status", "n"]],
           latest.map(e => ({id: e.i, cells: [who(e.model, e.provider), ago(e.t), fmtInt(e.tokens), usd(e), fmtDur(e.dur), status(e.ok)]}))) : EMPTY,
         `<a class="link" href="#requests">All requests →</a>`);
+  },
+
+  projects() {
+    const a = agg(L), rows = projectGroups(), byReq = [...rows].sort((x, y) => y.a.n - x.a.n);
+    const maxC = rows.length ? rows[0].a.cost : 0, maxN = byReq.length ? byReq[0].a.n : 1;
+    return head("Projects", `Usage per project ${RTXT[ui.range]}.`)
+      + `<div class="kpis k5">${kpi("Projects", fmtInt(rows.length))}`
+      + kpi("Requests", fmtInt(a.n), `${fmtInt(a.failed)} failed`) + kpi("API-equivalent cost", fmtUSD(a.cost))
+      + kpi("Tokens", fmtTok(a.tokens)) + kpi("Cache rate", fmtPct(a.cacheRate)) + `</div>`
+      + `<div class="half">${card("Top by cost", "Share of API-equivalent cost", rows.length ? shareRows(rows.map(r =>
+          [proj(r.p), div(r.a.cost, maxC), r.a.priced ? `${fmtUSD(r.a.cost)} · ${fmtPct(div(r.a.cost, a.cost))}` : "unpriced"]), PAL[1]) : EMPTY)}`
+      + card("Top by requests", "Share of all requests", byReq.length ? shareRows(byReq.map(r =>
+          [proj(r.p), r.a.n / maxN, `${fmtInt(r.a.n)} · ${fmtPct(r.a.n / a.n)}`]), PAL[0]) : EMPTY) + `</div>`
+      + card("Projects", `${fmtInt(rows.length)} projects`, `<div id="projects-log">${LOGS.projects()}</div>`, search("projects", "Filter projects…"));
   },
 
   models() {
@@ -447,6 +470,14 @@ const VIEWS = {
 
 // search-driven logs: re-rendered alone on input so the search box keeps focus
 const LOGS = {
+  projects() {
+    const all = projectGroups(), rows = all.filter(r => hit(ui.q.projects, [r.p || "(none)"]));
+    const maxN = Math.max(1, ...all.map(r => r.a.n)), maxC = Math.max(0, ...all.map(r => r.a.cost)) || 1;
+    return (ui.q.projects ? `<div class="muted cnt">${fmtInt(rows.length)} of ${fmtInt(all.length)} projects</div>` : "") + (rows.length ? table(
+      [["Project"], ["Requests", "n"], ["Cost", "n"], ["Tokens", "n"], ["Cache rate", "n"], ["Cache savings", "n"], ["Errors", "n"], ["Avg duration", "n"], ["Last active", "n"]],
+      rows.map(({p, a: s}) => ({id: p, cells: [proj(p), fmtInt(s.n) + bar(s.n / maxN, PAL[0]), (s.priced ? fmtUSD(s.cost) : "–") + bar(s.cost / maxC, PAL[1]),
+        fmtTok(s.tokens), fmtPct(s.cacheRate), fmtPct(s.savedPct), badge(s.errRate), fmtDur(s.avgDur), ago(s.last)]}))) : EMPTY);
+  },
   requests() {
     const all = newest(L).filter(e => (ui.status === "All" || (ui.status === "OK") === e.ok)
       && hit(ui.q.requests, [e.model, e.provider, e.project, e.title, e.issue != null ? "#" + e.issue : ""]));
