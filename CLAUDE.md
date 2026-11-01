@@ -29,7 +29,8 @@ issue_scope.py               backend/frontend/fullstack task scope + documentati
 e2e_fixtures.py              manifest/report and trusted dependency metadata contracts
 issue_dependencies.py        durable pause/child/merge/release workflow; no LLM
 conversation_store.py        Redis per-issue history (ai-dev:issue:{id}:messages)
-docker_runner.py             PHP sandbox, OpenAPI export, bootstrap, FILE-block writer
+docker_runner.py             PHP sandbox (+ postgres:15 sidecar when phpunit.xml declares pgsql),
+                             OpenAPI export, bootstrap, FILE-block writer
 frontend_runner.py           Vitest + Playwright sandboxes
 gitlab_issues_client.py      issue intake + label lock; gitlab_client.py: repo + MR
 skill_catalog.py             offline corpus selection; skill_loader.py: issue URLs
@@ -84,6 +85,8 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
    the container in a `finally` block. Keep the `finally` removal and keep the
    timeout enforceable — do not "simplify" either runner to a blocking
    `containers.run(remove=True)`, which cannot take a run-duration timeout.
+   A pgsql PHPUnit run's `nesti-pg-*` sidecar (with its volume) and
+   `nesti-run-*` network are removed in the same way, on every path.
 9. **Every function in `graph/tools.py` must return `{"success": bool, ...}`.**
 10. **Never store secrets in code** — all credentials come from `.env`.
 11. **`node_cleanup` must always run** — it is the final node in every path.
@@ -116,9 +119,10 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 21. **`@playwright/test` is pinned exactly, never with a caret**, and its
     version and the E2E image's base tag change together.
 22. **Sandbox base images are pinned and coupled.** `Dockerfile.sandbox` is
-    `php:8.4-cli` with `pdo_pgsql bcmath gd intl` (managed projects may
+    `php:8.4-cli` with `pdo_pgsql bcmath gd intl pcntl` (managed projects may
     require `^8.4`; composer's platform check fails on 8.3), and its CMD
-    stays byte-identical to `docker_runner._TEST_COMMAND`. `Dockerfile.sandbox.node` is
+    stays byte-identical to `docker_runner._TEST_COMMAND`. The PHPUnit
+    PostgreSQL sidecar is pinned to `postgres:15` (`docker_runner._POSTGRES_IMAGE`). `Dockerfile.sandbox.node` is
     `node:22-alpine` (`vitest@5` requires Node `^22.12`; `node:20-alpine` is
     too old), and `Dockerfile.sandbox.e2e` is
     `mcr.microsoft.com/playwright:v1.50.0-noble` **plus** an explicit Node 22

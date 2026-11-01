@@ -2307,6 +2307,106 @@ with tempfile.TemporaryDirectory(prefix="nesti-runner-") as root:
         result = runner_case(root, 78, blocked_report)
     check(result["fixture_request"] is None and not result["passed"], "report read error cannot request dependency")
 
+print("\n── PHPUnit PostgreSQL sidecar lifecycle ──")
+import docker_runner as dr
+
+
+def phpunit_case(root, exit_code=0, ready=True, error=None, sidecar_error=None):
+    """Run the real run_tests against fake Docker; return (result, events, runs)."""
+    events, runs, created = [], [], set()
+    class Sandbox:
+        def wait(self, timeout):
+            if error:
+                raise error
+            return {"StatusCode": exit_code}
+        def logs(self, **kwargs):
+            return b"Tests: 3 passed"
+        def remove(self, force):
+            events.append(("sandbox-removed", force))
+    class Sidecar:
+        def exec_run(self, cmd):
+            events.append(("exec", cmd[0]))
+            return SimpleNamespace(exit_code=0 if ready or cmd[0] == "psql" else 2, output=b"")
+        def remove(self, force, v):
+            events.append(("pg-removed", force, v))
+    class Network:
+        def __init__(self, name):
+            self.name = name
+        def remove(self):
+            events.append(("net-removed", self.name))
+    def run(**kwargs):
+        runs.append(kwargs)
+        if kwargs["image"] != dr._POSTGRES_IMAGE:
+            return Sandbox()
+        created.add(kwargs["name"])
+        if sidecar_error:
+            raise sidecar_error
+        return Sidecar()
+    def get(name):
+        if name not in created:
+            raise docker.errors.NotFound(name)
+        return Sidecar()
+    def create(name, driver):
+        events.append(("net-created", name, driver))
+        return Network(name)
+    client = SimpleNamespace(containers=SimpleNamespace(run=run, get=get),
+                             networks=SimpleNamespace(create=create))
+    with patch.object(dr.docker, "from_env", return_value=client), \
+            patch.object(dr, "_PG_READY_TIMEOUT", 0):
+        return dr.DockerRunner().run_tests(root), events, runs
+
+
+_PG_XML = ('<phpunit><php><env name="DB_CONNECTION" value="pgsql" force="true"/>'
+           '<env name="DB_DATABASE" value="app_test"/><server name="DB_USERNAME" value="app_user"/></php></phpunit>')
+with tempfile.TemporaryDirectory(prefix="nesti-pg-") as root:
+    Path(root, "phpunit.xml").write_text(_PG_XML)
+    for code in (0, 1):
+        (ok, output), events, runs = phpunit_case(root, exit_code=code)
+        sidecar, sandbox = runs
+        network = events[0][1]
+        check(ok is (code == 0) and "Tests: 3 passed" in output, f"pgsql run follows sandbox exit {code}")
+        check(network.startswith("nesti-run-") and events[0][2] == "bridge"
+              and sidecar["name"] == network.replace("-run-", "-pg-") and sidecar["network"] == network,
+              "sidecar nesti-pg-* starts on its own nesti-run-* bridge network")
+        env = sandbox["environment"]
+        check(sandbox["network"] == network and sandbox["command"] == dr._TEST_COMMAND
+              and env["DB_CONNECTION"] == "pgsql" and env["DB_HOST"] == sidecar["name"]
+              and env["DB_PORT"] == "5432" and env["DB_DATABASE"] == "app_test"
+              and env["DB_USERNAME"] == "app_user" and len(env["DB_PASSWORD"]) == 32,
+              "sandbox joins the network with the phpunit.xml database settings")
+        check(events[-3:] == [("sandbox-removed", True), ("pg-removed", True, True), ("net-removed", network)],
+              "sandbox, sidecar (with its volume) and network removed")
+    (ok, output), events, runs = phpunit_case(root, error=requests.exceptions.ReadTimeout("t"))
+    check(not ok and "timed out" in output and events[-2:] == [("pg-removed", True, True), ("net-removed", events[0][1])],
+          "sandbox timeout still removes sidecar and network")
+    (ok, output), events, runs = phpunit_case(root, ready=False)
+    check(not ok and "not ready" in output and len(runs) == 1
+          and events[-2:] == [("pg-removed", True, True), ("net-removed", events[0][1])],
+          "readiness failure never starts the sandbox and removes sidecar and network")
+    (ok, output), events, runs = phpunit_case(root, sidecar_error=docker.errors.APIError("start failed"))
+    check(not ok and "PostgreSQL sidecar failed" in output and len(runs) == 1
+          and events[-2:] == [("pg-removed", True, True), ("net-removed", events[0][1])],
+          "sidecar start failure removes the created container by name and the network")
+with tempfile.TemporaryDirectory(prefix="nesti-pg-dist-") as root:
+    Path(root, "phpunit.xml.dist").write_text('<phpunit><php><env name="DB_CONNECTION" value="pgsql"/></php></phpunit>')
+    (ok, _), _, runs = phpunit_case(root)
+    check(ok and runs[1]["environment"]["DB_DATABASE"] == "testing"
+          and runs[1]["environment"]["DB_USERNAME"] == "testing", "phpunit.xml.dist fallback with testing defaults")
+    Path(root, "phpunit.xml").write_text(_PG_XML.replace("app_test", "x&quot;; DROP"))
+    (ok, output), events, runs = phpunit_case(root)
+    check(not ok and "identifiers" in output and not events and not runs, "unsafe identifier starts nothing")
+with tempfile.TemporaryDirectory(prefix="nesti-sqlite-") as root:
+    for xml in (None, '<phpunit><php><env name="DB_CONNECTION" value="sqlite"/></php></phpunit>'):
+        if xml:
+            Path(root, "phpunit.xml").write_text(xml)
+        (ok, _), events, runs = phpunit_case(root)
+        check(ok and not events[:-1] and len(runs) == 1 and runs[0]["command"] == dr._TEST_COMMAND
+              and runs[0]["environment"] is None and runs[0]["network"] is None,
+              "SQLite project starts no sidecar and keeps command/env")
+_cmd = next(line for line in Path(__file__).resolve().with_name("Dockerfile.sandbox").read_text().splitlines()
+            if line.startswith("CMD "))
+check(json.loads(_cmd[4:]) == dr._TEST_COMMAND, "Dockerfile.sandbox CMD is byte-identical to _TEST_COMMAND")
+
 print("\n── Graph pause versus ordinary retry and rejected claim ──")
 for pause_status, attempts, expected_attempts in (("paused", 1, 1), ("ineligible", 2, 2)):
     reset_calls(310)

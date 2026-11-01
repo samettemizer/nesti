@@ -14,6 +14,9 @@ The AI developer never runs code on the host machine directly.
 import logging
 import os
 import re
+import secrets
+import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import docker
@@ -60,7 +63,7 @@ _TEST_COMMAND = [
         _TRAP_OWNER,
         "composer install --no-interaction --prefer-dist --no-progress;",
         "if [ -f artisan ]; then",
-        'export DB_CONNECTION=sqlite DB_DATABASE="$PWD/database/database.sqlite";',
+        '[ "$DB_CONNECTION" = pgsql ] || export DB_CONNECTION=sqlite DB_DATABASE="$PWD/database/database.sqlite";',
         "[ -f .env ] || cp .env.example .env;",
         "php artisan key:generate --force;",
         "php artisan config:clear;",
@@ -70,8 +73,7 @@ _TEST_COMMAND = [
         # already-applied table collides with the "pending" new migration
         # ("table already exists") and every later attempt fails on state the
         # model cannot see. The file is a gitignored test artifact.
-        "rm -f database/database.sqlite;",
-        "touch database/database.sqlite;",
+        'if [ "$DB_CONNECTION" = sqlite ]; then rm -f database/database.sqlite; touch database/database.sqlite; fi;',
         "php artisan migrate --force;",
         "php artisan test;",
         "else",
@@ -144,6 +146,29 @@ _BOOST_ENV = {
     "APP_EVENTS_CACHE": "/tmp/nesti-events.php",
 }
 
+# PHPUnit sidecar for a phpunit.xml that declares DB_CONNECTION=pgsql.
+_POSTGRES_IMAGE = "postgres:15"
+_PG_READY_TIMEOUT = 60
+_PG_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
+
+
+def _pgsql_settings(app_root: str) -> dict[str, str] | None:
+    """Return the phpunit.xml DB name/user when it declares pgsql, else None."""
+    for name in ("phpunit.xml", "phpunit.xml.dist"):
+        path = Path(app_root, name)
+        if path.is_file():
+            break
+    else:
+        return None
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return None
+    env = {e.get("name"): e.get("value", "") for e in root.iter() if e.tag in ("env", "server")}
+    if env.get("DB_CONNECTION") != "pgsql":
+        return None
+    return {key: env.get(key) or "testing" for key in ("DB_DATABASE", "DB_USERNAME")}
+
 
 class DockerRunner:
     def __init__(self):
@@ -169,7 +194,10 @@ class DockerRunner:
             success – True if the test suite exited with code 0.
             output  – Combined stdout + stderr from the container.
         """
-        return self._run(workspace_path, _TEST_COMMAND, self.timeout, "phpunit")
+        settings = _pgsql_settings(workspace_path)
+        if settings is None:
+            return self._run(workspace_path, _TEST_COMMAND, self.timeout, "phpunit")
+        return self._run_with_postgres(workspace_path, settings)
 
     def run_openapi_export(self, workspace_path: str) -> tuple[bool, str]:
         """
@@ -222,6 +250,69 @@ class DockerRunner:
     # Internals
     # ------------------------------------------------------------------
 
+    def _run_with_postgres(self, workspace_path: str, settings: dict[str, str]) -> tuple[bool, str]:
+        """
+        Run the PHPUnit recipe against a disposable PostgreSQL sidecar.
+
+        A per-run ``nesti-run-<hex>`` network and ``nesti-pg-<hex>`` container
+        hold a non-superuser login role owning the phpunit.xml database; both
+        are removed in ``finally`` on every path (Absolute Rule 8). Never raises.
+        """
+        database, username = settings["DB_DATABASE"], settings["DB_USERNAME"]
+        if not all(_PG_IDENTIFIER.fullmatch(name) for name in (database, username)):
+            return False, f"phpunit.xml DB_DATABASE/DB_USERNAME must be plain PostgreSQL identifiers: {database!r}, {username!r}."
+        host = f"nesti-pg-{secrets.token_hex(6)}"
+        password = secrets.token_hex(16)
+        network = None
+        try:
+            network = self.client.networks.create(host.replace("-pg-", "-run-"), driver="bridge")
+            sidecar = self.client.containers.run(
+                image=_POSTGRES_IMAGE,
+                name=host,
+                network=network.name,
+                environment={"POSTGRES_PASSWORD": secrets.token_hex(16)},
+                detach=True,
+            )
+            # TCP, not the socket: the image's temporary init server listens on the socket only.
+            deadline = time.monotonic() + _PG_READY_TIMEOUT
+            while sidecar.exec_run(["pg_isready", "-h", "127.0.0.1", "-U", "postgres"]).exit_code != 0:
+                if time.monotonic() >= deadline:
+                    msg = f"PostgreSQL sidecar not ready after {_PG_READY_TIMEOUT}s."
+                    logger.error(msg)
+                    return False, msg
+                time.sleep(1)
+            created = sidecar.exec_run([
+                "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1",
+                "-c", f"CREATE ROLE \"{username}\" LOGIN PASSWORD '{password}'",
+                "-c", f'CREATE DATABASE "{database}" OWNER "{username}"',
+            ])
+            if created.exit_code != 0:
+                msg = "PostgreSQL sidecar setup failed: " + created.output.decode("utf-8", errors="replace")
+                logger.error(msg)
+                return False, msg
+            environment = {
+                "DB_CONNECTION": "pgsql", "DB_HOST": host, "DB_PORT": "5432",
+                "DB_DATABASE": database, "DB_USERNAME": username, "DB_PASSWORD": password,
+            }
+            return self._run(workspace_path, _TEST_COMMAND, self.timeout, "phpunit",
+                             environment=environment, network=network.name)
+        except Exception as exc:  # pylint: disable=broad-except
+            msg = f"PostgreSQL sidecar failed: {exc}"
+            logger.error(msg)
+            return False, msg
+        finally:
+            # By name: containers.run can raise after creating the container.
+            # v=True: postgres:15 declares a VOLUME, which would outlive the container.
+            try:
+                self.client.containers.get(host).remove(force=True, v=True)
+            except Exception:  # pylint: disable=broad-except
+                pass
+            if network is not None:
+                try:
+                    network.remove()
+                except Exception:  # pylint: disable=broad-except
+                    pass
+
     def _run(
         self,
         workspace_path: str,
@@ -232,6 +323,7 @@ class DockerRunner:
         user: str | None = None,
         environment: dict[str, str] | None = None,
         network_disabled: bool = False,
+        network: str | None = None,
     ) -> tuple[bool, str]:
         """
         Run *command* inside the sandbox image against *workspace_path*.
@@ -258,6 +350,7 @@ class DockerRunner:
                 user=user,
                 environment=environment,
                 network_disabled=network_disabled,
+                network=network,
                 remove=False,
                 stdout=True,
                 stderr=True,
