@@ -3,7 +3,7 @@ graph/builder.py – assembles and compiles the LangGraph pipeline.
 
 Topology
 ────────
-    setup ─┬→ bootstrap → load_skills → plan ─┬→ code → detect_stack ─┐
+    setup ─┬→ detect_domain ─┬→ bootstrap → load_skills → plan ─┬→ code → detect_stack ─┐
            │                                  │                       │
            │    ┌─────────────────────────────┘                       │
            │    │   phpunit_test ←────────────────────────────────────┤
@@ -15,7 +15,8 @@ Topology
            └──────────────────────────────────────────────────────────────────────────────┘
 
 ``setup`` claims the issue first; a refused claim goes straight to ``cleanup``
-so nothing is cloned and no LLM is called.
+so nothing is cloned and no LLM is called.  ``detect_domain`` picks the owning
+domain of a domain-split backend, or asks in GitLab and pauses (→ ``cleanup``).
 
 ``bootstrap`` guarantees the clone is a Laravel application before any skill or
 prompt work happens: a greenfield repository is scaffolded, an existing Laravel
@@ -48,7 +49,7 @@ from langgraph.graph import StateGraph, END
 
 from graph.state import IssueState
 from graph.nodes import (
-    node_setup, node_bootstrap, node_load_skills, node_plan, node_code,
+    node_setup, node_detect_domain, node_bootstrap, node_load_skills, node_plan, node_code,
     node_detect_stack,
     node_test, node_openapi_test,
     node_vitest_test, node_playwright_test,
@@ -58,6 +59,7 @@ from graph.nodes import (
 )
 from graph.edges import (
     route_after_setup,
+    route_after_domain,
     route_after_plan,
     route_after_code,
     route_after_detect_stack,
@@ -74,6 +76,7 @@ def build_graph():
 
     # ── Register nodes ────────────────────────────────────────────────────
     g.add_node("setup",             node_setup)
+    g.add_node("detect_domain",     node_detect_domain)
     g.add_node("bootstrap",         node_bootstrap)
     g.add_node("load_skills",       node_load_skills)
     g.add_node("plan",              node_plan)
@@ -104,6 +107,11 @@ def build_graph():
     g.add_conditional_edges(
         "setup",
         route_after_setup,
+        {"detect_domain": "detect_domain", "cleanup": "cleanup"},
+    )
+    g.add_conditional_edges(
+        "detect_domain",
+        route_after_domain,
         {"bootstrap": "bootstrap", "cleanup": "cleanup"},
     )
     g.add_conditional_edges(

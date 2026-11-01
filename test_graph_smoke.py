@@ -298,6 +298,11 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             raise RuntimeError("All coding providers exhausted.")
         return seq.pop(0) if len(seq) > 1 else seq[0]
     nodes._llm.generate_code = fake_code
+
+    def domain_tool_reached(*_args, **_kwargs):
+        raise AssertionError("domain tools reached on a default-structure repository")
+    nodes.tool_issue_domain_answer = domain_tool_reached
+    nodes.tool_issue_ask_domain = domain_tool_reached
     nodes._llm.escalate_coder = lambda: calls.__setitem__("escalate", calls["escalate"] + 1)
 
 
@@ -529,6 +534,12 @@ try:
                     "app/Http/Requests/StoreTaskRequest.php"):
         r = tool_detect_stack(laravel_probe, [touched])["result"]
         check(r["run_openapi"] is True, f"{touched} touched → OpenAPI layer runs")
+
+    for touched, expected in (("app/Domains/Shop/Http/Controllers/OrderController.php", True),
+                              ("routes/domains/Shop.php", True),
+                              ("app/Domains/Shop/Models/Order.php", False)):
+        r = tool_detect_stack(laravel_probe, [touched])["result"]
+        check(r["run_openapi"] is expected, f"{touched} touched → OpenAPI layer runs: {expected}")
 
     r = tool_detect_stack(laravel_probe, ["resources/js/components/X.vue"])["result"]
     check(r["run_openapi"] is False,
@@ -3072,6 +3083,150 @@ finally:
     project_layout.STATE_DIR, project_layout.LAYOUT_FILE = _saved_layout
     shutil.rmtree(_state_dir, ignore_errors=True)
 
+# ═════ Scenario 34: backend domain detection ═════
+print("\n── Scenario 34: backend domain detection ──")
+import issue_domain  # noqa: E402
+
+
+def _domain_tree(root):
+    _put(root, "artisan")
+    _put(root, "composer.json", "{}")
+    _put(root, "vite.config.js", "import vue from '@vitejs/plugin-vue';\n")
+    for d in ("Duyurular", "Members"):
+        _put(root, f"app/Domains/{d}/Http/Controllers/{d}Controller.php",
+             f"<?php\nnamespace App\\Domains\\{d}\\Http\\Controllers;\n// SENTINEL_{d}\n")
+        _put(root, f"app/Domains/{d}/Models/X.php", "<?php\n")
+        _put(root, f"routes/domains/{d}.php",
+             f"<?php\nuse App\\Domains\\{d}\\Http\\Controllers\\{d}Controller;\n"
+             f"Route::prefix('{d.lower()}')->group(function () {{\n"
+             f"    Route::get('/', [{d}Controller::class, 'index']);\n}});\n")
+    _put(root, "routes/api.php",
+         "<?php\nuse App\\Http\\Controllers\\TestController;\n"
+         "Route::get('/test', [TestController::class, '__invoke']);\n"
+         "foreach (['Duyurular', 'Members'] as $d) {\n"
+         "    require __DIR__.'/domains/'.$d.'.php';\n}\n")
+
+
+def domain_clone(target_path):
+    os.makedirs(target_path, exist_ok=True)
+    calls["workspaces"].append(os.path.dirname(target_path))
+    _domain_tree(target_path)
+    return {"success": True, "result": {"repo_path": target_path}}
+
+
+_domain_probe = tempfile.mkdtemp(prefix="nesti-domain-")
+try:
+    _domain_tree(_domain_probe)
+    _cat = issue_domain.domain_catalog(Path(_domain_probe))
+    check([d["name"] for d in _cat["domains"]] == ["Duyurular", "Members"]
+          and _cat["domains"][0]["route_files"] == ["routes/domains/Duyurular.php"],
+          "domain catalog lists the domains and their route files")
+    _dec = issue_domain.detect("Add GET /duyurular/aktif", "", _cat)
+    check(_dec.domain == "Duyurular" and not _dec.ask, "a route under a domain prefix decides it")
+    check(issue_domain.detect("Add POST /api/members/{id}/notes", "", _cat).domain == "Members",
+          "a leading api/ segment is ignored")
+    _dec = issue_domain.detect("Add a GET /test endpoint", "", _cat)
+    check(_dec.domain is None and _dec.ask and "/test" in _dec.basis,
+          "a route outside every domain asks")
+    _dec = issue_domain.detect("Domain: Members", "", _cat)
+    check(_dec.domain == "Members" and _dec.basis == "stated in the issue", "a stated domain decides it")
+    check(issue_domain.detect("Add GET /duyurular/x and GET /members/y", "", _cat).ask,
+          "routes spanning two domains ask")
+    _dec = issue_domain.detect("Show the active announcements", "", _cat)
+    check(_dec.domain is None and not _dec.ask, "no route or domain leaves it to the classifier")
+    _opts = ["Duyurular", "Members"]
+    check(issue_domain.parse_answer("2", _opts) == "Members"
+          and issue_domain.parse_answer("`Duyurular` lütfen", _opts) == "Duyurular"
+          and issue_domain.parse_answer("Members veya Duyurular", _opts) is None
+          and issue_domain.parse_answer("> 1. `Duyurular`\n\nMembers", _opts) == "Members",
+          "answers parse by number or single name, ignoring the quoted question")
+finally:
+    shutil.rmtree(_domain_probe, ignore_errors=True)
+
+
+def _domain_run(n, subject, answer=None, classify_reply=None, answer_raises=False):
+    reset_calls(n)
+    patch_tools(docker_outcomes=[True], code_responses=[PHP_CODE])
+    nodes.tool_gitlab_clone = domain_clone
+    calls["asks"] = []
+
+    def fake_answer(issue_id, options):
+        if answer_raises:
+            raise AssertionError("domain answer looked up for a frontend issue")
+        return {"success": True, "result": answer}
+
+    def fake_ask(issue_id, options):
+        calls["asks"].append(options)
+        return {"success": True, "result": {"issue_id": issue_id, "options": options}}
+    nodes.tool_issue_domain_answer = fake_answer
+    nodes.tool_issue_ask_domain = fake_ask
+    if classify_reply is not None:
+        def fake_plan(sp, up, messages=None):
+            if sp.startswith("You decide which backend domain"):
+                return classify_reply
+            calls["plan_messages"].append(messages)
+            calls["plan_prompts"].append(up)
+            calls["plan_systems"].append(sp)
+            return "1. Objective: implement Hello\n2. Files: src/Hello.php"
+        nodes._llm.generate_plan = fake_plan
+    return compiled.invoke(initial(n, subject, "Implement the thing."), config={"recursion_limit": 60})
+
+
+f = _domain_run(3401, "Add a GET /test endpoint")
+check(calls["asks"] == [["Duyurular", "Members"]]
+      and f["failure_reason"].startswith("Paused for a domain question")
+      and not calls["bootstrap"] and not calls["plan_prompts"]
+      and not any(os.path.exists(w) for w in calls["workspaces"]),
+      "an unowned route asks once, pauses and cleans up before bootstrap or planning")
+f = _domain_run(3402, "Add GET /duyurular/aktif")
+check(not calls["asks"] and f["domain"]["name"] == "Duyurular", "a domain route decides without asking")
+check(all("This issue belongs to the Duyurular domain" in s and "routes/domains/Duyurular.php" in s
+          for s in (calls["plan_systems"][0], calls["code_systems"][0])),
+      "plan and code prompts carry the architecture block for the chosen domain")
+check("Current app/Domains/Duyurular/Http/Controllers/DuyurularController.php (complete)"
+      in calls["plan_prompts"][0] and "MembersController.php (complete)" not in calls["plan_prompts"][0],
+      "the plan prompt quotes the chosen domain's files only")
+_one = '```json\n{"domains": ["Duyurular"], "reason": "announcements"}\n```'
+f = _domain_run(3403, "Show only active announcements", classify_reply=_one)
+check(not calls["asks"] and f["domain"]["name"] == "Duyurular", "a single classified domain is accepted")
+f = _domain_run(3404, "Show only active announcements",
+                classify_reply='{"domains": ["Duyurular", "Members"], "reason": "both"}')
+check(calls["asks"] and "2 plausible domains" in f["failure_reason"],
+      "two plausible classified domains ask")
+f = _domain_run(3405, "Add a GET /test endpoint", answer="Members")
+check(not calls["asks"] and "belongs to the Members domain" in calls["plan_systems"][0],
+      "an earlier human answer decides the domain")
+f = _domain_run(3406, "Change the login button colour to red", answer_raises=True)
+check(f["domain"]["name"] == "" and not calls["asks"], "a frontend issue skips the domain decision")
+
+http = _IssueHTTP()
+http.add_issue(40, ["nesti", "nesti::in-progress"])
+issue_domain.ask(http.client(), 40, ["Duyurular", "Members"])
+check(http.issues[40]["labels"] == ["nesti", "nesti::pause"] and len(http.notes[40]) == 1
+      and http.notes[40][0]["body"].startswith("Talebiniz hangi domain için?")
+      and issue_domain.QUESTION_MARKER in http.notes[40][0]["body"],
+      "ask posts one verified question and pauses the issue")
+check(issue_domain.reconcile(http.client())["waiting"] == [40], "an unanswered question waits")
+http.add_note(40, "> 1. `Duyurular`\n\nMembers", author=99)
+check(issue_domain.reconcile(http.client())["resumed"] == [40]
+      and http.issues[40]["labels"] == ["nesti"] and len(http.notes[40]) == 2,
+      "a matching reply resumes the issue without a new note")
+http.add_note(40, "Run failed", author=15)
+check(issue_domain.answer(http.client().list_notes(40), 15, ["Duyurular", "Members"]) == "Members",
+      "the answer survives a later Nesti note")
+http2 = _IssueHTTP()
+http2.add_issue(41, ["nesti", "nesti::pause"])
+http2.add_note(41, issue_domain.format_question(["Duyurular", "Members"]), author=15)
+http2.add_note(41, "bilmiyorum", author=99)
+http2.add_issue(42, ["nesti", "nesti::pause"])
+http2.add_note(42, "pausing this manually", author=99)
+r = issue_domain.reconcile(http2.client())
+check(r["asked"] == [41] and len(http2.notes[41]) == 3 and "Önceki yanıt" in http2.notes[41][2]["body"]
+      and "nesti::pause" in http2.issues[41]["labels"], "an unmatched reply is asked again once")
+check(r["resumed"] == r["waiting"] == r["errors"] == []
+      and http2.issues[42]["labels"] == ["nesti", "nesti::pause"] and len(http2.notes[42]) == 1,
+      "a manual pause is never lifted or commented")
+
 # ═════ Scenario 13: TaskEngine thin wrapper ═════
 print("\n── Scenario 13: TaskEngine.run_once() ──")
 import task_engine  # noqa: E402
@@ -3083,6 +3238,8 @@ task_engine.tool_issue_list_pending = lambda: {
 task_engine.tool_issue_set_status = nodes.tool_issue_set_status
 task_engine.tool_issue_reconcile_dependencies = lambda: {
     "success": True, "result": {"resumed": [], "waiting": [], "errors": []}}
+task_engine.tool_issue_reconcile_domain_questions = lambda: {
+    "success": True, "result": {"resumed": [], "asked": [], "waiting": [], "errors": []}}
 engine = task_engine.TaskEngine()
 check(engine.run_once() is True, "run_once returns True when MR opened")
 check(calls["docker"] == 1, "graph executed via wrapper")

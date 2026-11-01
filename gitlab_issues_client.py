@@ -379,11 +379,27 @@ class GitLabIssuesClient:
         """Non-system notes of issue *iid*, oldest first."""
         return [
             {"id": n.get("id"), "author": (n.get("author") or {}).get("username"),
+             "author_id": (n.get("author") or {}).get("id"),
              "created_at": n.get("created_at"), "body": n.get("body")}
             for n in self._paginate(f"{self._project_api}/issues/{iid}/notes",
                                     {"sort": "asc", "order_by": "created_at"})
             if not n.get("system")
         ]
+
+    def post_note(self, iid: int, body: str) -> int:
+        """Post one note and verify it by an independent GET; return its id. Raises RuntimeError."""
+        notes_url = f"{self._project_api}/issues/{iid}/notes"
+        response = self.session.post(notes_url, json={"body": body}, timeout=_REQUEST_TIMEOUT)
+        if not 200 <= response.status_code < 300:
+            raise RuntimeError(f"Note on issue #{iid} failed: HTTP {response.status_code}")
+        note_id = response.json().get("id")
+        if not isinstance(note_id, int) or isinstance(note_id, bool) or note_id <= 0:
+            raise RuntimeError(f"Note on issue #{iid} returned no id")
+        check = self.session.get(f"{notes_url}/{note_id}", timeout=_REQUEST_TIMEOUT)
+        check.raise_for_status()
+        if check.json().get("body") != body:
+            raise RuntimeError(f"Note {note_id} on issue #{iid} did not read back")
+        return note_id
 
     def reopen_issue(self, iid: int, note: str = "") -> bool:
         """

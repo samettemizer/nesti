@@ -84,8 +84,10 @@ from graph.tools import (
     tool_memory_search_docs, tool_memory_find_similar, tool_memory_remember_solution,
     tool_memory_remember_failure, tool_memory_recall_failures,
     tool_memory_forget_episodes, tool_issue_pause_for_fixture,
+    tool_issue_domain_answer, tool_issue_ask_domain,
     _STACK_SCAN_PRUNE,
 )
+from issue_domain import classify as classify_domain, detect as detect_domain, domain_catalog, selection
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
 from project_layout import LayoutError, clone_layout
@@ -570,9 +572,20 @@ def _is_separated(layout: dict | None) -> bool:
     return bool(layout) and layout.get("backend") not in (None, ".")
 
 
+def _domain_quotes(backend: Path, domain: dict | None) -> tuple[tuple[str, str], ...]:
+    """The chosen domain's route files and every PHP file of its folder, as backend-relative quote entries."""
+    if not domain or not domain["name"]:
+        return ()
+    base = f"app/{domain['root']}/{domain['name']}"
+    return tuple((f, "php") for f in domain["route_files"]) + tuple(
+        (f"{base}/{rel}", "php") for rel in _inventory_listing(backend / base) if rel.endswith(".php")
+    )
+
+
 def _repo_inventory(
     repo_path: str, scope: str = "fullstack", task_text: str = "",
     previous_files: list[str] | None = None, layout: dict | None = None,
+    domain: dict | None = None,
 ) -> str:
     """
     Describe what the cloned repository already contains, for the prompts.
@@ -610,6 +623,7 @@ def _repo_inventory(
             lines = _inventory_lines(
                 root, "", scope, task_text, previous_files,
                 _INVENTORY_DIRS, _INVENTORY_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
+                extra_quoted=_domain_quotes(root, domain) if scope != "frontend" else (),
             )
         else:
             backend = root / layout["backend"]
@@ -622,6 +636,7 @@ def _repo_inventory(
                 backend, layout["backend"] + "/", scope, task_text, previous_files,
                 _BACKEND_INVENTORY_DIRS + custom,
                 _BACKEND_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
+                extra_quoted=_domain_quotes(backend, domain) if scope != "frontend" else (),
             )
             if scope != "backend" and layout.get("frontend"):
                 lines += _inventory_lines(
@@ -648,7 +663,7 @@ def _repo_inventory(
 def _inventory_lines(
     root: Path, prefix: str, scope: str, task_text: str, previous_files: list[str] | None,
     dirs: tuple[tuple[str, int], ...], quoted: tuple[tuple[str, str], ...],
-    route_files: tuple[str, ...],
+    route_files: tuple[str, ...], extra_quoted: tuple[tuple[str, str], ...] = (),
 ) -> list[str]:
     """Inventory lines for one application folder; every emitted path is *prefix* + relative."""
     if not root.is_dir():
@@ -773,7 +788,7 @@ def _inventory_lines(
     if scope != "frontend" and route_files:
         quoted += ((("tests/TestCase.php", "php"),) + _convention_test(root, task_text)
                    + _scramble_filter_provider(root))
-    lines += _quoted_entry_files(root, referenced_files + api_files, prefix, quoted)
+    lines += _quoted_entry_files(root, referenced_files + api_files, prefix, quoted + extra_quoted)
     return lines
 
 
@@ -925,6 +940,63 @@ def node_setup(state: IssueState) -> dict:
     }
 
 
+def node_detect_domain(state: IssueState) -> dict:
+    """
+    Decide which domain of a domain-split backend the issue changes, before planning.
+
+    A greenfield clone or a backend without domains gets ``domain: None`` and the
+    run continues unchanged.  Otherwise an earlier human answer to Nesti's
+    question wins, then issue_domain.detect, then the planner classification
+    (accepted only when exactly one domain is plausible).  When nothing decides,
+    the issue gets the domain question and is paused; ``failure_reason`` routes
+    to cleanup.  Logs exactly one ``DOMAIN:`` line per invocation.
+    """
+    logger.debug("→ node_detect_domain")
+    issue_id = state["issue_id"]
+
+    def log(value: str, basis: str) -> None:
+        logger.info("DOMAIN: %s · GitLab issue #%s · %s", value, issue_id, basis)
+
+    if (state.get("layout") or {}).get("backend") is None:
+        log("none", "greenfield repository")
+        return {"domain": None}
+    catalog = domain_catalog(Path(_layer_path(state, "backend")))
+    if catalog is None:
+        log("none", "no domain architecture")
+        return {"domain": None}
+    names = [d["name"] for d in catalog["domains"]]
+    subject = state.get("subject", "")
+    description = state["issue"].get("description", "") or ""
+    if classify_issue(subject, description).scope == "frontend":
+        log("skipped", "frontend scope")
+        return {"domain": selection(catalog, "")}
+
+    answered = tool_issue_domain_answer(issue_id, names)
+    if not answered["success"]:
+        shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
+        raise RuntimeError(f"Domain answer lookup failed: {answered['error']}")
+    domain, basis = answered["result"], "answered in GitLab"
+    if not domain:
+        decision = detect_domain(subject, description, catalog)
+        domain, basis = decision.domain, decision.basis
+        if not domain and not decision.ask:
+            picked, reason = classify_domain(subject, description, catalog, _llm)
+            if len(picked) == 1:
+                domain, basis = picked[0], f"planner: {reason}"
+            else:
+                basis = (reason if not picked and reason.startswith("classification failed")
+                         else f"planner found {len(picked)} plausible domains: {', '.join(picked) or 'none'}")
+    if not domain:
+        asked = tool_issue_ask_domain(issue_id, names)
+        if not asked["success"]:
+            shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
+            raise RuntimeError(f"Domain question failed: {asked['error']}")
+        log("asked", basis)
+        return {"domain": None, "failure_reason": f"Paused for a domain question: {basis}"}
+    log(domain, basis)
+    return {"domain": selection(catalog, domain)}
+
+
 def node_bootstrap(state: IssueState) -> dict:
     """
     Guarantee the clone is a Laravel 13 + Scramble + PrimeVue application.
@@ -1048,7 +1120,8 @@ def node_plan(state: IssueState) -> dict:
         max_practice_docs=1,
     )
     repo_context = _repo_inventory(
-        state.get("repo_path", ""), decision.scope, issue_text, layout=state.get("layout")
+        state.get("repo_path", ""), decision.scope, issue_text, layout=state.get("layout"),
+        domain=state.get("domain"),
     )
 
     # memory: how similar issues were solved before (Redis solution
@@ -1082,6 +1155,7 @@ def node_plan(state: IssueState) -> dict:
         past_solutions=past_solutions,
         scope=decision.scope,
         layout=_prompt_layout(state),
+        domain=state.get("domain"),
         scope_evidence=decision.evidence(),
         metrics=metrics,
     )
@@ -1155,7 +1229,8 @@ def node_code(state: IssueState) -> dict:
         failure = _store.format_test_failure(last_output, layer)
     inventory_text = haystack + "\n" + failure
     repo_context = _repo_inventory(
-        state.get("repo_path", ""), scope, inventory_text, previous_files, state.get("layout")
+        state.get("repo_path", ""), scope, inventory_text, previous_files, state.get("layout"),
+        domain=state.get("domain"),
     )
 
     # memory.  A narrow scope filters the doc search from the first
@@ -1202,6 +1277,7 @@ def node_code(state: IssueState) -> dict:
         recalled_failures=recalled,
         scope=scope,
         layout=_prompt_layout(state),
+        domain=state.get("domain"),
         metrics=metrics,
     )
     base_user_chars = len(user_prompt)

@@ -53,7 +53,7 @@ def _retry_or_fail(state: IssueState, retry_target: str) -> str:
 def route_after_setup(state: IssueState) -> str:
     """
     After node_setup:
-      - the issue was claimed and cloned → "bootstrap"
+      - the issue was claimed and cloned → "detect_domain"
       - the claim was refused            → "cleanup"
 
     Only a verified claim may clone, bootstrap or reach an LLM: an issue that
@@ -63,7 +63,12 @@ def route_after_setup(state: IssueState) -> str:
     if state.get("failure_reason"):
         logger.debug("route_after_setup → cleanup (%s)", state["failure_reason"])
         return "cleanup"
-    return "bootstrap"
+    return "detect_domain"
+
+
+def route_after_domain(state: IssueState) -> str:
+    """After node_detect_domain: "bootstrap", or "cleanup" when the issue was paused for a domain question."""
+    return "cleanup" if state.get("failure_reason") else "bootstrap"
 
 
 def route_after_plan(state: IssueState) -> str:

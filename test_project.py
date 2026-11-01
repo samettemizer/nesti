@@ -115,6 +115,14 @@ class SummaryTests(_StateCase):
         self.assertIn("3 domains", first)
         self.assertIn("Repository", second)
 
+    def test_service_subfolders_are_not_domains(self):
+        self.make_monorepo(self.root)
+        _touch(self.root / "backend/app/Services/Payment/StripeGateway.php", "<?php")
+        _touch(self.root / "backend/app/Services/Billing/Invoice.php", "<?php")
+        arch = project_layout.scan_architecture(self.root, {"backend": "backend", "frontend": "frontend"})
+        self.assertEqual(arch["backend"]["style"], "custom")
+        self.assertIsNone(arch["backend"]["domain_root"])
+
     def test_default_architecture(self):
         _touch(self.root / "artisan")
         _touch(self.root / "composer.json", "{}")

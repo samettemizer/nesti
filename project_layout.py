@@ -330,6 +330,9 @@ def clone_layout(clone: Path) -> dict:
 # Architecture scan
 # ---------------------------------------------------------------------------
 
+_DOMAIN_LAYERS = {"Http", "Models", "Controllers"}
+
+
 def _names(items: list[str]) -> str:
     return ", ".join(items[:8]) + (", …" if len(items) > 8 else "")
 
@@ -343,15 +346,16 @@ def _scan_backend(back: Path) -> dict:
     custom_dirs = [d for d in app_dirs if d not in _LARAVEL_SKELETON | _LARAVEL_GENERATED]
 
     domain_root, domains = None, []
-    candidates = sorted(custom_dirs, key=lambda d: -len(_subdirs(back / "app" / d)))
-    if candidates:
-        best = back / "app" / candidates[0]
-        subs = _subdirs(best)
+    for candidate in sorted(custom_dirs, key=lambda d: -len(_subdirs(back / "app" / d))):
+        subs = _subdirs(back / "app" / candidate)
         with_php = [s for s in subs if any(f.suffix == ".php" for f in _walk_files(s))]
-        if len(with_php) >= 2:
-            domain_root = candidates[0]
+        # A domain is a vertical slice; app/Services/{Payment,Billing} on a default app is not.
+        sliced = [s for s in with_php if _DOMAIN_LAYERS & {p.name for p in _subdirs(s)}]
+        if len(with_php) >= 2 and len(sliced) * 2 >= len(with_php):
+            domain_root = candidate
             domains = [{"name": s.name, "files": len(_walk_files(s)),
                         "layers": [p.name for p in _subdirs(s)]} for s in subs]
+            break
     counts: dict[str, int] = {}
     for d in domains:
         for layer in d["layers"]:

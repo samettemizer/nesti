@@ -3,7 +3,7 @@ task_engine.py – thin wrapper around the LangGraph pipeline.
 
 All flow control now lives in graph/builder.py:
 
-    setup → bootstrap → load_skills → plan → code → detect_stack ⇄ phpunit /
+    setup → detect_domain → bootstrap → load_skills → plan → code → detect_stack ⇄ phpunit /
                                               ↑                    openapi /
                                               │                    vitest /
                                               │                    playwright
@@ -43,6 +43,7 @@ from graph.tools import (
     tool_issue_list_pending,
     tool_issue_reconcile_dependencies,
     tool_issue_set_status,
+    tool_issue_reconcile_domain_questions,
 )
 import stats
 from telegram_notifier import notify as telegram_notify
@@ -75,6 +76,13 @@ class TaskEngine:
                 "Fixture dependencies: resumed %s, waiting %s, errors %s",
                 summary["resumed"], summary["waiting"], summary["errors"],
             )
+        questions = tool_issue_reconcile_domain_questions()
+        if not questions["success"]:
+            logger.error("Domain question reconciliation failed: %s", questions["error"])
+        elif any(questions["result"].values()):
+            r = questions["result"]
+            logger.info("Domain questions: resumed %s, asked again %s, waiting %s, errors %s",
+                        r["resumed"], r["asked"], r["waiting"], r["errors"])
 
         # ── 2. Fetch next pending issue ───────────────────────────────────
         listing = tool_issue_list_pending()
@@ -106,6 +114,7 @@ class TaskEngine:
             "repo_path":      "",
             "branch_name":    "",
             "workspace":      "",
+            "domain":         None,
             "messages":       [],
             "attempt":        0,
             "max_attempts":   max_attempts,
@@ -144,12 +153,12 @@ class TaskEngine:
         try:
             # A fullstack retry cycle traverses up to 8 nodes (on_layer_failure →
             # code → detect_stack → phpunit_test → openapi_test → vitest_test →
-            # playwright_test → pause_dependency), and setup → bootstrap →
-            # load_skills → plan adds a fixed prologue; size the recursion limit
+            # playwright_test → pause_dependency), and setup → detect_domain →
+            # bootstrap → load_skills → plan adds a fixed prologue; size the recursion limit
             # so large MAX_CODE_RETRIES values never trip LangGraph's default of 25.
             final_state = graph.invoke(
                 initial_state,
-                config={"recursion_limit": max(25, 16 + 9 * max_attempts)},
+                config={"recursion_limit": max(25, 17 + 9 * max_attempts)},
             )
             if final_state.get("mr_url"):
                 logger.info("Issue #%s done – MR: %s", issue_id, final_state["mr_url"])

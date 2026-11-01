@@ -427,8 +427,8 @@ _TEST_PHPUNIT = """\
 - PHPUnit (`php artisan test`) runs whenever the change creates, modifies or deletes PHP, so
   every PHP change ships a Feature or Unit test. Migrations are executed before the suite:
   a broken migration fails the layer.
-- The OpenAPI layer runs when the change touches routes/api.php, app/Http/Controllers,
-  app/Http/Resources, or app/Http/Requests."""
+- The OpenAPI layer runs when the change touches routes/api.php, a route file under routes/<dir>/,
+  or an Http/Controllers, Http/Resources or Http/Requests folder (also inside a domain)."""
 
 _TEST_FRONTEND_LAYERS = """\
 - Vitest and then Playwright run when the change touches the frontend (.vue, JavaScript, CSS,
@@ -607,7 +607,36 @@ def _layout_block(layout: dict, spa_versions: dict) -> str:
     return text
 
 
-def _planning_system_prompt(scope: str, documentation: str, layout: dict | None = None) -> str:
+def _architecture_block(domain: dict) -> str:
+    """The BACKEND ARCHITECTURE block for a domain-split backend (paths backend-relative)."""
+    root, name = domain["root"], domain.get("name")
+    text = (
+        f"BACKEND ARCHITECTURE (strict): The backend splits its code into domains under app/{root}/ "
+        f"({', '.join(domain['names'])}); each domain keeps its own layers ({', '.join(domain['layers'])}) "
+        f"under the namespace App\\{root}\\<Domain>\\. New feature classes (controllers, requests, "
+        "resources, models, repositories, services) go into the owning domain, not into Laravel's "
+        "default app/Http/Controllers, app/Http/Requests, app/Http/Resources or app/Models folders "
+        "named under LARAVEL BACKEND; existing shared classes stay where they are."
+    )
+    if not name:
+        return text + (" Put the change into the domain that owns the feature and mirror that "
+                       "domain's existing files.")
+    text += (
+        f" This issue belongs to the {name} domain: put every new or changed backend class under "
+        f"app/{root}/{name}/<Layer>/ (namespace App\\{root}\\{name}\\<Layer>)"
+    )
+    if domain["route_files"]:
+        text += f" and register its routes in {', '.join(domain['route_files'])}"
+    return text + (
+        f". Mirror the structure, naming, base classes and wiring of the {name} files quoted under "
+        "Existing Repository State; migrations, factories, seeders and tests stay where the project "
+        "keeps them."
+    )
+
+
+def _planning_system_prompt(
+    scope: str, documentation: str, layout: dict | None = None, domain: dict | None = None,
+) -> str:
     """The planning system prompt for *scope* (already normalised)."""
     separated = _is_separated(layout)
     standards = [_PLAN_COMMON_STANDARDS]
@@ -629,6 +658,8 @@ def _planning_system_prompt(scope: str, documentation: str, layout: dict | None 
     ]
     if separated:
         sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
+    if domain and scope != "frontend":
+        sections.append(_architecture_block(domain))
     sections.append(_PONYTAIL_FULL)
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
@@ -637,7 +668,9 @@ def _planning_system_prompt(scope: str, documentation: str, layout: dict | None 
     return "\n\n".join(sections)
 
 
-def _coding_system_prompt(scope: str, documentation: str, layout: dict | None = None) -> str:
+def _coding_system_prompt(
+    scope: str, documentation: str, layout: dict | None = None, domain: dict | None = None,
+) -> str:
     """The coding system prompt for *scope* (already normalised)."""
     separated = _is_separated(layout)
     spa = separated and bool(layout.get("frontend"))
@@ -653,6 +686,8 @@ def _coding_system_prompt(scope: str, documentation: str, layout: dict | None = 
     sections = [_CODING_ROLE[scope], _task_scope_block(scope, documentation)]
     if separated:
         sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
+    if domain and scope != "frontend":
+        sections.append(_architecture_block(domain))
     sections.append(_PONYTAIL_FULL)
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
@@ -865,6 +900,7 @@ def build_plan_prompt(
     scope_evidence: str = "",
     metrics: dict | None = None,
     layout: dict | None = None,
+    domain: dict | None = None,
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the planning phase.
@@ -958,7 +994,7 @@ Write the plan now. No code, no preamble.\
     }
     user_prompt = "".join(sections.values())
     system_prompt = _planning_system_prompt(
-        scope, documentation_request(subject, description), layout
+        scope, documentation_request(subject, description), layout, domain
     )
     if metrics is not None:
         metrics.update({f"{name}_chars": len(text) for name, text in sections.items()})
@@ -977,6 +1013,7 @@ def build_code_prompt(
     scope: str = "fullstack",
     metrics: dict | None = None,
     layout: dict | None = None,
+    domain: dict | None = None,
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the code-generation phase.
@@ -1063,7 +1100,7 @@ Implement the approved plan above:
     }
     user_prompt = "".join(sections.values())
     system_prompt = _coding_system_prompt(
-        scope, documentation_request(subject, description), layout
+        scope, documentation_request(subject, description), layout, domain
     )
     if metrics is not None:
         metrics.update({f"{name}_chars": len(text) for name, text in sections.items()})

@@ -64,6 +64,7 @@ class IssueState(TypedDict, total=False):
     code_response: str                 # latest coder output
     repo_path: str                     # local clone path
     layout: dict                       # {"backend": str|None, "frontend": str|None}; "." = clone root
+    domain: dict | None  # domain-split backend: issue_domain.selection(); "name" "" = not chosen; None = no domain architecture
     branch_name: str                   # git branch
     workspace: str                     # tempdir path
 

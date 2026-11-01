@@ -53,6 +53,7 @@ from gitlab_issues_client import GitLabIssuesClient
 from issue_dependencies import FixtureDependencies
 from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
+import issue_domain
 import project_layout
 from skill_catalog import catalog_status, select_skills
 from skill_loader import load_skills
@@ -84,12 +85,12 @@ _PHP_PROJECT_FILES = ("composer.json", "composer.lock")
 _LARAVEL_MARKER = "artisan"
 _API_ROUTES_FILE = "routes/api.php"
 
-# A written path under one of these makes the OpenAPI layer applicable.  A
-# pure .vue or migration change must not pay for a Scramble export.
-_API_TOUCH_PREFIXES = (
-    "app/Http/Controllers/",
-    "app/Http/Resources/",
-    "app/Http/Requests/",
+# A written path matching this makes the OpenAPI layer applicable.  A pure
+# .vue or migration change must not pay for a Scramble export.  A route file
+# under routes/<dir>/ counts (api.php loads such files; a web subdir only
+# costs one export), and so do the Http layers inside a domain.
+_API_TOUCH_RE = re.compile(
+    r"^(?:routes/api\.php$|routes/.+/[^/]+\.php$|app/(?:[^/]+/)*Http/(?:Controllers|Resources|Requests)/)"
 )
 
 # Written paths that change what the browser loads: the Vitest and Playwright
@@ -333,7 +334,7 @@ def tool_issue_handoff(issue_id: int, report: str) -> dict:
 
 
 def tool_issue_notes(issue_id: int) -> dict:
-    """Non-system notes of an issue, oldest first: [{"id","author","created_at","body"}]."""
+    """Non-system notes of an issue, oldest first: [{"id","author","author_id","created_at","body"}]."""
     try:
         return _ok(GitLabIssuesClient().list_notes(issue_id))
     except Exception as exc:  # pylint: disable=broad-except
@@ -380,6 +381,46 @@ def tool_issue_reconcile_dependencies() -> dict:
         return _ok(_fixture_dependencies().reconcile())
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_reconcile_dependencies() failed: %s", exc)
+        return _err(exc)
+
+
+def tool_issue_domain_answer(issue_id: int, options: list[str]) -> dict:
+    """
+    The domain a human named in reply to Nesti's latest domain question on
+    *issue_id*.  Graph-internal.  result: str | None.
+    """
+    try:
+        client = GitLabIssuesClient()
+        return _ok(issue_domain.answer(client.list_notes(issue_id), client.current_user_id(), options))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_domain_answer(%s) failed: %s", issue_id, exc)
+        return _err(exc)
+
+
+def tool_issue_ask_domain(issue_id: int, options: list[str]) -> dict:
+    """
+    Post the domain question on *issue_id* and pause it, both verified.
+    Graph-internal.  result: {"issue_id": int, "options": list[str]}.
+    """
+    try:
+        issue_domain.ask(GitLabIssuesClient(), issue_id, options)
+        return _ok({"issue_id": issue_id, "options": options})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_ask_domain(%s) failed: %s", issue_id, exc)
+        return _err(exc)
+
+
+def tool_issue_reconcile_domain_questions() -> dict:
+    """
+    Resume answered domain questions and re-ask unmatched replies.  Graph-internal.
+
+    result: {"resumed": [iid], "asked": [iid], "waiting": [iid], "errors": [{"issue_id", "error"}]}
+    success=False only when the issues or the token user could not be read.
+    """
+    try:
+        return _ok(issue_domain.reconcile(GitLabIssuesClient()))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_reconcile_domain_questions() failed: %s", exc)
         return _err(exc)
 
 
@@ -504,7 +545,7 @@ def _touches_api(written_files: "list[str] | None") -> bool:
         return True
     for raw in written_files:
         path = raw.replace("\\", "/").lstrip("./")
-        if path == _API_ROUTES_FILE or path.startswith(_API_TOUCH_PREFIXES):
+        if _API_TOUCH_RE.match(path):
             return True
     return False
 
