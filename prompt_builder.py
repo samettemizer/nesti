@@ -307,9 +307,13 @@ LARAVEL BACKEND (PHP):
   explicit $request->validate([...]) call — Scramble can only document those two forms.
 - Eloquent models in app/Models with $fillable, $casts, relationships and HasFactory.
 - API responses go through API Resources (app/Http/Resources) extending JsonResource.
-- API routes go in routes/api.php and are served under the /api prefix. Web routes in
-  routes/web.php.
-- Feature tests in tests/Feature use the RefreshDatabase trait; unit tests in tests/Unit.
+- API routes go in routes/api.php (or the route files it loads); their URL prefix is the
+  apiPrefix that bootstrap/app.php's withRouting() sets (Laravel default /api). Register each
+  URI so the served path is exactly the one the issue names. Web routes in routes/web.php.
+- Feature tests in tests/Feature, unit tests in tests/Unit. Build, authorise and authenticate
+  users and pick the database trait the way the quoted existing Feature test and
+  tests/TestCase.php do (RefreshDatabase when there is none); call Model::factory() only on a
+  model that uses HasFactory.
 - Do not create or modify: composer.json beyond adding a package you actually need,
   phpunit.xml, bootstrap/app.php, config/scramble.php.
 
@@ -322,6 +326,9 @@ API DOCUMENTATION (Scramble, dedoc/scramble is already installed):
 - Use #[Response(status, description, type: '...')] from Dedoc\\Scramble\\Attributes only when
   the response cannot be inferred. Never use #[ExcludeRouteFromDocs].
 - Never add a Gate named viewApiDocs and never change config/scramble.php.
+- When a provider restricts Scramble with Scramble::routes(...) (quoted under Existing
+  Repository State), every new /api route must be admitted by that filter: edit the filter in
+  place, keeping its existing entries.
 - Do NOT write a PHPUnit test that inspects the generated OpenAPI document. Verifying it is
   the pipeline's own job, and the document's path keys are relative to the server URL, so an
   assertion like assertArrayHasKey('/api/tasks', $doc['paths']) fails even when the route is
@@ -506,23 +513,27 @@ To physically remove a file, emit one standalone line with no code fence or body
   Minimal code changes do not mean a partial response; unchanged files within this feature
   still need their complete bodies. Before answering, check the plan and previous change set."""
 
+_EXISTING_TEST_RULE = """
+- An existing test may only be changed in the assertions the issue makes wrong; never remove
+  or loosen its other assertions."""
+
 _CODE_TEST_INSTRUCTIONS = {
     "backend": """\
 - Include a PHPUnit Feature or Unit test for every behaviour the plan changes.
 - Include a new migration, factory or seeder only when the plan requires creating it;
   a removal uses DELETE and its removal tests, never a replacement seeder.
 - Add or extend the Feature test that proves each new or changed /api route responds as
-  documented.""",
+  documented.""" + _EXISTING_TEST_RULE,
     "frontend": """\
 - Include a Vitest spec for every component you create or change, and a Playwright spec for
-  the user flow the issue names.""",
+  the user flow the issue names.""" + _EXISTING_TEST_RULE,
     "fullstack": """\
 - Include the test files for every layer the plan touches (PHPUnit for PHP,
   Vitest + Playwright for Vue.js). Skip the layers the plan does not touch.
 - Include a new migration, factory or seeder only when the plan requires creating it;
   a removal uses DELETE and its removal tests, never a replacement seeder.
 - Add or extend the Feature test that proves each new or changed /api route responds as
-  documented.""",
+  documented.""" + _EXISTING_TEST_RULE,
 }
 
 _CODE_REPOSITORY_RULE = {

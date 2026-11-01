@@ -40,6 +40,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -55,6 +56,7 @@ from semantic_cache import get_semantic_memory
 import project_layout
 from skill_catalog import catalog_status, select_skills
 from skill_loader import load_skills
+import stats
 from vector_store import get_document_memory
 
 logger = logging.getLogger(__name__)
@@ -991,12 +993,76 @@ def _expected_api_routes(routes: list) -> list[tuple[str, list[str]]]:
     return expected
 
 
-def tool_openapi_export(workspace_path: str) -> dict:
+def _is_prefixed(routes: list) -> bool:
+    """True when any registered URI lives under /api (the conventional apiPrefix)."""
+    for entry in routes:
+        uri = str(entry.get("uri") or "").strip().strip("/") if isinstance(entry, dict) else ""
+        if uri == "api" or uri.startswith("api/"):
+            return True
+    return False
+
+
+def _route_keys(routes: list) -> set[str]:
+    """``"METHOD uri"`` for every explicit verb of every route-list entry."""
+    keys: set[str] = set()
+    for entry in routes:
+        if isinstance(entry, dict):
+            uri = str(entry.get("uri") or "").strip().strip("/")
+            keys.update(f"{method} {uri}" for method in str(entry.get("method") or "").split("|")
+                        if method and method not in _IMPLICIT_METHODS)
+    return keys
+
+
+def _new_api_group_routes(routes: list, baseline: list[str]) -> list[tuple[str, list[str]]]:
+    """``(openapi_path, methods)`` for ``api``-group routes absent from the HEAD route list."""
+    known = set(baseline)
+    expected: list[tuple[str, list[str]]] = []
+    for entry in routes:
+        if not isinstance(entry, dict) or "api" not in (entry.get("middleware") or []):
+            continue
+        uri = str(entry.get("uri") or "").strip().strip("/")
+        methods = [
+            method for method in str(entry.get("method") or "").split("|")
+            if method and method not in _IMPLICIT_METHODS and f"{method} {uri}" not in known
+        ]
+        if methods:
+            expected.append(("/" + uri.replace("?}", "}"), methods))
+    return expected
+
+
+def _head_route_list(workspace_path: str) -> list[str]:
     """
-    Export the OpenAPI document and verify every /api route is documented.
+    Export the clone's HEAD route list as sorted ``"METHOD uri"`` strings.
+
+    A detached worktree of HEAD under /tmp (host-identical, like every sandbox
+    mount) gets its own route:list run; the clone itself is never touched and
+    the worktree is removed in ``finally``. Raises when the list cannot be
+    produced — the caller fails closed.
+    """
+    repo = git.Repo(workspace_path, search_parent_directories=True)
+    relative = Path(workspace_path).resolve().relative_to(Path(repo.working_tree_dir).resolve())
+    with tempfile.TemporaryDirectory(prefix="nesti-head-", dir="/tmp", ignore_cleanup_errors=True) as tmp:
+        head = Path(tmp, "head")
+        repo.git.worktree("add", "--detach", str(head), "HEAD")
+        try:
+            ok, output = DockerRunner().run_route_list(str(head / relative))
+            dump = head / relative / _ROUTE_DUMP_REL
+            if not ok or not dump.is_file():
+                raise RuntimeError(f"route:list failed at HEAD:\n{output[-2000:]}")
+            routes = _load_json_document(dump.read_text(encoding="utf-8"))
+        finally:
+            repo.git.worktree("remove", "--force", str(head))
+            repo.git.worktree("prune")
+    return sorted(_route_keys(routes if isinstance(routes, list) else []))
+
+
+def tool_openapi_export(workspace_path: str, baseline_routes: list[str] | None = None) -> dict:
+    """
+    Export the OpenAPI document and verify the API routes are documented.
 
     result: {"passed": bool, "output": str, "paths": list[str],
-             "undocumented": list[str]}
+             "undocumented": list[str], "baseline_routes": list[str]}
+             (``baseline_routes`` only for an unprefixed project)
 
     This is the gate: ``php artisan scramble:export`` writes ``openapi.json``
     and ``php artisan route:list --json`` writes the registered surface, then
@@ -1004,6 +1070,13 @@ def tool_openapi_export(workspace_path: str) -> dict:
     container — it exits non-zero on any unresolved type anywhere in the
     application, including pre-existing code, so gating on it would strand
     every issue.  Its output still reaches the model through ``output``.
+
+    A project with routes under /api must document every one of them. A
+    project whose ``apiPrefix`` is not ``api`` must document every ``api``-group
+    route the change added: routes absent from the HEAD route list
+    (*baseline_routes*, exported via ``_head_route_list`` when not supplied
+    and returned for the caller to cache). Routes already registered at HEAD
+    are not re-checked; a failed HEAD export fails the gate.
 
     A failing comparison appends the undocumented routes to ``output`` so the
     retry prompt names exactly what to fix.
@@ -1060,17 +1133,38 @@ def tool_openapi_export(workspace_path: str) -> dict:
                 "undocumented": [],
             })
 
-        expected = _expected_api_routes(routes if isinstance(routes, list) else [])
-        if not expected:
-            return _ok({
-                "passed": False,
-                "output": (
-                    f"{output}\n\nThe change touches API code but no route under "
-                    "/api is registered."
-                ),
-                "paths": full_paths,
-                "undocumented": [],
-            })
+        route_list = routes if isinstance(routes, list) else []
+        extra: dict = {}
+        if _is_prefixed(route_list):
+            expected = _expected_api_routes(route_list)
+            if not expected:
+                return _ok({
+                    "passed": False,
+                    "output": (
+                        f"{output}\n\nThe change touches API code but no route under "
+                        "/api is registered."
+                    ),
+                    "paths": full_paths,
+                    "undocumented": [],
+                })
+        else:
+            try:
+                if baseline_routes is None:
+                    baseline_routes = _head_route_list(workspace_path)
+            except Exception as exc:  # pylint: disable=broad-except
+                return _ok({
+                    "passed": False,
+                    "output": (
+                        f"{output}\n\nCould not export the HEAD route list to find the "
+                        f"routes this change added: {exc}"
+                    ),
+                    "paths": full_paths,
+                    "undocumented": [],
+                })
+            extra = {"baseline_routes": baseline_routes}
+            expected = _new_api_group_routes(route_list, baseline_routes)
+            if not expected:
+                output += "\n\nNo new API route; routes registered at HEAD are not re-checked."
 
         undocumented: list[str] = []
         for path, methods in expected:
@@ -1090,6 +1184,7 @@ def tool_openapi_export(workspace_path: str) -> dict:
             "output": output,
             "paths": full_paths,
             "undocumented": undocumented,
+            **extra,
         })
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_openapi_export(%s) failed: %s", workspace_path, exc)
@@ -1360,3 +1455,4 @@ def tool_quota_check() -> dict:
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_quota_check failed: %s", exc)
         return _err(exc)
+stats.instrument(globals())  # record tool_* runs for nesti /stats

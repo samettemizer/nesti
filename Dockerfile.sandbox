@@ -7,8 +7,10 @@
 # (E2E) sandboxes live in Dockerfile.sandbox.node and Dockerfile.sandbox.e2e.
 #
 # The orchestrator mounts the cloned repository at /app.  For a Laravel repo
-# (artisan present) it prepares the app and runs `php artisan test`; a non-
-# Laravel repo falls back to `./vendor/bin/phpunit --testdox`.
+# (artisan present) it prepares the app and runs `php artisan test` — on a
+# fresh SQLite file, or on the postgres:15 sidecar DockerRunner starts when
+# phpunit.xml declares pgsql (DB_CONNECTION=pgsql arrives as container env).
+# A non-Laravel repo falls back to `./vendor/bin/phpunit --testdox`.
 FROM php:8.4-cli
 
 # System libraries required by common PHP extensions
@@ -18,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libzip-dev \
     libpq-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev libicu-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install zip pdo pdo_mysql pdo_pgsql bcmath gd intl \
+    && docker-php-ext-install zip pdo pdo_mysql pdo_pgsql bcmath gd intl pcntl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Composer
@@ -41,4 +43,4 @@ WORKDIR /app
 # standalone.  The EXIT trap restores host ownership of everything the
 # container creates even when the suite goes red — without it a failing
 # attempt would leave the workspace root-owned and the retry could not write.
-CMD ["bash", "-lc", "set -e; NESTI_OWNER=\"$(stat -c %u:%g /app)\"; trap 'chown -R \"$NESTI_OWNER\" /app || true' EXIT; composer install --no-interaction --prefer-dist --no-progress; if [ -f artisan ]; then export DB_CONNECTION=sqlite DB_DATABASE=\"$PWD/database/database.sqlite\"; [ -f .env ] || cp .env.example .env; php artisan key:generate --force; php artisan config:clear; rm -f database/database.sqlite; touch database/database.sqlite; php artisan migrate --force; php artisan test; else composer dump-autoload; ./vendor/bin/phpunit --testdox; fi"]
+CMD ["bash", "-lc", "set -e; NESTI_OWNER=\"$(stat -c %u:%g /app)\"; trap 'chown -R \"$NESTI_OWNER\" /app || true' EXIT; composer install --no-interaction --prefer-dist --no-progress; if [ -f artisan ]; then [ \"$DB_CONNECTION\" = pgsql ] || export DB_CONNECTION=sqlite DB_DATABASE=\"$PWD/database/database.sqlite\"; [ -f .env ] || cp .env.example .env; php artisan key:generate --force; php artisan config:clear; if [ \"$DB_CONNECTION\" = sqlite ]; then rm -f database/database.sqlite; touch database/database.sqlite; fi; php artisan migrate --force; php artisan test; else composer dump-autoload; ./vendor/bin/phpunit --testdox; fi"]

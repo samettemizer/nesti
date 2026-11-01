@@ -161,5 +161,5 @@ def cli_arch(args: list[str]) -> int:
           f"(resolved by {record['resolved_by']})")
     print(f"Architecture view: {page}")
     if not os.path.exists("/.dockerenv"):
-        webbrowser.open(page.as_uri())
+        webbrowser.open_new(page.as_uri())
     return 0

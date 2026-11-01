@@ -243,6 +243,7 @@ Restart only after independently verifying the intended note and labels.
 | Sandboxes and fixtures | `docker_runner.py`, `frontend_runner.py`, `e2e_fixtures.py` |
 | Context and memory | `skill_catalog.py`, `skill_loader.py`, `conversation_store.py`, `vector_store.py`, `semantic_cache.py` |
 | Interactive tools | `mcp_server/` (FastMCP), `scripts/oauth.py` (`nesti` CLI) |
+| Usage statistics | `stats/` (`nesti /stats` → `state/stats.html`) |
 
 [`docker-compose.yml`](docker-compose.yml) runs the orchestrator, MCP server,
 Redis and Qdrant; sandbox containers are created per test run and removed
@@ -276,7 +277,7 @@ docker exec nesti-orchestrator python scripts/preflight.py
 
 ## MCP Server
 
-`nesti-mcp` exposes the shared issue, GitLab, sandbox, skill, memory and quota
+`nesti-mcp` exposes the shared issue, GitLab, sandbox, skill, memory, quota and usage statistics
 tools over stdio. It runs alongside the orchestrator and makes no LLM calls.
 
 Connect Claude Code:
@@ -310,6 +311,7 @@ Available commands (prefix each with `nesti` inside the container):
 | `/provider models <name> [search]` | List text models and prices per million tokens |
 | `/provider model <name> [model-id\|--reset]` | View, persist or reset model selection (OpenRouter) |
 | `/usage` | Show authenticated consumer usage and quota |
+| `/stats` | Usage statistics page: requests, tokens, API-equivalent cost and errors per project, model and provider |
 
 OpenRouter needs an explicit model via `OPENROUTER_MODEL` or
 `nesti /provider model openrouter <model-id>`.

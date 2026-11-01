@@ -22,14 +22,15 @@ graph/state.py               IssueState, the data contract between nodes
 graph/tools.py               tool_* functions returning {"success": bool, ...}
 graph/nodes.py               nodes; each returns a partial IssueState
 graph/edges.py, builder.py   one router per test layer; compiled `graph`
-mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,skills,memory,oauth,project}.py
+mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,skills,memory,oauth,project,stats}.py
 llm_client.py                provider cascade — the only module that calls LLMs
 prompt_builder.py            plan + code prompts composed per task scope, FILE-block output format
 issue_scope.py               backend/frontend/fullstack task scope + documentation-request check
 e2e_fixtures.py              manifest/report and trusted dependency metadata contracts
 issue_dependencies.py        durable pause/child/merge/release workflow; no LLM
 conversation_store.py        Redis per-issue history (ai-dev:issue:{id}:messages)
-docker_runner.py             PHP sandbox, OpenAPI export, bootstrap, FILE-block writer
+docker_runner.py             PHP sandbox (+ postgres:15 sidecar when phpunit.xml declares pgsql),
+                             OpenAPI export, bootstrap, FILE-block writer
 frontend_runner.py           Vitest + Playwright sandboxes
 gitlab_issues_client.py      issue intake + label lock; gitlab_client.py: repo + MR
 skill_catalog.py             offline corpus selection; skill_loader.py: issue URLs
@@ -41,6 +42,8 @@ telegram_notifier.py         fire-and-forget alerts
 project_layout.py            NESTI_PROJECT_PATH backend/SPA layout → state/layout.json; clone_layout for the pipeline
 project_boost.py             `nesti /boost`: Laravel Boost infer-conventions → <project>/.omp rules + skills
 architecture_view.py         `nesti /arch`: offline Plotly page state/architecture.html
+stats/                       usage events (LLM attempts + tool runs) → Redis nesti:stats:events; view.py: `nesti /stats` → state/stats.html;
+                             report.py: JSON summary behind the `stats_summary` MCP tool
 scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetch_skills.py, index_skills.py,
                              preflight.py, seed_live_issues.py, e2e_fixtures.php,
                              prepare_reranker.py (build-time model artifact),
@@ -82,6 +85,8 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
    the container in a `finally` block. Keep the `finally` removal and keep the
    timeout enforceable — do not "simplify" either runner to a blocking
    `containers.run(remove=True)`, which cannot take a run-duration timeout.
+   A pgsql PHPUnit run's `nesti-pg-*` sidecar (with its volume) and
+   `nesti-run-*` network are removed in the same way, on every path.
 9. **Every function in `graph/tools.py` must return `{"success": bool, ...}`.**
 10. **Never store secrets in code** — all credentials come from `.env`.
 11. **`node_cleanup` must always run** — it is the final node in every path.
@@ -114,9 +119,10 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 21. **`@playwright/test` is pinned exactly, never with a caret**, and its
     version and the E2E image's base tag change together.
 22. **Sandbox base images are pinned and coupled.** `Dockerfile.sandbox` is
-    `php:8.4-cli` with `pdo_pgsql bcmath gd intl` (managed projects such as
-    aptman require `^8.4`; composer's platform check fails on 8.3), and its CMD
-    stays byte-identical to `docker_runner._TEST_COMMAND`. `Dockerfile.sandbox.node` is
+    `php:8.4-cli` with `pdo_pgsql bcmath gd intl pcntl` (managed projects may
+    require `^8.4`; composer's platform check fails on 8.3), and its CMD
+    stays byte-identical to `docker_runner._TEST_COMMAND`. The PHPUnit
+    PostgreSQL sidecar is pinned to `postgres:15` (`docker_runner._POSTGRES_IMAGE`). `Dockerfile.sandbox.node` is
     `node:22-alpine` (`vitest@5` requires Node `^22.12`; `node:20-alpine` is
     too old), and `Dockerfile.sandbox.e2e` is
     `mcr.microsoft.com/playwright:v1.50.0-noble` **plus** an explicit Node 22
@@ -124,10 +130,16 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     Noble rather than jammy because Ubuntu 24.04 carries `php8.3-cli`; that PHP
     serves only integrated layouts (separated SPAs run E2E without PHP), so an
     integrated `^8.4` app may fail its Playwright PHP prep (untested).
-23. **`routes/api.php` must stay fully documented.** `tool_openapi_export`
+23. **The API surface must stay fully documented.** `tool_openapi_export`
     compares `php artisan scramble:export` output against
-    `php artisan route:list --json` and fails the attempt when any `/api` route
-    is missing. `scramble:analyze` is advisory only (`|| echo`) — it exits
+    `php artisan route:list --json`. A project with routes under `/api` fails
+    the attempt when any `/api` route is missing. A project whose `apiPrefix`
+    is not `api` fails when an `api`-group route the change *added* is missing:
+    the clone's HEAD route list (a detached worktree, `run_route_list`) is the
+    baseline, exported at most once per run and cached in
+    `openapi_baseline_routes`; routes already registered at HEAD are not
+    re-checked, and a failed HEAD export fails the attempt (never a silent
+    pass). `scramble:analyze` is advisory only (`|| echo`) — it exits
     non-zero on any unresolved type anywhere in the application, so gating on
     it would strand every issue. Never loosen the comparison to make a run
     pass; tighten the coding prompt instead.
@@ -187,6 +199,11 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     In-DOM Blade custom tags are kebab-case and never self-closing.
 34. **A rejected claim stops before clone/bootstrap/LLM.** Cleanup is the
     terminal path; never log an unapplied lock and continue.
+35. **Usage recording never changes behaviour.** The `stats` hooks never
+    raise into callers and never alter a tool's return value or an attempt's
+    exception. They record only counters, model/provider names, durations and
+    error text, never prompts or responses. New code for statistics goes into
+    `stats/`; existing modules keep one-line hooks only.
 
 ---
 
@@ -217,6 +234,11 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `llm_client.py` | `scripts/oauth.py` | `PROVIDERS[key].fresh_credentials(token_data)` → usable `token_data`; caller persists it when it differs |
 | `llm_client.py` | callers | `BaseLLMClient.available` → `bool`, cheap and side-effect free; consulted before every attempt |
 | `graph/tools.py` | `vector_store.py` / `semantic_cache.py` | memory tools degrade gracefully (`success=True`, empty list or `stored=False`) when memory unavailable; `success=False` only on genuine exception |
+| `llm_client.py` | `stats` | `with stats.llm_request(role, provider)` per cascade attempt; `_log_usage` → `stats.usage(raw)` |
+| `graph/tools.py` | `stats` | `stats.instrument(globals())`; result unchanged; recorded only inside a run |
+| `task_engine.py` | `stats` | `begin(issue_id, subject)` before `graph.invoke`, `end()` in `finally` |
+| `scripts/oauth.py` | `stats.view` | `cli_stats(args)` → exit code |
+| `mcp_server/tools/stats.py` | `stats.report` | `summary(since_hours, project)` → `{"success": bool, "result"\|"error"}`; never raises; `cost_usd` `None` when nothing is priced |
 
 ---
 

@@ -44,6 +44,7 @@ from graph.tools import (
     tool_issue_reconcile_dependencies,
     tool_issue_set_status,
 )
+import stats
 from telegram_notifier import notify as telegram_notify
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,7 @@ class TaskEngine:
             "openapi_passed":    False,
             "openapi_output":    "",
             "openapi_paths":     [],
+            "openapi_baseline_routes": None,
             "vitest_passed":     False,
             "vitest_output":     "",
             "playwright_passed": False,
@@ -138,6 +140,7 @@ class TaskEngine:
         }
 
         # ── 4. Run the graph ──────────────────────────────────────────────
+        stats.begin(issue_id, subject)
         try:
             # A fullstack retry cycle traverses up to 8 nodes (on_layer_failure →
             # code → detect_stack → phpunit_test → openapi_test → vitest_test →
@@ -165,3 +168,5 @@ class TaskEngine:
             )
             tool_issue_set_status(issue_id, "new", note=f"AI Developer crashed: {exc}")
             return False
+        finally:
+            stats.end()

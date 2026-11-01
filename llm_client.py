@@ -38,6 +38,7 @@ import requests
 from scripts.oauth import (
     OPENROUTER_API_BASE, PROVIDERS, TokenStore, configured_model,
 )
+import stats
 from telegram_notifier import notify as telegram_notify
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ def _log_usage(provider: str, usage: dict | None) -> None:
             if type(value) is int and value >= 0:
                 counters[key] = value
     logger.info("LLM usage provider=%s observed_tokens=%s", provider, counters or "unavailable")
+    stats.usage(usage)
 
 
 def _post_json(provider: str, url: str, **kwargs) -> requests.Response:
@@ -1184,7 +1186,8 @@ class LLMClient:
                 logger.debug("Planner %s skipped – unavailable.", provider.name)
                 continue
             try:
-                result = provider.generate_plan(system_prompt, user_prompt, messages)
+                with stats.llm_request("plan", provider):
+                    result = provider.generate_plan(system_prompt, user_prompt, messages)
                 self._last_planner = provider
                 if idx > 0:
                     logger.info(
@@ -1231,7 +1234,8 @@ class LLMClient:
         for idx in self._coder_order():
             provider = self._coders[idx]
             try:
-                result = provider.generate_code(system_prompt, user_prompt, messages)
+                with stats.llm_request("code", provider):
+                    result = provider.generate_code(system_prompt, user_prompt, messages)
                 self._last_coder = provider
                 if idx > self._min_coder_tier:
                     logger.info(

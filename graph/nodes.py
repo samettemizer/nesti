@@ -64,6 +64,7 @@ resumed by TaskEngine's reconciliation only after that child's MR is merged.
 
 import logging
 import json
+import math
 import os
 import re
 import shutil
@@ -387,13 +388,17 @@ _INVENTORY_DIRS = (
 )
 
 # Route files are quoted rather than listed: the coder must see which URIs are
-# already registered, not merely that the file exists.
+# already registered, not merely that the file exists. Route files kept in
+# routes/ subdirectories (loaded by api.php/web.php) are quoted too, within
+# their own total; the rest are named.
 _INVENTORY_ROUTE_FILES = ("routes/api.php", "routes/web.php")
 _MAX_ROUTE_FILE_CHARS = 1500
+_MAX_ROUTE_SUBDIR_CHARS = 8000
 
 # Every scope quotes the default seeder so backend removals can preserve
-# unrelated registrations. Frontend/fullstack also quote the served entry
-# chain, fixture manifest and configs. Only COMPLETE bodies are quoted; an
+# unrelated registrations, and bootstrap/app.php, whose withRouting() decides
+# the URL prefix of routes/api.php. Frontend/fullstack also quote the served
+# entry chain, fixture manifest and configs. Only COMPLETE bodies are quoted; an
 # oversized or unreadable body is named as omitted, never safe to rewrite.
 _INVENTORY_QUOTED_FILES = (
     ("resources/js/app.js", "js"),
@@ -401,6 +406,7 @@ _INVENTORY_QUOTED_FILES = (
     ("resources/views/app.blade.php", "blade"),
     ("resources/js/App.vue", "vue"),
     ("database/seeders/DatabaseSeeder.php", "php"),
+    ("bootstrap/app.php", "php"),
     ("e2e/nesti-fixtures.json", "json"),
     ("vite.config.js", "js"),
     ("vite.config.ts", "ts"),
@@ -410,8 +416,11 @@ _INVENTORY_QUOTED_FILES = (
     ("vitest.config.ts", "ts"),
     ("package.json", "json"),
 )
+_BACKEND_QUOTED_FILES = (("database/seeders/DatabaseSeeder.php", "php"), ("bootstrap/app.php", "php"))
 _MAX_QUOTED_FILE_CHARS = 24000
 _MAX_QUOTED_TOTAL_CHARS = 48000
+# A Feature test qualifies as the convention example when it sends a request.
+_HTTP_TEST_CALL = re.compile(r"\$this->(?:get|post|put|patch|delete|json)(?:Json)?\(")
 
 
 def _inventory_listing(directory: Path) -> list[str]:
@@ -425,15 +434,11 @@ def _inventory_listing(directory: Path) -> list[str]:
 
 
 def _quoted_entry_files(
-    root: Path, scope: str = "fullstack", referenced_files: list[tuple[str, str]] | None = None,
+    root: Path, referenced_files: list[tuple[str, str]] | None = None,
     prefix: str = "", quoted: tuple[tuple[str, str], ...] = _INVENTORY_QUOTED_FILES,
 ) -> list[str]:
     """Quote complete task targets and entry bodies within one budget, never fragments."""
-    fixed_files = [
-        (relative, language) for relative, language in quoted
-        if scope != "backend" or relative == "database/seeders/DatabaseSeeder.php"
-    ]
-    files = dict((referenced_files or []) + fixed_files)
+    files = dict((referenced_files or []) + list(quoted))
     entries: list[tuple[str | None, str]] = []
     for relative, language in files.items():
         path = root / relative
@@ -506,6 +511,47 @@ def _api_contract_files(root: Path, routes: str) -> list[tuple[str, str]]:
     return list(files.items())
 
 
+def _convention_test(root: Path, task_text: str) -> tuple[tuple[str, str], ...]:
+    """
+    The existing Feature test that best shows how this project's HTTP tests
+    build, authorise and authenticate users, as a quote entry (or nothing).
+
+    Only tests that send a request qualify. Task words are weighted by rarity
+    across the suite, so a word every test uses counts for nothing; ties go to
+    the smallest file.
+    """
+    tests: dict[Path, tuple[str, set[str]]] = {}
+    for path in sorted((root / "tests/Feature").glob("**/*Test.php")):
+        try:
+            if path.resolve().is_relative_to(root.resolve()):
+                body = path.read_text(encoding="utf-8")
+                tests[path] = (body, set(re.findall(r"[a-z]{4,}", body.lower())))
+        except (OSError, UnicodeDecodeError):
+            continue
+    words = set(re.findall(r"[a-z]{4,}", task_text.lower()))
+
+    def rank(path: Path) -> tuple[float, int]:
+        body, vocabulary = tests[path]
+        weight = sum(math.log(len(tests) / sum(word in v for _, v in tests.values()))
+                     for word in words & vocabulary)
+        return weight, -len(body)
+
+    candidates = [path for path, (body, _) in tests.items() if _HTTP_TEST_CALL.search(body)]
+    return ((max(candidates, key=rank).relative_to(root).as_posix(), "php"),) if candidates else ()
+
+
+def _scramble_filter_provider(root: Path) -> tuple[tuple[str, str], ...]:
+    """The first provider calling ``Scramble::routes(``, as a quote entry: new /api routes must pass it."""
+    for path in sorted((root / "app/Providers").glob("**/*.php")):
+        try:
+            if (path.resolve().is_relative_to(root.resolve())
+                    and "Scramble::routes(" in path.read_text(encoding="utf-8")):
+                return ((path.relative_to(root).as_posix(), "php"),)
+        except (OSError, UnicodeDecodeError):
+            continue
+    return ()
+
+
 _BACKEND_INVENTORY_DIRS = tuple(
     entry for entry in _INVENTORY_DIRS if entry[0] not in ("resources/js/components", "e2e")
 )
@@ -538,7 +584,11 @@ def _repo_inventory(
     backend including a second ``create_tasks_table`` migration, and the PHP
     layer then failed with "table already exists" on every attempt.
 
-    Every scope gets the backend listing, route files and default seeder.
+    Every scope gets the backend listing, route files (including those in
+    routes/ subdirectories), the default seeder and bootstrap/app.php, whose
+    withRouting() fixes the API prefix. Backend/fullstack also get
+    tests/TestCase.php and one existing HTTP Feature test (``_convention_test``)
+    so new tests follow the project's own user and authentication setup.
     Files named by the issue or plan get complete bodies before fixed entry
     files, so modifying an existing component does not require guessing its
     implementation. Tests importing a named SFC bring their existing mount
@@ -571,7 +621,7 @@ def _repo_inventory(
             lines = _inventory_lines(
                 backend, layout["backend"] + "/", scope, task_text, previous_files,
                 _BACKEND_INVENTORY_DIRS + custom,
-                (("database/seeders/DatabaseSeeder.php", "php"),), _INVENTORY_ROUTE_FILES,
+                _BACKEND_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
             )
             if scope != "backend" and layout.get("frontend"):
                 lines += _inventory_lines(
@@ -626,7 +676,9 @@ def _inventory_lines(
             basename = name.rsplit("/", 1)[-1]
             if re.search(r"\.(?:test|spec)\.[cm]?[jt]sx?$", name):
                 test_files.append(path)
-            pattern = rf"(?<![\w./-])(?:{re.escape(prefix + path)}|{re.escape(basename)})(?![\w./-])"
+            # The app-relative path is how sandbox output names a file ("at tests/Feature/X.php:26").
+            pattern = (rf"(?<![\w./-])(?:{re.escape(prefix + path)}|{re.escape(path)}|{re.escape(basename)})"
+                       r"(?![\w./-])")
             if task_text and re.search(pattern, task_text):
                 language = Path(name).suffix.lstrip(".")
                 referenced_files.append((path, language))
@@ -697,7 +749,31 @@ def _inventory_lines(
             body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
         lines.append(f"\nCurrent {prefix}{relative}:\n```php\n{body}\n```")
 
-    lines += _quoted_entry_files(root, scope, referenced_files + api_files, prefix, quoted)
+    remaining = _MAX_ROUTE_SUBDIR_CHARS
+    for path in sorted((root / "routes").glob("*/**/*.php")) if route_files else []:
+        if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+            continue
+        relative = prefix + path.relative_to(root).as_posix()
+        try:
+            body = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError as exc:
+            lines.append(f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}).")
+            continue
+        if len(body) > _MAX_ROUTE_FILE_CHARS:
+            body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
+        quote = f"\nCurrent {relative}:\n```php\n{body}\n```"
+        if len(quote) > remaining:
+            lines.append(f"\n{relative}: exists, body omitted (route quote budget spent).")
+            continue
+        lines.append(quote)
+        remaining -= len(quote)
+
+    if scope == "backend":
+        quoted = tuple(entry for entry in quoted if entry in _BACKEND_QUOTED_FILES)
+    if scope != "frontend" and route_files:
+        quoted += ((("tests/TestCase.php", "php"),) + _convention_test(root, task_text)
+                   + _scramble_filter_provider(root))
+    lines += _quoted_entry_files(root, referenced_files + api_files, prefix, quoted)
     return lines
 
 
@@ -1068,9 +1144,18 @@ def node_code(state: IssueState) -> dict:
     )
     # Rebuilt every attempt: the previous attempt's own files are part of the
     # repository now, and a retry must see them rather than re-inventing them.
+    # A retry also quotes the existing files its failure names (a red existing
+    # test), so they are corrected in place instead of rewritten from memory.
     previous_files = state.get("written_files") or []
+    # The formatted failure, not the raw output: raw sandbox output wraps paths in
+    # ANSI colour codes, which hide "at tests/Feature/X.php:26" from the match.
+    failure = ""
+    if attempt > 1:
+        layer, last_output = _last_failure_output(state)
+        failure = _store.format_test_failure(last_output, layer)
+    inventory_text = haystack + "\n" + failure
     repo_context = _repo_inventory(
-        state.get("repo_path", ""), scope, haystack, previous_files, state.get("layout")
+        state.get("repo_path", ""), scope, inventory_text, previous_files, state.get("layout")
     )
 
     # memory.  A narrow scope filters the doc search from the first
@@ -1131,8 +1216,7 @@ def node_code(state: IssueState) -> dict:
     change_set_chars = len(user_prompt) - base_user_chars
     feedback = ""
     if attempt > 1:
-        layer, last_output = _last_failure_output(state)
-        feedback = "\n\n## Latest failure\n" + _store.format_test_failure(last_output, layer)
+        feedback = "\n\n## Latest failure\n" + failure
         user_prompt += feedback
     metrics.update(
         change_set_chars=change_set_chars, latest_failure_chars=len(feedback),
@@ -1337,17 +1421,22 @@ def node_openapi_test(state: IssueState) -> dict:
 
     Reached only when route_after_phpunit saw ``run_openapi`` True, so there is
     deliberately no guard here: routing decides whether this layer applies.
+    The HEAD route list an unprefixed project needs is exported at most once
+    per issue run and cached in ``openapi_baseline_routes``.
     """
     logger.debug("→ node_openapi_test")
     logger.info("Exporting OpenAPI document (attempt %d) …", state.get("attempt", 0))
 
-    result = tool_openapi_export(_layer_path(state, "backend"))
+    cached = state.get("openapi_baseline_routes")
+    result = tool_openapi_export(_layer_path(state, "backend"), cached)
+    baseline = cached
     if result["success"]:
         detail = result["result"]
         passed = detail.get("passed", False)
         output = detail.get("output", "")
         paths = detail.get("paths", [])
         undocumented = detail.get("undocumented", [])
+        baseline = detail.get("baseline_routes", cached)
     else:
         passed, output, paths, undocumented = False, result["error"], [], []
 
@@ -1367,6 +1456,7 @@ def node_openapi_test(state: IssueState) -> dict:
         "openapi_passed": passed,
         "openapi_output": output,
         "openapi_paths": paths,
+        "openapi_baseline_routes": baseline,
     }
 
 
