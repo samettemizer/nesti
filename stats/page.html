@@ -538,13 +538,20 @@ function render() {
   post.forEach(f => f());
 }
 
+// range and project survive a refresh (the page is rendered live on every load)
+const store = (k, v) => { try { localStorage.setItem("nesti-stats:" + k, v); } catch (e) { /* storage disabled */ } };
+const restored = k => { try { return localStorage.getItem("nesti-stats:" + k); } catch (e) { return null; } };
+const PROJECTS = [...new Set(D.events.map(e => e.project).filter(Boolean))].sort();
 document.getElementById("project").innerHTML = `<option value="">All projects</option>`
-  + [...new Set(D.events.map(e => e.project).filter(Boolean))].sort().map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+  + PROJECTS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+if (Object.hasOwn(RANGES, restored("range"))) ui.range = restored("range");
+if (PROJECTS.includes(restored("project"))) ui.project = restored("project");
+document.getElementById("project").value = ui.project;
 document.addEventListener("click", ev => {
   const el = ev.target.closest("[data-act]");
   if (!el) return;
   const {act, k, v} = el.dataset;
-  if (act === "range") { ui.range = v; ui.open = {}; }
+  if (act === "range") { ui.range = v; ui.open = {}; store("range", v); }
   else if (act === "seg") ui.seg[k] = v;
   else if (act === "open") ui.open[k] = ui.open[k] === v ? null : v;
   else if (act === "filter") { if (k === "status") ui.status = v; else ui.q[k] = v; }
@@ -554,7 +561,7 @@ document.addEventListener("change", ev => {
   const k = ev.target.dataset.sel;
   if (!k) return;
   ui[k] = ev.target.value;
-  if (k === "project") ui.open = {};
+  if (k === "project") { ui.open = {}; store("project", ui.project); }
   render();
 });
 document.addEventListener("input", ev => {
