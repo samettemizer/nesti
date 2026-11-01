@@ -1,18 +1,18 @@
 #!/bin/sh
-# Host-side `nesti`: forwards to the container CLI; /arch and /stats then open their page in a new host browser window.
+# Host-side `nesti`: forwards to the container CLI; /arch (static file) and /stats (live nesti-stats page) then open in a new host browser window.
 set -e
 here=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)
 if [ -t 0 ]; then tty=-it; else tty=-i; fi
 docker exec $tty nesti-orchestrator nesti "$@"
 case "${1-} ${2-}" in
-  "/arch --json"*) page= ;;
-  "/arch "*) page="$here/state/architecture.html" ;;
-  "/stats "*) page="$here/state/stats.html" ;;
-  *) page= ;;
+  "/arch --json"*) target= ;;
+  "/arch "*) target="file://$here/state/architecture.html" ;;
+  "/stats "*) target="http://127.0.0.1:8790/" ;;
+  *) target= ;;
 esac
-if [ -n "$page" ]; then
-  if [ "$(uname -s)" = Darwin ]; then open "$page"
-  elif command -v python3 >/dev/null 2>&1; then python3 -m webbrowser -n "file://$page" >/dev/null 2>&1 &
-  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$page" >/dev/null 2>&1 &
-  else echo "Open file://$page in your browser."; fi
+if [ -n "$target" ]; then
+  if [ "$(uname -s)" = Darwin ]; then open "$target"
+  elif command -v python3 >/dev/null 2>&1; then python3 -m webbrowser -n "$target" >/dev/null 2>&1 &
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$target" >/dev/null 2>&1 &
+  else echo "Open $target in your browser."; fi
 fi

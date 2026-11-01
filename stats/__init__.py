@@ -20,7 +20,7 @@ import redis
 logger = logging.getLogger(__name__)
 
 KEY = "nesti:stats:events"
-# shortcut: keeps the newest 100k events (~40 MB in Redis and in stats.html); move to a time-series store if longer history is needed
+# shortcut: keeps the newest 100k events (~40 MB in Redis and in each stats page response); move to a time-series store if longer history is needed
 MAX_EVENTS = 100_000
 _DEFAULT_REDIS_URL = "redis://nesti-redis:6379/0"
 

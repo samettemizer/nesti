@@ -1,14 +1,19 @@
-"""Offline tests for the stats recorder, the /stats price lookup and the MCP usage summary."""
+"""Offline tests for the stats recorder, the live stats page and the MCP usage summary."""
 
+import json
+import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest import mock
 
 import requests
 
 import stats
-from stats import report, view
+from stats import report, server, view
 
 
 class StatsTestCase(unittest.TestCase):
@@ -110,6 +115,10 @@ class PricesTest(unittest.TestCase):
         {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
     ]
 
+    def setUp(self) -> None:
+        view._catalog_cache = None
+        self.addCleanup(setattr, view, "_catalog_cache", None)
+
     def test_catalog_matching(self) -> None:
         with mock.patch("scripts.oauth.list_provider_models", return_value=self.CATALOG):
             table = view.prices({"claude-sonnet-4-6", "deepseek/deepseek-chat", "openrouter/auto", "qwen3:30b"})
@@ -123,6 +132,100 @@ class PricesTest(unittest.TestCase):
     def test_unreachable_catalog(self) -> None:
         with mock.patch("scripts.oauth.list_provider_models", side_effect=requests.ConnectionError("x")):
             self.assertEqual(view.prices({"claude-sonnet-4-6"}), {})
+
+    def test_catalog_cached_within_ttl(self) -> None:
+        with mock.patch("scripts.oauth.list_provider_models", return_value=self.CATALOG) as catalog, \
+                mock.patch("stats.view.time.time", return_value=1000.0) as clock:
+            view.prices({"claude-sonnet-4-6"})
+            clock.return_value = 1000.0 + view.PRICE_TTL - 1
+            view.prices({"deepseek/deepseek-chat"})
+            self.assertEqual(catalog.call_count, 1)
+            clock.return_value = 1000.0 + view.PRICE_TTL + 1
+            view.prices({"claude-sonnet-4-6"})
+            self.assertEqual(catalog.call_count, 2)
+
+    def test_unreachable_catalog_not_cached(self) -> None:
+        with mock.patch("scripts.oauth.list_provider_models", side_effect=[requests.ConnectionError("x"), self.CATALOG]):
+            self.assertEqual(view.prices({"claude-sonnet-4-6"}), {})
+            self.assertIn("claude-sonnet-4-6", view.prices({"claude-sonnet-4-6"}))
+
+
+def _page_data(page: str) -> dict:
+    """The JSON embedded as ``const D = …;`` in a rendered page."""
+    start = page.index("const D = ") + len("const D = ")
+    return json.loads(page[start:page.index(";\n", start)])
+
+
+class LivePageTest(unittest.TestCase):
+    """The page is rendered from the events recorded at request time."""
+
+    def setUp(self) -> None:
+        patcher = mock.patch("stats.view.prices", return_value={})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.StatsHandler)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def get(self, path: str) -> tuple[int, str]:
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=10) as response:
+                return response.status, response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            return exc.code, ""
+
+    def test_each_request_reflects_current_events(self) -> None:
+        first = [{"t": 1.0, "kind": "llm", "model": "m", "tok": [1, 0, 0, 1], "ok": True}]
+        with mock.patch("stats.load", side_effect=[first, first * 3]):
+            status_a, page_a = self.get("/")
+            status_b, page_b = self.get("/")
+        self.assertEqual((status_a, status_b), (200, 200))
+        a, b = _page_data(page_a), _page_data(page_b)
+        self.assertEqual((len(a["events"]), len(b["events"])), (1, 3))
+        self.assertLess(a["generated"], b["generated"])
+
+    def test_other_paths_are_404(self) -> None:
+        with mock.patch("stats.load", return_value=[]) as load:
+            self.assertEqual(self.get("/stats.html")[0], 404)
+        load.assert_not_called()
+
+    def test_render_failure_is_500(self) -> None:
+        with mock.patch("stats.load", side_effect=RuntimeError("boom")):
+            self.assertEqual(self.get("/")[0], 500)
+
+    def test_render_retries_redis_after_an_outage(self) -> None:
+        self.addCleanup(setattr, stats, "_redis", stats._redis)
+        stats._redis = False  # an earlier ping failed: the recorder degraded for the process
+        client = mock.Mock()
+        client.lrange.return_value = [json.dumps({"t": 1.0, "kind": "tool", "tool": "x"})]
+        with mock.patch("stats.redis.from_url", return_value=client):
+            page = view.render()
+        client.ping.assert_called_once()
+        self.assertEqual(len(_page_data(page)["events"]), 1)
+
+    def test_script_breakout_is_escaped(self) -> None:
+        hostile = [{"t": 1.0, "kind": "tool", "tool": "x", "title": "</script><img src=x onerror=alert(1)>"}]
+        with mock.patch("stats.load", return_value=hostile):
+            page = view.render()
+        self.assertNotIn("</script><img", page)
+        self.assertIn("\\u003c/script>\\u003cimg", page)
+        self.assertEqual(_page_data(page)["events"][0]["title"], hostile[0]["title"])
+
+
+class CliStatsTest(unittest.TestCase):
+    def test_prints_live_url(self) -> None:
+        with mock.patch("stats.load", return_value=[]), mock.patch("stats.view._server_up", return_value=True), \
+                mock.patch("stats.view.os.path.exists", return_value=True), \
+                mock.patch("builtins.print") as out:
+            self.assertEqual(view.cli_stats([]), 0)
+        self.assertIn(mock.call(f"Stats page: {view.URL}"), out.call_args_list)
+
+    def test_server_down_is_an_error(self) -> None:
+        with mock.patch("stats.load", return_value=[]), mock.patch("stats.view._server_up", return_value=False), \
+                mock.patch("builtins.print"):
+            self.assertEqual(view.cli_stats([]), 1)
 
 
 class SummaryTest(unittest.TestCase):

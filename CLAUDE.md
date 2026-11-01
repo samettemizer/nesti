@@ -42,8 +42,8 @@ telegram_notifier.py         fire-and-forget alerts
 project_layout.py            NESTI_PROJECT_PATH backend/SPA layout → state/layout.json; clone_layout for the pipeline
 project_boost.py             `nesti /boost`: Laravel Boost infer-conventions → <project>/.omp rules + skills
 architecture_view.py         `nesti /arch`: offline Plotly page state/architecture.html
-stats/                       usage events (LLM attempts + tool runs) → Redis nesti:stats:events; view.py: `nesti /stats` → state/stats.html;
-                             report.py: JSON summary behind the `stats_summary` MCP tool
+stats/                       usage events (LLM attempts + tool runs) → Redis nesti:stats:events; view.py: page render + `nesti /stats` (prints the URL);
+                             server.py: `nesti-stats` live page on 127.0.0.1:8790; report.py: JSON summary behind the `stats_summary` MCP tool
 scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetch_skills.py, index_skills.py,
                              preflight.py, seed_live_issues.py, e2e_fixtures.php,
                              prepare_reranker.py (build-time model artifact),
@@ -237,7 +237,7 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `llm_client.py` | `stats` | `with stats.llm_request(role, provider)` per cascade attempt; `_log_usage` → `stats.usage(raw)` |
 | `graph/tools.py` | `stats` | `stats.instrument(globals())`; result unchanged; recorded only inside a run |
 | `task_engine.py` | `stats` | `begin(issue_id, subject)` before `graph.invoke`, `end()` in `finally` |
-| `scripts/oauth.py` | `stats.view` | `cli_stats(args)` → exit code |
+| `scripts/oauth.py` | `stats.view` | `cli_stats(args)` → probes the `nesti-stats` server, prints `http://127.0.0.1:8790/`; exit code 0, 1 when the server is down |
 | `mcp_server/tools/stats.py` | `stats.report` | `summary(since_hours, project)` → `{"success": bool, "result"\|"error"}`; never raises; `cost_usd` `None` when nothing is priced |
 
 ---
