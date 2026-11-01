@@ -26,6 +26,8 @@ mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,s
 llm_client.py                provider cascade — the only module that calls LLMs
 prompt_builder.py            plan + code prompts composed per task scope, FILE-block output format
 issue_scope.py               backend/frontend/fullstack task scope + documentation-request check
+issue_domain.py              domain-split backend: owning domain from stated name/route, LLM classify via the
+                             passed client, GitLab domain question/answer + reconcile; never imports graph.*
 e2e_fixtures.py              manifest/report and trusted dependency metadata contracts
 issue_dependencies.py        durable pause/child/merge/release workflow; no LLM
 conversation_store.py        Redis per-issue history (ai-dev:issue:{id}:messages)
@@ -74,10 +76,11 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 5. **Every code change must be accompanied by a test in its own layer** —
    PHPUnit for PHP, the OpenAPI gate for `/api` routes, Vitest + Playwright for
    Vue. A frontend-only change needs no PHPUnit test; a backend-only change
-   needs no Vitest or Playwright test; a change that does not touch
-   `routes/api.php`, `app/Http/Controllers`, `app/Http/Resources` or
-   `app/Http/Requests` does not run the OpenAPI layer. No change reaches
-   `commit` without at least one layer having run green.
+   needs no Vitest or Playwright test; a change that touches none of
+   `routes/api.php`, a route file under `routes/<dir>/`, or an
+   `Http/Controllers`, `Http/Resources` or `Http/Requests` folder anywhere
+   under `app/` (domains included) does not run the OpenAPI layer. No change
+   reaches `commit` without at least one layer having run green.
 6. **Never add direct LLM API calls outside `llm_client.py`.**
 7. **Never make `telegram_notifier.py` raise exceptions** — always fire-and-forget.
 8. **Sandbox containers must never survive their run.** `docker_runner.py` and
@@ -204,6 +207,20 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     exception. They record only counters, model/provider names, durations and
     error text, never prompts or responses. New code for statistics goes into
     `stats/`; existing modules keep one-line hooks only.
+36. **A domain-split backend gets its owning domain before planning.** When
+    `project_layout._scan_backend` sets `domain_root`, `node_detect_domain`
+    (setup → bootstrap) decides: earlier GitLab answer → stated domain →
+    owning route → planner classification, accepted only when exactly one
+    domain is plausible. Otherwise it posts one `Which domain is this request for?`
+    note (`NESTI_DOMAIN_QUESTION_V1` marker), adds `nesti::pause`, and the run
+    goes to cleanup before bootstrap and coding. Reconcile lifts a pause only
+    when Nesti's latest note is that question and a human reply names exactly
+    one option; each unmatched reply gets the question again (one re-ask per
+    reply); manual and fixture pauses are never lifted. Greenfield backends,
+    backends without a domain root (`domain_catalog()` is `None`) and
+    frontend-scope issues are never asked.
+    The domain shapes prompts only (architecture block + its files quoted),
+    never a gate; `node_detect_domain` logs exactly one `DOMAIN:` line per run.
 
 ---
 
@@ -215,14 +232,17 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `graph/nodes.py` | `graph/tools.py` | Returns `{"success": bool, ...}` — always |
 | `graph/nodes.py` | `llm_client.py` | `generate_plan/code(system, user, messages=None)` → `str` |
 | `graph/nodes.py` | `issue_scope.py` | `classify_issue()` / `declared_scope()` never raise; scope ∈ `backend`\|`frontend`\|`fullstack` |
+| `graph/nodes.py` | `issue_domain.py` | `domain_catalog()` → `dict`, `None` without a domain architecture; `detect()` → `DomainDecision`; `classify(..., llm)` → `(list[str], str)`, never raises |
 | `graph/nodes.py` | `prompt_builder.py` | `build_plan_prompt(..., scope, scope_evidence)` / `build_code_prompt(..., scope)` → `(system, user)` |
 | `graph/nodes.py` | `conversation_store.py` | `append()` → updated `list[dict]` |
 | `graph/nodes.py` | `docker_runner.py` | `write_files()` → `(bool, list[str])` |
 | `graph/nodes.py` | `docker_runner.py` | `run_tests()` → `(bool, str)` |
 | `graph/tools.py` | `docker_runner.py` | `run_openapi_export()` / `run_bootstrap()` / `run_scramble_install()` → `(bool, str)` |
 | `graph/tools.py` | `frontend_runner.py` | `run_vitest()` → `(bool, str)`; `run_playwright()` → `{"passed": bool, "output": str, "fixture_request": dict\|None}` |
-| `graph/tools.py` | `gitlab_issues_client.py` | `lock/close/reopen/pause/resume_issue()` → `bool`, verified by independent GET |
+| `graph/tools.py` | `gitlab_issues_client.py` | `lock/close/reopen/pause/resume_issue()` → `bool`, verified by independent GET; `post_note()` (via `issue_domain`) → note id, read back by GET, raises on failure |
 | `graph/tools.py` | `issue_dependencies.py` | `pause_for_fixture(...)` → paused/ineligible/error; `reconcile()` → resumed/waiting/errors; no LLM |
+| `graph/tools.py` | `issue_domain.py` | `answer()` → `str\|None`; `ask()` posts the question + pauses, raises `RuntimeError` when the pause is unverified; `reconcile()` → `{resumed, asked, waiting, errors}` |
+| `task_engine.py` | `graph/tools.py` | `tool_issue_reconcile_domain_questions()` before `tool_issue_list_pending()`; failure logged, never aborts the poll |
 | `graph/tools.py` | `skill_catalog.py` | `select_skills()` never raises, returns `list[Skill]` |
 | `mcp_server/tools/*.py` | `graph/tools.py` | pass-through `{"success": bool, ...}` — no reshaping |
 | `mcp_server/tools/skills.py` | `skill_loader.py` / `skill_catalog.py` | returns JSON-serialisable dicts (never `Skill` dataclasses) |

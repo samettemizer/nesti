@@ -9,7 +9,7 @@ planner LLM (passed in; this module never calls a provider itself) pick, and
 its answer counts only when exactly one domain is plausible.
 
 Question protocol: when nothing decides, Nesti posts one note
-"Talebiniz hangi domain için?" listing the domains, carrying a hidden
+"Which domain is this request for?" listing the domains, carrying a hidden
 ``NESTI_DOMAIN_QUESTION_V1`` marker with the options, and pauses the issue.
 ``reconcile`` resumes it once a human reply names exactly one option, and asks
 again once per unmatched reply.
@@ -30,7 +30,7 @@ import project_layout
 logger = logging.getLogger(__name__)
 
 QUESTION_MARKER = "NESTI_DOMAIN_QUESTION_V1"
-QUESTION = "Talebiniz hangi domain için?"
+QUESTION = "Which domain is this request for?"
 _URL_RE = re.compile(r"https?://\S+")
 _TOKENS = re.compile(r"""
   (?P<comment>//[^\n]*|\#(?!\[)[^\n]*|/\*.*?\*/)
@@ -265,9 +265,9 @@ def format_question(options: list[str], retry: bool = False) -> str:
     """The GitLab question note listing *options*, with the hidden marker."""
     lines = [QUESTION, ""]
     lines += [f"{i}. `{name}`" for i, name in enumerate(options, 1)]
-    lines += ["", "Yanıt olarak seçeneklerden birinin adını veya numarasını yazın."]
+    lines += ["", "Reply with the name or number of one of the options."]
     if retry:
-        lines.append("_Önceki yanıt hiçbir seçenekle eşleşmedi._")
+        lines.append("_The previous reply did not match any option._")
     lines += ["", f"<!-- {QUESTION_MARKER} {json.dumps(options, ensure_ascii=False)} -->"]
     return "\n".join(lines)
 

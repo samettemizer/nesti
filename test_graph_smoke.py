@@ -3203,7 +3203,7 @@ http = _IssueHTTP()
 http.add_issue(40, ["nesti", "nesti::in-progress"])
 issue_domain.ask(http.client(), 40, ["Duyurular", "Members"])
 check(http.issues[40]["labels"] == ["nesti", "nesti::pause"] and len(http.notes[40]) == 1
-      and http.notes[40][0]["body"].startswith("Talebiniz hangi domain için?")
+      and http.notes[40][0]["body"].startswith(issue_domain.QUESTION)
       and issue_domain.QUESTION_MARKER in http.notes[40][0]["body"],
       "ask posts one verified question and pauses the issue")
 check(issue_domain.reconcile(http.client())["waiting"] == [40], "an unanswered question waits")
@@ -3221,7 +3221,7 @@ http2.add_note(41, "bilmiyorum", author=99)
 http2.add_issue(42, ["nesti", "nesti::pause"])
 http2.add_note(42, "pausing this manually", author=99)
 r = issue_domain.reconcile(http2.client())
-check(r["asked"] == [41] and len(http2.notes[41]) == 3 and "Önceki yanıt" in http2.notes[41][2]["body"]
+check(r["asked"] == [41] and len(http2.notes[41]) == 3 and "previous reply" in http2.notes[41][2]["body"]
       and "nesti::pause" in http2.issues[41]["labels"], "an unmatched reply is asked again once")
 check(r["resumed"] == r["waiting"] == r["errors"] == []
       and http2.issues[42]["labels"] == ["nesti", "nesti::pause"] and len(http2.notes[42]) == 1,
