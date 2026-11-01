@@ -231,7 +231,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
         "playwright", playwright_outcomes,
         "1 passed (2.1s)", "1 failed\n  e2e/file-table.spec.js:4:1 › sorts rows")
 
-    def fake_openapi(workspace_path):
+    def fake_openapi(workspace_path, baseline_routes=None):
         calls["openapi"] += 1
         calls["layers"].append("openapi")
         calls["layer_paths"].append(("openapi", workspace_path))
@@ -1824,6 +1824,29 @@ with tempfile.TemporaryDirectory(prefix="nesti-retry-context-") as root:
           "second retry excludes obsolete code and failure despite full diagnostic transcript")
     nodes._store.delete(3100)
 
+# A retry quotes the existing file its failure names, so it is fixed in place.
+with tempfile.TemporaryDirectory(prefix="nesti-retry-failure-file-") as root:
+    _put_retry = Path(root, "tests/Feature/ContractTest.php")
+    _put_retry.parent.mkdir(parents=True)
+    _put_retry.write_text("<?php\n// CONTRACT_TEST_BODY\n", encoding="utf-8")
+    _retry_code = "### FILE: app/X.php\n```php\n<?php\n```\n"
+    reset_calls(3101)
+    patch_tools(docker_outcomes=[True], code_responses=[_retry_code])
+    state = initial(3101)
+    state.update(repo_path=root, plan="Add the endpoint.", scope="backend")
+    state.update(nodes.node_code(state))
+    state["test_output"] = ("FAILED  Tests\\Feature\\ContractTest\n"
+                            "  at \x1b[32mtests/Feature/ContractTest.php\x1b[39m:26")
+    state.update(nodes.node_code(state))
+    check("CONTRACT_TEST_BODY" not in calls["code_prompts"][0]
+          and "Current tests/Feature/ContractTest.php (complete)" in calls["code_prompts"][1]
+          and "CONTRACT_TEST_BODY" in calls["code_prompts"][1],
+          "a retry quotes the existing test file its failure names (tests/Feature/X.php:26)")
+    check(any("never remove\n  or loosen its other assertions" in p
+              for p in (calls["code_systems"][1], calls["code_prompts"][1])),
+          "the coding prompt forbids loosening an existing test's other assertions")
+    nodes._store.delete(3101)
+
 # ═════ Scenario 12c: the coder must see what the repository already has ═════
 print("\n── Scenario 12c: _repo_inventory ──")
 inv_root = tempfile.mkdtemp(prefix="nesti-inv-")
@@ -2867,6 +2890,148 @@ try:
           "SPA package.json gains vitest/@playwright/test 1.50.0 and keeps primevue ^4.4.1")
 finally:
     shutil.rmtree(mono, ignore_errors=True)
+
+print("\n── Backend code prompt carries routing and test conventions ──")
+from prompt_builder import build_code_prompt             # noqa: E402
+conv = tempfile.mkdtemp(prefix="nesti-conv-")
+try:
+    _put(conv, "backend/artisan")
+    _put(conv, "backend/bootstrap/app.php",
+         "<?php\nreturn Application::configure()->withRouting(\n"
+         "    api: __DIR__.'/../routes/api.php', apiPrefix: '',\n)->create();\n")
+    _put(conv, "backend/routes/api.php",
+         "<?php\nforeach (['Admin'] as $d) { require __DIR__.'/domains/'.$d.'.php'; }\n")
+    _put(conv, "backend/routes/domains/Admin.php",
+         "<?php\nRoute::middleware(['bearer', 'roles:Admin'])->group(fn () => Route::get('/panel', X::class));\n")
+    _put(conv, "backend/tests/TestCase.php", "<?php\nabstract class TestCase { function TESTCASE_HELPER() {} }\n")
+    _put(conv, "backend/tests/Feature/PanelAdminTest.php",
+         "<?php\nclass PanelAdminTest { function test_admin() { $this->withToken(ADMIN_TOKEN_SETUP);"
+         " $this->getJson('/panel'); } }\n")
+    _put(conv, "backend/tests/Feature/InvoiceExportTest.php",
+         "<?php\nclass InvoiceExportTest { function test_export() { $this->getJson('/invoices/export'); } }\n")
+    _put(conv, "backend/app/Providers/AppServiceProvider.php", "<?php\nclass AppServiceProvider {}\n")
+    _put(conv, "backend/app/Providers/DocsServiceProvider.php",
+         "<?php\nScramble::routes(fn ($r) => preg_match('#^(SCRAMBLE_FILTER_ENTRY)(/|$)#', $r->uri()));\n")
+    _layout = {"backend": "backend", "frontend": "frontend"}
+    _task = "Add a GET /api/status endpoint for admin users only, returning the panel status."
+    _ctx = nodes._repo_inventory(conv, "backend", _task, layout=_layout)
+    _sys, _user = build_code_prompt({"subject": "status", "description": _task}, "1. route + test",
+                                    repo_context=_ctx, scope="backend")
+    check("apiPrefix: ''" in _user and "Current backend/bootstrap/app.php (complete)" in _user,
+          "code prompt quotes bootstrap/app.php with its apiPrefix")
+    check("Current backend/routes/domains/Admin.php" in _user and "roles:Admin" in _user,
+          "code prompt quotes route files loaded from routes/ subdirectories")
+    check("TESTCASE_HELPER" in _user and "ADMIN_TOKEN_SETUP" in _user and "/invoices/export" not in _user,
+          "code prompt quotes TestCase.php and the most relevant HTTP Feature test only")
+    check("served under the /api prefix" not in _sys and "apiPrefix" in _sys,
+          "backend standards no longer assume a fixed /api prefix")
+    _front = nodes._repo_inventory(conv, "frontend", _task, layout=_layout)
+    check("apiPrefix: ''" in _front and "TESTCASE_HELPER" not in _front and "ADMIN_TOKEN_SETUP" not in _front,
+          "frontend scope sees the routing prefix but no PHP test conventions")
+    check("Current backend/app/Providers/DocsServiceProvider.php (complete)" in _user
+          and "SCRAMBLE_FILTER_ENTRY" in _user and "Scramble::routes(" in _sys,
+          "backend code prompt quotes the Scramble::routes filter and says to admit new routes")
+    check("SCRAMBLE_FILTER_ENTRY" not in _front, "frontend scope does not quote the Scramble filter")
+finally:
+    shutil.rmtree(conv, ignore_errors=True)
+
+print("\n── OpenAPI gate: /api-prefixed versus unprefixed (HEAD baseline) ──")
+import graph.tools as _gt                                # noqa: E402
+from git import Repo as _Repo                            # noqa: E402
+
+
+def _route(uri, method="GET|HEAD"):
+    return {"uri": uri, "method": method, "middleware": ["api"]}
+
+
+def gate_case(workspace, current, documented, head=(), head_ok=True, baseline=None):
+    """Run the real gate with a fake sandbox that writes the dumps it is asked for."""
+    runs = []
+
+    def dump(path, routes):
+        target = Path(path, _gt._ROUTE_DUMP_REL)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(list(routes)))
+
+    class FakeRunner:
+        def run_openapi_export(self, path):
+            runs.append(("openapi", path))
+            Path(path, "openapi.json").write_text(json.dumps({
+                "openapi": "3.1.0", "servers": [{"url": "http://localhost:8000"}],
+                "paths": {key: {method: {} for method in methods} for key, methods in documented.items()}}))
+            dump(path, current)
+            return True, "exported"
+
+        def run_route_list(self, path):
+            runs.append(("route-list", path))
+            if head_ok:
+                dump(path, head)
+            return head_ok, "head routes" if head_ok else "HEAD boom"
+
+    with patch.object(_gt, "DockerRunner", FakeRunner):
+        result = _gt.tool_openapi_export(workspace, baseline)
+    return result["result"], runs
+
+
+gate_root = tempfile.mkdtemp(prefix="nesti-gate-")
+try:
+    _repo = _Repo.init(gate_root)
+    _put(gate_root, "backend/routes/api.php", "<?php\n")
+    _repo.index.add(["backend/routes/api.php"])
+    _repo.index.commit("init")
+    _ws = os.path.join(gate_root, "backend")
+
+    r, runs = gate_case(_ws, [_route("api/tasks", "POST")], {"/other": ["get"]})
+    check(not r["passed"] and r["undocumented"] == ["POST /api/tasks"] and "baseline_routes" not in r
+          and [kind for kind, _ in runs] == ["openapi"],
+          "prefixed: undocumented /api route fails exactly as before, no HEAD export")
+    r, _ = gate_case(_ws, [_route("api/tasks", "POST")], {"/api/tasks": ["post"]})
+    check(r["passed"], "prefixed: documented /api route passes")
+    r, _ = gate_case(_ws, [_route("api/ping", "HEAD")], {"/other": ["get"]})
+    check(not r["passed"] and "no route under /api is registered" in r["output"],
+          "prefixed: no checkable /api route keeps the 'no route registered' failure")
+
+    _head = [_route("health/live")]
+    _current = [_route("health/live"), _route("test"), {"uri": "docs/api", "method": "GET|HEAD",
+                                                        "middleware": ["web"]}]
+    r, runs = gate_case(_ws, _current, {"/auth/login": ["post"]}, head=_head)
+    check(not r["passed"] and r["undocumented"] == ["GET /test"]
+          and r["baseline_routes"] == ["GET health/live"]
+          and [kind for kind, _ in runs] == ["openapi", "route-list"]
+          and runs[1][1].endswith(os.path.join("head", "backend")),
+          "unprefixed: a new undocumented api-group route fails against the HEAD worktree baseline")
+    check(len(_repo.git.worktree("list").splitlines()) == 1
+          and not _repo.is_dirty(untracked_files=False),
+          "the HEAD worktree is removed and the clone is untouched")
+    r, runs = gate_case(_ws, _current, {"/test": ["get"]}, head=_head)
+    check(r["passed"] and "GET /health/live" not in r["undocumented"],
+          "unprefixed: new documented route passes; pre-existing undocumented /health is not re-checked")
+    r, _ = gate_case(_ws, _head, {"/auth/login": ["post"]}, head=_head)
+    check(r["passed"] and "No new API route" in r["output"],
+          "unprefixed: an existing-controller-only change (no new api route) passes")
+    r, runs = gate_case(_ws, _current, {"/test": ["get"]}, head_ok=False)
+    check(not r["passed"] and "Could not export the HEAD route list" in r["output"]
+          and "HEAD boom" in r["output"], "unprefixed: a failed HEAD export fails closed")
+    r, runs = gate_case(_ws, _current, {"/auth/login": ["post"]}, baseline=["GET health/live"])
+    check(r["undocumented"] == ["GET /test"] and [kind for kind, _ in runs] == ["openapi"],
+          "a supplied baseline skips the HEAD export")
+
+    _seen = []
+
+    def _caching_gate(path, baseline_routes=None):
+        _seen.append(baseline_routes)
+        extra = {} if baseline_routes is not None else {"baseline_routes": ["GET health/live"]}
+        return {"success": True, "result": {"passed": True, "output": "", "paths": [],
+                                            "undocumented": [], **extra}}
+    _gate_state = {"repo_path": gate_root, "layout": {"backend": "backend", "frontend": None}}
+    with patch.object(nodes, "tool_openapi_export", _caching_gate):
+        _gate_state.update(nodes.node_openapi_test(_gate_state))
+        _gate_state.update(nodes.node_openapi_test(_gate_state))
+    check(_seen == [None, ["GET health/live"]]
+          and _gate_state["openapi_baseline_routes"] == ["GET health/live"],
+          "node_openapi_test exports the HEAD baseline once and reuses it")
+finally:
+    shutil.rmtree(gate_root, ignore_errors=True)
 
 _state_dir = tempfile.mkdtemp(prefix="nesti-state-")
 _saved_layout = (project_layout.STATE_DIR, project_layout.LAYOUT_FILE)

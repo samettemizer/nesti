@@ -124,6 +124,7 @@ class TaskEngine:
             "openapi_passed":    False,
             "openapi_output":    "",
             "openapi_paths":     [],
+            "openapi_baseline_routes": None,
             "vitest_passed":     False,
             "vitest_output":     "",
             "playwright_passed": False,

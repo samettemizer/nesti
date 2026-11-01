@@ -101,6 +101,23 @@ _OPENAPI_COMMAND = [
     ]),
 ]
 
+# The registered routes alone: the OpenAPI gate's HEAD baseline for a project
+# whose API routes carry no /api prefix (no Scramble steps needed).
+_ROUTE_LIST_COMMAND = [
+    "bash",
+    "-lc",
+    " ".join([
+        "set -e;",
+        _CAPTURE_OWNER,
+        _TRAP_OWNER,
+        "composer install --no-interaction --prefer-dist --no-progress;",
+        "[ -f .env ] || cp .env.example .env;",
+        "php artisan key:generate --force;",
+        "php artisan config:clear;",
+        "php artisan route:list --json > storage/app/nesti-routes.json",
+    ]),
+]
+
 _BOOTSTRAP_COMMAND_TEMPLATE = [
     "bash",
     "-lc",
@@ -210,6 +227,15 @@ class DockerRunner:
         Returns ``(success, output)`` — success is True on exit code 0.
         """
         return self._run(workspace_path, _OPENAPI_COMMAND, self.timeout, "openapi")
+
+    def run_route_list(self, workspace_path: str) -> tuple[bool, str]:
+        """
+        Mount *workspace_path* and dump ``route:list --json`` to
+        ``storage/app/nesti-routes.json``.
+
+        Returns ``(success, output)`` — success is True on exit code 0.
+        """
+        return self._run(workspace_path, _ROUTE_LIST_COMMAND, self.timeout, "route-list")
 
     def run_bootstrap(self, repo_path: str) -> tuple[bool, str]:
         """

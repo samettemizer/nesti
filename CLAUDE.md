@@ -130,10 +130,16 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     Noble rather than jammy because Ubuntu 24.04 carries `php8.3-cli`; that PHP
     serves only integrated layouts (separated SPAs run E2E without PHP), so an
     integrated `^8.4` app may fail its Playwright PHP prep (untested).
-23. **`routes/api.php` must stay fully documented.** `tool_openapi_export`
+23. **The API surface must stay fully documented.** `tool_openapi_export`
     compares `php artisan scramble:export` output against
-    `php artisan route:list --json` and fails the attempt when any `/api` route
-    is missing. `scramble:analyze` is advisory only (`|| echo`) — it exits
+    `php artisan route:list --json`. A project with routes under `/api` fails
+    the attempt when any `/api` route is missing. A project whose `apiPrefix`
+    is not `api` fails when an `api`-group route the change *added* is missing:
+    the clone's HEAD route list (a detached worktree, `run_route_list`) is the
+    baseline, exported at most once per run and cached in
+    `openapi_baseline_routes`; routes already registered at HEAD are not
+    re-checked, and a failed HEAD export fails the attempt (never a silent
+    pass). `scramble:analyze` is advisory only (`|| echo`) — it exits
     non-zero on any unresolved type anywhere in the application, so gating on
     it would strand every issue. Never loosen the comparison to make a run
     pass; tighten the coding prompt instead.

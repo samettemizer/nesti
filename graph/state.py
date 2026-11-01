@@ -103,6 +103,7 @@ class IssueState(TypedDict, total=False):
     openapi_passed: bool
     openapi_output: str
     openapi_paths: list[str]           # paths present in the exported document
+    openapi_baseline_routes: list[str] | None  # HEAD "METHOD uri" list, exported at most once per run
 
     # ── Frontend test results ────────────────────────────────────
     vitest_passed: bool
