@@ -15,7 +15,11 @@ It is the only automated check of the three sandbox recipes and of
 tool_laravel_bootstrap, so it lives in the repo next to the smoke suite.
 
 What it proves, in order:
-  1. a greenfield directory becomes a Laravel 13 + Scramble + PrimeVue app
+  1. a greenfield directory becomes a Laravel 13 API: Sanctum, Scramble,
+     spatie/laravel-permission, the API-only welcome page, the spatie seed data
+     and a README — no Vue
+  1b. the integrated top-up wires Vue into it once the app has a plugin-vue
+     vite.config.js: Vitest/Playwright configs and the pinned package.json
   2. a realistic feature (migration → model → factory → seeder → FormRequest →
      controller → API Resource → route → tests → Vue component registered on
      the served page → specs → E2E fixture manifest) is written through the
@@ -32,8 +36,16 @@ What it proves, in order:
      seeder (the only dependency request), and ordinary failures for broken
      seeders, unrelated seed errors, HTTP/shape/mapping errors and a model on
      another database (refused before migration)
+  8. the starter kit (spatie roles) on that app: a Sakai SPA in .frontend/,
+     PHPUnit, the documented /api/login|users|roles|permissions, Vitest and
+     Playwright all green
+  9. the starter kit (no role schema) on a fresh Laravel skeleton whose
+     .env.example is pgsql: phpunit.xml moves to <DB_DATABASE>_test, PHPUnit
+     runs on the postgres sidecar, OpenAPI/Vitest/Playwright green
+  10. the starter kit (custom roles/permissions tables) on another fresh
+     skeleton: every layer green, roles overlay included
 
-Run:  python test_live_laravel.py [--keep]
+Run:  python test_live_laravel.py [--keep] [--from-step N --repo DIR]
 """
 
 from __future__ import annotations
@@ -54,11 +66,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import docker_runner                              # noqa: E402
 from docker_runner import DockerRunner            # noqa: E402
 from frontend_runner import FrontendRunner        # noqa: E402
 from graph.tools import (                          # noqa: E402
     tool_laravel_bootstrap,
     tool_openapi_export,
+    tool_starter_kit,
 )
 
 _OUTPUT_TAIL = 2500          # chars of container output shown on failure
@@ -69,16 +83,98 @@ _SCAFFOLD_EXPECTED = (
     "artisan",
     "composer.json",
     "routes/api.php",
-    "routes/web.php",
     "config/scramble.php",
-    "vite.config.js",
-    "vitest.config.js",
-    "playwright.config.js",
-    "resources/js/app.js",
-    "resources/views/app.blade.php",
+    "config/permission.php",
     "tests/TestCase.php",
     "tests/Feature/OpenApiDocumentationTest.php",
+    "tests/Feature/DatabaseSeederTest.php",
+    "database/seeders/DatabaseSeeder.php",
+    "database/seeders/RolePermissionSeeder.php",
+    "database/seeders/UserSeeder.php",
+    "resources/views/welcome.blade.php",
+    "README.md",
 )
+_WELCOME_TEXT = ("At Nesti, we use Laravel solely to serve an API. "
+                 "Please check the README.md for more information.")
+
+# Integrated Vue wiring a project brings itself (the scaffold no longer ships it).
+_INTEGRATED_VITE_CONFIG = """import { defineConfig } from 'vite';
+import laravel from 'laravel-vite-plugin';
+import tailwindcss from '@tailwindcss/vite';
+import vue from '@vitejs/plugin-vue';
+
+export default defineConfig({
+    plugins: [
+        laravel({
+            input: ['resources/css/app.css', 'resources/js/app.js'],
+            refresh: true,
+        }),
+        tailwindcss(),
+        vue(),
+    ],
+    resolve: {
+        alias: {
+            // Runtime compiler required: app.js relies on Vue compiling the
+            // in-DOM template of <div id="app">, so alias to the full build.
+            vue: 'vue/dist/vue.esm-bundler.js',
+        },
+    },
+});
+"""
+_INTEGRATED_WEB_ROUTES = """<?php
+
+use Illuminate\\Support\\Facades\\Route;
+
+Route::get('/', fn () => view('app'));
+"""
+# The PHP sandbox never builds assets, so Blade views with @vite render without Vite.
+_INTEGRATED_TEST_CASE = """<?php
+
+namespace Tests;
+
+use Illuminate\\Foundation\\Testing\\TestCase as BaseTestCase;
+
+abstract class TestCase extends BaseTestCase
+{
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->withoutVite();
+    }
+}
+"""
+_STARTER_PATHS = ("/api/login", "/api/users", "/api/roles", "/api/permissions")
+_CUSTOM_ROLES_MIGRATION = """<?php
+
+use Illuminate\\Database\\Migrations\\Migration;
+use Illuminate\\Database\\Schema\\Blueprint;
+use Illuminate\\Support\\Facades\\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('roles', function (Blueprint $table) {
+            $table->id();
+            $table->string('name')->unique();
+            $table->timestamps();
+        });
+
+        Schema::create('permissions', function (Blueprint $table) {
+            $table->id();
+            $table->string('name')->unique();
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('permissions');
+        Schema::dropIfExists('roles');
+    }
+};
+"""
 
 _results: list[tuple[str, bool, str]] = []
 
@@ -604,17 +700,23 @@ def step_bootstrap(repo: str) -> None:
     if missing:
         _fail("1. greenfield bootstrap", f"scaffold did not produce: {', '.join(missing)}")
 
+    if not list(Path(repo, "database/migrations").glob("*_create_permission_tables.php")):
+        _fail("1. greenfield bootstrap", "the spatie/laravel-permission migration was not published")
+    composer = json.loads(Path(repo, "composer.json").read_text(encoding="utf-8"))
+    for dependency in ("laravel/sanctum", "spatie/laravel-permission", "dedoc/scramble"):
+        if dependency not in composer.get("require", {}):
+            _fail("1. greenfield bootstrap", f"composer.json does not require {dependency}")
+    if _WELCOME_TEXT not in Path(repo, "resources/views/welcome.blade.php").read_text(encoding="utf-8"):
+        _fail("1. greenfield bootstrap", "welcome.blade.php lacks the API-only sentence")
     package = json.loads(Path(repo, "package.json").read_text(encoding="utf-8"))
-    pin = package.get("devDependencies", {}).get("@playwright/test")
-    if pin != "1.50.0":
-        _fail("1. greenfield bootstrap", f'@playwright/test must be exactly "1.50.0", got {pin!r}')
-    for dependency in ("vue", "primevue", "@primeuix/themes", "primeicons"):
-        if dependency not in package.get("dependencies", {}):
-            _fail("1. greenfield bootstrap", f"package.json is missing {dependency}")
+    if "vue" in {**package.get("dependencies", {}), **package.get("devDependencies", {})}:
+        _fail("1. greenfield bootstrap", "the API-only scaffold added vue to package.json")
     for dependency in ("vite", "laravel-vite-plugin"):
         if dependency not in package.get("devDependencies", {}):
-            _fail("1. greenfield bootstrap",
-                  f"the skeleton's {dependency} was dropped by the merge")
+            _fail("1. greenfield bootstrap", f"the skeleton's {dependency} was dropped")
+    user = Path(repo, "app/Models/User.php").read_text(encoding="utf-8")
+    if not all(trait in user for trait in ("HasApiTokens", "HasRoles")):
+        _fail("1. greenfield bootstrap", "User lacks HasApiTokens/HasRoles")
     if "/database/*.sqlite*" not in Path(repo, ".gitignore").read_text(encoding="utf-8"):
         _fail("1. greenfield bootstrap", ".gitignore does not ignore the sandbox sqlite file")
 
@@ -625,9 +727,27 @@ def step_bootstrap(repo: str) -> None:
     _record(
         "1. greenfield bootstrap",
         True,
-        f"Laravel + Scramble + PrimeVue scaffolded in {took:.0f}s; "
-        f"@playwright/test pinned {pin}; {detail['reason']}",
+        f"Laravel API + Sanctum + Scramble + spatie scaffolded in {took:.0f}s; {detail['reason']}",
     )
+
+
+def step_integrated_wiring(repo: str) -> None:
+    step = "1b. integrated Vue top-up"
+    for rel, body in (("vite.config.js", _INTEGRATED_VITE_CONFIG),
+                      ("routes/web.php", _INTEGRATED_WEB_ROUTES),
+                      ("tests/TestCase.php", _INTEGRATED_TEST_CASE)):
+        Path(repo, rel).write_text(body, encoding="utf-8")
+    result = tool_laravel_bootstrap(repo)
+    if not result["success"]:
+        _fail(step, result["error"][-_OUTPUT_TAIL:])
+    missing = [rel for rel in ("vitest.config.js", "playwright.config.js") if not Path(repo, rel).is_file()]
+    if missing:
+        _fail(step, f"top-up did not write {', '.join(missing)}")
+    package = json.loads(Path(repo, "package.json").read_text(encoding="utf-8"))
+    pin = package.get("devDependencies", {}).get("@playwright/test")
+    if pin != "1.50.0" or "vue" not in package.get("dependencies", {}):
+        _fail(step, f'package.json needs vue and @playwright/test "1.50.0", got {pin!r}')
+    _record(step, True, result["result"]["reason"])
 
 
 def step_write_feature(repo: str) -> None:
@@ -981,6 +1101,89 @@ def step_fixture_dependencies(repo: str) -> None:
         _apply_files(repo, positive)
 
 
+# ── Steps 8–10: the starter kit ──────────────────────────────────────────────
+
+def _starter_layers(step: str, app: str, variant: str) -> str:
+    """Starter kit on the root app *app* (SPA in .frontend/), then every layer green."""
+    result = tool_starter_kit(app, ".", ".frontend")
+    if not result["success"]:
+        _fail(step, result["error"][-_OUTPUT_TAIL:])
+    if result["result"]["variant"] != variant:
+        _fail(step, f"variant {result['result']['variant']!r}, expected {variant!r}")
+    if Path(app, ".frontend/src/views/pages/Roles.vue").is_file() != (variant != "none"):
+        _fail(step, f"Roles.vue presence does not match the {variant} variant")
+    passed, output = DockerRunner().run_tests(app)
+    if not passed:
+        _fail(step, f"PHPUnit:\n{output[-_OUTPUT_TAIL:]}")
+    tests = next((line.strip() for line in output.splitlines() if line.strip().startswith("Tests:")), "green")
+    api = tool_openapi_export(app)
+    if not api["success"] or not api["result"]["passed"]:
+        _fail(step, f"OpenAPI:\n{(api.get('error') or api['result']['output'])[-_OUTPUT_TAIL:]}")
+    expected = _STARTER_PATHS if variant != "none" else _STARTER_PATHS[:2]
+    missing = [path for path in expected if path not in api["result"]["paths"]]
+    if missing:
+        _fail(step, f"undocumented starter paths {missing}; exported {api['result']['paths']}")
+    spa = str(Path(app, ".frontend"))
+    passed, output = FrontendRunner().run_vitest(spa)
+    if not passed:
+        _fail(step, f"Vitest:\n{output[-_OUTPUT_TAIL:]}")
+    e2e = FrontendRunner().run_playwright(spa)
+    if not e2e["passed"] or not _BROWSER_RUN.search(e2e["output"]):
+        _fail(step, f"Playwright:\n{e2e['output'][-_OUTPUT_TAIL:]}")
+    return f"variant {variant}; PHPUnit {tests}; documented {list(expected)}; Vitest + Playwright green"
+
+
+def step_starter_kit(repo: str) -> None:
+    step = "8. starter kit (spatie) on the scaffolded app"
+    _record(step, True, _starter_layers(step, repo, "spatie"))
+
+
+def _skeleton(step: str, workspace: str) -> None:
+    """A fresh Laravel skeleton in *workspace*, created in the PHP sandbox."""
+    version = os.environ.get("NESTI_LARAVEL_VERSION", "^13.0")
+    script = " ".join([
+        "set -e;", docker_runner._CAPTURE_OWNER, docker_runner._TRAP_OWNER,
+        f'composer create-project --no-interaction --prefer-dist "laravel/laravel:{version}" /tmp/skel;',
+        "rm -rf /tmp/skel/.git;",
+        "cp -a /tmp/skel/. /app/",
+    ])
+    runner = DockerRunner()
+    # Harness-only use of the private _run: Nesti itself never creates a bare skeleton.
+    passed, output = runner._run(workspace, ["bash", "-lc", script], runner.bootstrap_timeout, "skeleton")
+    if not passed or not Path(workspace, "artisan").is_file():
+        _fail(step, f"Laravel skeleton:\n{output[-_OUTPUT_TAIL:]}")
+
+
+def _top_up(step: str, app: str) -> None:
+    result = tool_laravel_bootstrap(app)
+    if not result["success"]:
+        _fail(step, f"top-up:\n{result['error'][-_OUTPUT_TAIL:]}")
+
+
+def step_starter_plain_pgsql(workspace: str, custom_workspace: str) -> None:
+    step = "9. starter kit (no roles) on a pgsql skeleton"
+    _skeleton(step, workspace)
+    shutil.copytree(workspace, custom_workspace, symlinks=True, dirs_exist_ok=True)
+    env = Path(workspace, ".env.example")
+    text = re.sub(r"^#?[ \t]*DB_CONNECTION=.*$", "DB_CONNECTION=pgsql",
+                  env.read_text(encoding="utf-8"), count=1, flags=re.MULTILINE)
+    env.write_text(re.sub(r"^#?[ \t]*DB_DATABASE=.*$", "DB_DATABASE=alt", text, count=1, flags=re.MULTILINE),
+                   encoding="utf-8")
+    _top_up(step, workspace)
+    settings = docker_runner._pgsql_settings(workspace)
+    if not settings or settings["DB_DATABASE"] != "alt_test":
+        _fail(step, f"phpunit.xml was not pointed at alt_test: {settings}")
+    _record(step, True, "phpunit.xml → pgsql alt_test; " + _starter_layers(step, workspace, "none"))
+
+
+def step_starter_custom(workspace: str) -> None:
+    step = "10. starter kit (custom roles) on a skeleton"
+    Path(workspace, "database/migrations/2026_01_01_000000_create_roles_and_permissions_tables.php").write_text(
+        _CUSTOM_ROLES_MIGRATION, encoding="utf-8")
+    _top_up(step, workspace)
+    _record(step, True, _starter_layers(step, workspace, "custom"))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1000,12 +1203,15 @@ def main() -> int:
     )
 
     repo = args.repo or tempfile.mkdtemp(prefix="nesti-live-")
-    print(f"workspace: {repo}")
+    # Steps 9–10 build their own skeletons; never the --repo workspace.
+    skeletons = [tempfile.mkdtemp(prefix="nesti-live-pgsql-"), tempfile.mkdtemp(prefix="nesti-live-custom-")]
+    print(f"workspace: {repo}; skeletons: {', '.join(skeletons)}")
 
     try:
         step_images()
         if args.from_step <= 1:
             step_bootstrap(repo)
+            step_integrated_wiring(repo)
         if args.from_step <= 2:
             step_write_feature(repo)
         if args.from_step <= 3:
@@ -1019,23 +1225,30 @@ def main() -> int:
             step_playwright(repo)
         if args.from_step <= 7:
             step_fixture_dependencies(repo)
+        if args.from_step <= 8:
+            step_starter_kit(repo)
+        if args.from_step <= 10:
+            step_starter_plain_pgsql(*skeletons)
+            step_starter_custom(skeletons[1])
     except StepFailed:
         pass
     except KeyboardInterrupt:
         print("\ninterrupted")
     finally:
         exit_code = _summary()
-        if args.keep or args.repo:
-            print(f"\nworkspace kept at {repo}")
-        else:
+        kept = [repo] if args.repo else []
+        for workspace in [repo, *skeletons]:
+            if args.keep or workspace in kept:
+                print(f"\nworkspace kept at {workspace}")
+                continue
             # The sandboxes run as root, so files they create may not be
             # removable by this process; report rather than crash.
-            shutil.rmtree(repo, ignore_errors=True)
-            if Path(repo).exists():
-                print(f"\nworkspace {repo} could not be fully removed "
+            shutil.rmtree(workspace, ignore_errors=True)
+            if Path(workspace).exists():
+                print(f"\nworkspace {workspace} could not be fully removed "
                       f"(root-owned container leftovers); remove it with:\n"
                       f"  docker run --rm -v /tmp:/hosttmp alpine "
-                      f"rm -rf /hosttmp/{Path(repo).name}")
+                      f"rm -rf /hosttmp/{Path(workspace).name}")
 
     return exit_code
 
