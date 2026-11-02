@@ -29,10 +29,11 @@ Notes
   spec) consumes them by attribute.  When these tools are exposed over MCP,
   serialise with ``dataclasses.asdict`` at the transport boundary.
 
-• tool_laravel_bootstrap is the only tool that *writes* into the repository
-  besides DockerRunner.write_files.  It applies the templates shipped in
-  ``templates/laravel/`` and is the reason a greenfield GitLab repository can
-  become a Laravel 13 + PrimeVue application inside a single run.
+• tool_laravel_bootstrap and tool_starter_kit are the only tools that *write*
+  into the repository besides DockerRunner.write_files.  They apply the
+  templates shipped in ``templates/laravel/`` and ``templates/starter/``: a
+  greenfield GitLab repository becomes a Laravel 13 API in ``webservice/``, and
+  a SPA-less Laravel API gains a Sakai PrimeVue SPA, inside a single run.
 """
 
 import json
@@ -46,7 +47,7 @@ from urllib.parse import urlsplit
 
 import git
 
-from docker_runner import DockerRunner
+from docker_runner import _PG_IDENTIFIER, DockerRunner, _pgsql_settings
 from frontend_runner import FrontendRunner
 from gitlab_client import GitLabClient
 from gitlab_issues_client import GitLabIssuesClient
@@ -54,10 +55,12 @@ from issue_dependencies import FixtureDependencies
 from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
 import issue_domain
+from layer_output import condense
 import project_layout
 from skill_catalog import catalog_status, select_skills
 from skill_loader import load_skills
 import stats
+import starter_kit
 from vector_store import get_document_memory
 
 logger = logging.getLogger(__name__)
@@ -125,17 +128,11 @@ _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "laravel
 _SPA_TEMPLATES_DIR = _TEMPLATES_DIR.parent / "spa"
 
 _SCAFFOLD_TEMPLATES = (
-    "vite.config.js",
-    "vitest.config.js",
-    "playwright.config.js",
-    "resources/js/app.js",
-    "resources/views/app.blade.php",
-    "routes/web.php",
     "routes/api.php",
-    # Overrides the skeleton's own TestCase: it disables Vite so the PHP
-    # sandbox, which never runs `npm run build`, can render Blade views.
-    "tests/TestCase.php",
     "tests/Feature/OpenApiDocumentationTest.php",
+    # API-only welcome page: no @vite, so the skeleton's GET / test passes without a build.
+    "resources/views/welcome.blade.php",
+    "database/seeders/DatabaseSeeder.php",
 )
 
 _TOPUP_TEMPLATES = (
@@ -595,6 +592,10 @@ def _detect_separated(
     is_laravel = (backend / _LARAVEL_MARKER).is_file()
     has_api_routes = (backend / _API_ROUTES_FILE).is_file()
     backend_files = _under(written_files, backend_dir)
+    if backend_dir == "." and frontend_dir and backend_files is not None:
+        # A root backend's SPA (.frontend/) is the frontend side, never a backend change.
+        backend_files = [f for f in backend_files
+                         if not f.replace("\\", "/").removeprefix("./").startswith(frontend_dir + "/")]
     frontend_files = _under(written_files, frontend_dir) if frontend_dir else []
     run_openapi = is_laravel and has_api_routes and _touches_api(backend_files)
 
@@ -778,14 +779,13 @@ def _apply_templates(
     return applied
 
 
-def _merge_package_json(repo_path: str, overwrite: bool) -> list[str]:
+def _merge_package_json(repo_path: str) -> list[str]:
     """
     Merge Nesti's frontend dependencies into the repository's package.json.
 
-    Merging, never replacing: the Laravel skeleton's own ``vite``,
-    ``laravel-vite-plugin``, ``tailwindcss`` and ``@tailwindcss/vite`` entries
-    must survive, and a foreign repository's dependencies must not be touched.
-    With *overwrite* False (top-up mode) only absent keys are added.
+    Merging, never replacing: only absent keys are added, so the Laravel
+    skeleton's own ``vite``/``laravel-vite-plugin``/``tailwindcss`` entries and
+    a foreign repository's dependencies are never touched.
     """
     path = Path(repo_path, "package.json")
     data: dict = {}
@@ -800,13 +800,7 @@ def _merge_package_json(repo_path: str, overwrite: bool) -> list[str]:
         if match := re.search(r"\n( +)\"", raw):
             indent = len(match.group(1))
 
-    changed: list[str] = []
-    if overwrite:
-        if data.get("type") != "module":
-            data["type"] = "module"
-            changed.append("type=module")
-        data.setdefault("private", True)
-    elif data.get("type") != "module":
+    if data.get("type") != "module":
         # Adding "type": "module" to a foreign repository would reinterpret
         # every existing .js file, so top-up mode only warns.
         logger.warning(
@@ -814,6 +808,7 @@ def _merge_package_json(repo_path: str, overwrite: bool) -> list[str]:
             "configs added by top-up mode may fail to load."
         )
 
+    changed: list[str] = []
     for section, wanted in (
         ("dependencies", _PACKAGE_DEPENDENCIES),
         ("devDependencies", _PACKAGE_DEV_DEPENDENCIES),
@@ -821,12 +816,9 @@ def _merge_package_json(repo_path: str, overwrite: bool) -> list[str]:
     ):
         bucket = data.setdefault(section, {})
         for key, value in wanted.items():
-            if key in bucket and not overwrite:
-                continue
-            if bucket.get(key) == value:
-                continue
-            bucket[key] = value
-            changed.append(f"{section}.{key}")
+            if key not in bucket:
+                bucket[key] = value
+                changed.append(f"{section}.{key}")
 
     path.write_text(json.dumps(data, indent=indent, ensure_ascii=False) + "\n", encoding="utf-8")
     return changed
@@ -845,34 +837,105 @@ def _append_gitignore(repo_path: str) -> list[str]:
     return missing
 
 
+def _env_value(text: str, key: str) -> str | None:
+    """The first uncommented ``KEY=`` value of a dotenv *text*, quotes and inline comment stripped."""
+    match = re.search(rf"^[ \t]*{key}[ \t]*=(.*)$", text, re.MULTILINE)
+    if not match:
+        return None
+    return re.sub(r"\s+#.*$", "", match.group(1)).strip().strip("'\"")
+
+
+def _set_phpunit_env(text: str, key: str, value: str) -> str:
+    """*text* with its uncommented ``<env name="key">`` set to *value*; added inside ``<php>`` when absent."""
+    comments = [m.span() for m in re.finditer(r"<!--.*?-->", text, re.DOTALL)]
+
+    def live(pattern: str, flags: int = 0) -> "re.Match | None":
+        return next((m for m in re.finditer(pattern, text, flags)
+                     if not any(start <= m.start() < end for start, end in comments)), None)
+
+    entry = live(rf'(<env\s+name="{key}"\s+value=")[^"]*"')
+    if entry:
+        return text[:entry.end(1)] + value + text[entry.end() - 1:]
+    line = f'<env name="{key}" value="{value}"/>'
+    closing = live(r"^([ \t]*)</php>", re.MULTILINE)
+    if closing:
+        return text[:closing.start()] + f"{closing.group(1)}    {line}\n" + text[closing.start():]
+    root = live(r"^([ \t]*)</phpunit>", re.MULTILINE)
+    if not root:
+        return text
+    indent = root.group(1)
+    block = f"{indent}    <php>\n{indent}        {line}\n{indent}    </php>\n"
+    return text[:root.start()] + block + text[root.start():]
+
+
+def _align_phpunit_database(app_root: Path) -> str:
+    """
+    Point phpunit.xml at a separate PostgreSQL database when the app runs on pgsql.
+
+    The driver is ``.env.example``'s DB_CONNECTION (else config/database.php's
+    default); mysql/mariadb/sqlite apps are left alone because the PHPUnit
+    sandbox forces sqlite for them.  A phpunit.xml already on pgsql is never
+    touched.  The database is ``<DB_DATABASE>_test`` (else ``testing``), served
+    by docker_runner's postgres sidecar.  Text edits only, formatting kept.
+    Returns the database name set, or "" when nothing changed.
+    """
+    env_file = app_root / ".env.example"
+    env = env_file.read_text(encoding="utf-8", errors="replace") if env_file.is_file() else ""
+    driver = _env_value(env, "DB_CONNECTION")
+    if driver is None:
+        config = app_root / "config" / "database.php"
+        found = re.search(r"env\(\s*['\"]DB_CONNECTION['\"]\s*,\s*['\"]([^'\"]+)['\"]",
+                          config.read_text(encoding="utf-8", errors="replace")) if config.is_file() else None
+        driver = found.group(1) if found else ""
+    if driver != "pgsql":
+        return ""
+    target = next((app_root / name for name in ("phpunit.xml", "phpunit.xml.dist")
+                   if (app_root / name).is_file()), None)
+    if target is None or _pgsql_settings(str(app_root)) is not None:
+        return ""
+    base = _env_value(env, "DB_DATABASE") or ""
+    database = f"{base}_test" if base and _PG_IDENTIFIER.fullmatch(f"{base}_test") else "testing"
+    original = target.read_text(encoding="utf-8")
+    text = _set_phpunit_env(_set_phpunit_env(original, "DB_CONNECTION", "pgsql"), "DB_DATABASE", database)
+    if text == original:
+        return ""
+    target.write_text(text, encoding="utf-8")
+    return database
+
+
 def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
     """
-    Make *repo_path* a Laravel 13 + Scramble + PrimeVue application.
+    Make *repo_path* a Laravel 13 API with Scramble (plus the test-runner wiring
+    of its frontend, when it has one).
 
     result: {"created": bool, "mode": str, "reason": str, "output": str}
 
     Exactly three outcomes:
 
-    • greenfield (no artisan, no composer.json) → mode "scaffold".
-      Runs ``composer create-project laravel/laravel`` + ``install:api`` +
-      ``composer require dedoc/scramble`` in the PHP sandbox, then writes every
-      template over the skeleton (Nesti created those files seconds earlier, so
-      overwriting is safe), merges package.json and appends .gitignore.
+    • greenfield (no artisan, no composer.json) → mode "scaffold".  Creates
+      *repo_path*, runs ``composer create-project laravel/laravel`` +
+      ``install:api`` (Sanctum) + ``composer require dedoc/scramble
+      spatie/laravel-permission`` in the PHP sandbox, then writes the API
+      templates and the spatie seed data over the skeleton (Nesti created those
+      files seconds earlier, so overwriting is safe), a README.md when absent,
+      the HasApiTokens/HasRoles traits on User, and appends .gitignore.  No Vue:
+      the skeleton's own package.json/vite.config.js stay as they are.
 
     • existing Laravel app (artisan present) → mode "top-up".  Never overwrites
-      a file the repository already has: installs Scramble only when absent,
-      writes only the missing test-runner configs and the Scramble wiring test,
-      and adds only missing package.json keys.  vite.config.js,
+      a file the repository already has: installs Scramble only when absent and
+      writes the Scramble wiring test when absent.  An integrated Vue app
+      (vite.config.js with @vitejs/plugin-vue) also gets the missing
+      test-runner configs and package.json keys.  vite.config.js,
       resources/js/app.js, resources/views/** and routes/** are never touched.
+      A pgsql app's phpunit.xml is pointed at a separate test database.
 
     • non-Laravel PHP project (composer.json without artisan) → success=False.
       Scaffolding a Laravel skeleton over a foreign application would destroy
       it, so this is reported as the configuration error it is.
 
     *spa_path* (separated layout: *repo_path* is the Laravel API folder) tops
-    up the SPA folder instead: it skips the vite.config.js guard, writes only
-    the Scramble wiring test into the backend and the absent
-    vitest/playwright configs plus missing package.json keys into the SPA.
+    up the SPA folder instead with the absent vitest/playwright configs plus
+    missing package.json keys.
     """
     try:
         root = Path(repo_path)
@@ -886,6 +949,7 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
             )
 
         if not has_artisan and not spa_path:
+            root.mkdir(parents=True, exist_ok=True)
             passed, output = DockerRunner().run_bootstrap(repo_path)
             if not passed:
                 return _err(f"Laravel skeleton bootstrap failed:\n{output}")
@@ -895,30 +959,23 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
                     f"the repository:\n{output}"
                 )
             applied = _apply_templates(repo_path, _SCAFFOLD_TEMPLATES, overwrite=True)
-            package = _merge_package_json(repo_path, overwrite=True)
+            applied += _apply_templates(repo_path, starter_kit.DATA_FILES, overwrite=True,
+                                        source_dir=starter_kit.BACKEND_TEMPLATES / "spatie")
+            applied += _apply_templates(repo_path, ("README.md",), overwrite=False)
+            starter_kit.add_model_traits(root / "app/Models/User.php", starter_kit.MODEL_TRAITS["spatie"])
             ignored = _append_gitignore(repo_path)
             return _ok({
                 "created": True,
                 "mode": "scaffold",
                 "reason": (
-                    f"Laravel skeleton + Scramble scaffolded; {len(applied)} template(s), "
-                    f"{len(package)} package.json key(s), {len(ignored)} .gitignore line(s)"
+                    "Laravel API skeleton with Sanctum, Scramble and spatie/laravel-permission "
+                    f"scaffolded; {len(applied)} template(s), {len(ignored)} .gitignore line(s)"
                 ),
                 "output": output,
             })
 
         # ── top-up: an existing Laravel application ──────────────────────────
-        vite_config = root / "vite.config.js"
-        if not spa_path and vite_config.is_file():
-            vite_source = vite_config.read_text(encoding="utf-8", errors="replace")
-            if "@vitejs/plugin-vue" not in vite_source:
-                # Generating .vue files a repository cannot compile would burn
-                # every retry on infrastructure the model cannot fix.
-                return _err(
-                    "existing vite.config.js has no @vitejs/plugin-vue — add Vue "
-                    "support to the repository before running frontend issues"
-                )
-
+        integrated = not spa_path and project_layout._has_plugin_vue(root)
         notes: list[str] = []
         output = ""
         if not _has_scramble(root):
@@ -927,28 +984,32 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
                 return _err(f"dedoc/scramble installation failed:\n{output}")
             notes.append("installed dedoc/scramble")
 
-        if spa_path:
+        package: list[str] = []
+        if integrated:
+            applied = _apply_templates(repo_path, _TOPUP_TEMPLATES, overwrite=False)
+            package = _merge_package_json(repo_path)
+        else:
             applied = _apply_templates(
                 repo_path, ("tests/Feature/OpenApiDocumentationTest.php",), overwrite=False
             )
-            ignored = _append_gitignore(repo_path)
-            applied += [
-                f"{Path(spa_path).name}/{rel}" for rel in _apply_templates(
-                    spa_path, ("vitest.config.js", "playwright.config.js"),
-                    overwrite=False, source_dir=_SPA_TEMPLATES_DIR,
-                )
-            ]
-            package = _merge_package_json(spa_path, overwrite=False)
-        else:
-            applied = _apply_templates(repo_path, _TOPUP_TEMPLATES, overwrite=False)
-            package = _merge_package_json(repo_path, overwrite=False)
-            ignored = _append_gitignore(repo_path)
+            if spa_path:
+                applied += [
+                    f"{Path(spa_path).name}/{rel}" for rel in _apply_templates(
+                        spa_path, ("vitest.config.js", "playwright.config.js"),
+                        overwrite=False, source_dir=_SPA_TEMPLATES_DIR,
+                    )
+                ]
+                package = _merge_package_json(spa_path)
+        ignored = _append_gitignore(repo_path)
+        database = _align_phpunit_database(root)
         if applied:
             notes.append("added " + ", ".join(applied))
         if package:
             notes.append(f"added {len(package)} package.json key(s)")
         if ignored:
             notes.append("extended .gitignore")
+        if database:
+            notes.append(f"phpunit.xml switched to the PostgreSQL test database {database}")
 
         return _ok({
             "created": False,
@@ -958,6 +1019,123 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
         })
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_laravel_bootstrap(%s) failed: %s", repo_path, exc)
+        return _err(exc)
+
+
+def _composer_requires(app: Path, package: str) -> bool:
+    """True when *app*'s composer.json requires *package* (require or require-dev)."""
+    try:
+        composer = json.loads((app / "composer.json").read_text(encoding="utf-8"))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.debug("Unreadable composer.json in %s: %s", app, exc)
+        return False
+    return any(package in (composer.get(key) or {}) for key in ("require", "require-dev"))
+
+
+def tool_starter_kit(repo_path: str, backend_dir: str, spa_dir: str) -> dict:
+    """
+    Add Nesti's starter kit to the Laravel API *backend_dir* of *repo_path*:
+    a sign-in + administration API (Sanctum login/logout, users, and roles /
+    permissions when the app has a role schema) with seeders and tests, plus a
+    Sakai PrimeVue SPA in the absent *spa_dir*.  Graph-internal.
+
+    Validates everything before writing anything: the SPA folder must be
+    absent, no starter contract file may exist, User must be editable and, when
+    seed data is written, DatabaseSeeder must accept the calls.  Sanctum and
+    the permission migrations are installed in the PHP sandbox only when missing.
+
+    result: {"variant": "spatie"|"custom"|"none", "files": [repo-relative paths], "reason": str}
+    """
+    try:
+        repo = Path(repo_path)
+        app = repo / backend_dir
+        spa = repo / spa_dir
+        if spa.exists():
+            return _err(f"{spa_dir}/ already exists; the starter kit only fills an absent SPA folder")
+
+        variant = starter_kit.role_schema(app)
+        overlays = starter_kit.backend_overlays(variant)
+        files = starter_kit.overlay_files(starter_kit.BACKEND_TEMPLATES, overlays)
+        stub = starter_kit.routes_stub(starter_kit.BACKEND_TEMPLATES, overlays)
+        spa_files = starter_kit.overlay_files(
+            starter_kit.SPA_TEMPLATES, ["base"] if variant == "none" else ["base", "roles"])
+        if stub is None:
+            return _err(f"starter kit template missing: routes.stub for {overlays}")
+        data = {rel: src for rel, src in files.items() if rel in starter_kit.DATA_FILES}
+        contract = {rel: src for rel, src in files.items() if rel not in starter_kit.DATA_FILES}
+        routes = app / _API_ROUTES_FILE
+        had_routes = routes.is_file()
+        conflicts = [rel for rel in contract if (app / rel).exists()]
+        if had_routes and "// Nesti starter kit" in routes.read_text(encoding="utf-8", errors="replace"):
+            conflicts.append(_API_ROUTES_FILE)
+        if conflicts:
+            return _err("starter kit files already exist: " + ", ".join(conflicts))
+
+        notes: list[str] = []
+        present = [rel for rel in data if (app / rel).exists()]
+        write_data = not present
+        if present:
+            notes.append(f"kept existing seed data ({', '.join(present)}); demo accounts may differ")
+        user = app / "app/Models/User.php"
+        seeder = app / "database/seeders/DatabaseSeeder.php"
+        if not user.is_file():
+            return _err("app/Models/User.php is missing")
+        try:
+            starter_kit.model_with_traits(user.read_text(encoding="utf-8"), starter_kit.MODEL_TRAITS[variant])
+            if write_data and seeder.is_file():
+                starter_kit.seeder_with_calls(seeder.read_text(encoding="utf-8"),
+                                              starter_kit.seeder_classes(variant))
+        except ValueError as exc:
+            return _err(exc)
+
+        migrations = app / "database" / "migrations"
+        install_api = not _composer_requires(app, "laravel/sanctum") or not had_routes
+        publish_sanctum = not install_api and not any(
+            migrations.glob("*_create_personal_access_tokens_table.php"))
+        publish_permission = variant == "spatie" and not any(
+            migrations.glob("*_create_permission_tables.php"))
+        if install_api or publish_sanctum or publish_permission:
+            passed, output = DockerRunner().run_starter_install(
+                str(app), install_api=install_api, publish_sanctum=publish_sanctum,
+                publish_permission=publish_permission,
+            )
+            if not passed:
+                return _err(f"starter kit install failed:\n{condense(output, 4000)}")
+            notes.append("installed " + ", ".join(name for name, flag in (
+                ("Sanctum (install:api)", install_api), ("the Sanctum migration", publish_sanctum),
+                ("the spatie/laravel-permission migration", publish_permission)) if flag))
+        if not routes.is_file() or not _composer_requires(app, "laravel/sanctum"):
+            return _err("starter kit install left no routes/api.php or no laravel/sanctum requirement")
+
+        if not had_routes:
+            # Drops install:api's /user closure stub: the starter's routes are the whole surface.
+            shutil.copyfile(_TEMPLATES_DIR / _API_ROUTES_FILE, routes)
+        starter_kit.append_routes(routes, stub)
+        written = [_API_ROUTES_FILE]
+        for rel, source in [*contract.items(), *(data.items() if write_data else ())]:
+            (app / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, app / rel)
+            written.append(rel)
+        if write_data and starter_kit.register_seeders(seeder, starter_kit.seeder_classes(variant)):
+            written.append("database/seeders/DatabaseSeeder.php")
+        if starter_kit.add_model_traits(user, starter_kit.MODEL_TRAITS[variant]):
+            written.append("app/Models/User.php")
+        changed = [(Path(backend_dir) / rel).as_posix() for rel in written]
+        for rel, source in spa_files.items():
+            (spa / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, spa / rel)
+            changed.append(f"{spa_dir}/{rel}")
+        return _ok({
+            "variant": variant,
+            "files": changed,
+            "reason": "; ".join([
+                f"starter kit ({variant} roles): {len(written)} backend file(s), "
+                f"Sakai SPA in {spa_dir}/ ({len(spa_files)} file(s))",
+                *notes,
+            ]),
+        })
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_starter_kit(%s) failed: %s", repo_path, exc)
         return _err(exc)
 
 

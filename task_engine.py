@@ -126,6 +126,7 @@ class TaskEngine:
             "run_frontend":   False,
             "is_laravel":        False,
             "bootstrapped":      False,
+            "bootstrap_files":   [],
             "has_api_routes":    False,
             "run_openapi":       False,
             "test_output":    "",

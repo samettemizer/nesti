@@ -79,7 +79,7 @@ from graph.tools import (
     tool_skill_fetch, tool_gitlab_clone, tool_gitlab_create_branch,
     tool_docker_run_tests, tool_gitlab_commit_and_push, tool_gitlab_open_mr,
     tool_issue_set_status, tool_detect_stack, tool_vitest_run_tests,
-    tool_playwright_run_tests, tool_laravel_bootstrap, tool_openapi_export,
+    tool_playwright_run_tests, tool_laravel_bootstrap, tool_openapi_export, tool_starter_kit,
     tool_skill_catalog_select, tool_skill_catalog_status, tool_quota_check,
     tool_memory_search_docs, tool_memory_find_similar, tool_memory_remember_solution,
     tool_memory_remember_failure, tool_memory_recall_failures,
@@ -90,10 +90,10 @@ from graph.tools import (
 from issue_domain import classify as classify_domain, detect as detect_domain, domain_catalog, selection
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
-from project_layout import LayoutError, clone_layout
+from project_layout import SCAFFOLD_BACKEND_DIR, LayoutError, clone_layout, spa_dir_for
 from conversation_store import ConversationStore
 from prompt_builder import (
-    build_plan_prompt, build_code_prompt, drop_injected_chunks, format_catalog_for_prompt,
+    build_plan_prompt, build_code_prompt, drop_injected_chunks, format_catalog_for_prompt, is_separated,
 )
 from layer_output import condense
 from telegram_notifier import notify as telegram_notify
@@ -295,6 +295,30 @@ def _committed_paths(root: str, relatives: list[str]) -> set[str]:
         logger.debug("No committed baseline for the stale files: %s", exc)
         return set()
     return {path for path in listed.split("\0") if path}
+
+
+def _commit_bootstrap(repo_path: str, message: str) -> list[str]:
+    """
+    Commit everything the bootstrap/starter changed in the clone, locally (the
+    MR push carries it).  Returns the committed repo-relative paths; ``[]``
+    when nothing changed or outside a git repository.
+
+    With the scaffold in HEAD, ``_prune_stale_files`` restores a scaffold file
+    a retry omits instead of deleting it, the MR shows a separate bootstrap
+    commit, and ``commit_and_push`` still sees the coder's diff against HEAD.
+    """
+    try:
+        with git.Repo(repo_path) as repo:
+            repo.git.add(A=True)
+            files = [p for p in repo.git.diff("--cached", "--name-only", "-z").split("\0") if p]
+            if files:
+                repo.index.commit(message)
+    except (git.InvalidGitRepositoryError, git.NoSuchPathError) as exc:
+        logger.debug("Bootstrap not committed: %s", exc)
+        return []
+    if files:
+        logger.info("Bootstrap committed locally: %d file(s)", len(files))
+    return files
 
 
 def _prune_stale_files(
@@ -562,14 +586,10 @@ _SPA_QUOTED_FILES = tuple(
     (name, name.rsplit(".", 1)[-1]) for name in (
         "src/main.ts", "src/main.js", "src/App.vue", "index.html", "vite.config.ts",
         "vite.config.js", "vitest.config.js", "vitest.config.ts", "playwright.config.js",
-        "playwright.config.ts", "package.json",
+        "playwright.config.ts", "package.json", "src/router/index.js", "src/router/index.ts",
+        "src/layout/AppMenu.vue", "src/service/api.js", "e2e/support/session.js",
     )
 )
-
-
-def _is_separated(layout: dict | None) -> bool:
-    """True for a layout whose backend lives in its own folder, not the clone root."""
-    return bool(layout) and layout.get("backend") not in (None, ".")
 
 
 def _domain_quotes(backend: Path, domain: dict | None) -> tuple[tuple[str, str], ...]:
@@ -619,7 +639,7 @@ def _repo_inventory(
         if not root.is_dir():
             return ""
 
-        if not _is_separated(layout):
+        if not is_separated(layout):
             lines = _inventory_lines(
                 root, "", scope, task_text, previous_files,
                 _INVENTORY_DIRS, _INVENTORY_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
@@ -633,7 +653,8 @@ def _repo_inventory(
                 and d.name != "Http" and f"app/{d.name}" not in dict(_BACKEND_INVENTORY_DIRS)
             ) if app.is_dir() else ()
             lines = _inventory_lines(
-                backend, layout["backend"] + "/", scope, task_text, previous_files,
+                backend, "" if layout["backend"] == "." else layout["backend"] + "/",
+                scope, task_text, previous_files,
                 _BACKEND_INVENTORY_DIRS + custom,
                 _BACKEND_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
                 extra_quoted=_domain_quotes(backend, domain) if scope != "frontend" else (),
@@ -867,7 +888,7 @@ def _layer_path(state: IssueState, side: str) -> str:
 def _prompt_layout(state: IssueState) -> dict | None:
     """The layout for the prompts, with the SPA's installed versions for a separated one."""
     layout = state.get("layout")
-    if not _is_separated(layout):
+    if not is_separated(layout):
         return layout
     versions: dict[str, str] = {}
     if layout.get("frontend"):
@@ -999,20 +1020,27 @@ def node_detect_domain(state: IssueState) -> dict:
 
 def node_bootstrap(state: IssueState) -> dict:
     """
-    Guarantee the clone is a Laravel 13 + Scramble + PrimeVue application.
+    Guarantee the clone holds a Laravel 13 + Scramble API, plus a SPA when the issue needs one.
 
-    A greenfield repository is scaffolded inside the PHP sandbox; an existing
-    Laravel app is topped up with the test-runner configs it lacks.  A
-    non-Laravel PHP project is a configuration error no model can fix by
-    rewriting its code, so this node mirrors node_setup's own failure
-    handling — remove the workspace and raise — and TaskEngine's crash net
-    reopens the issue with that reason without leaking a tempdir.
+    A greenfield repository gets the API scaffolded in ``webservice/`` inside
+    the PHP sandbox; an existing Laravel app is topped up with what it lacks.
+    A layout without a frontend gets the Sakai starter kit (``frontend/``, or
+    ``.frontend/`` beside a root app) when the issue asks for a user interface;
+    exactly one ``STARTER:`` line records that decision.  Whatever bootstrap
+    and starter changed is committed locally before coding.
+
+    A non-Laravel PHP project, or a starter kit that cannot apply, is a
+    configuration error no model can fix by rewriting its code, so this node
+    mirrors node_setup's own failure handling — remove the workspace and raise
+    — and TaskEngine's crash net reopens the issue with that reason without
+    leaking a tempdir.
     """
     logger.debug("→ node_bootstrap")
+    repo = state["repo_path"]
     layout = state.get("layout") or {}
     if layout.get("backend") is None and layout.get("frontend") is None:
-        result = tool_laravel_bootstrap(state["repo_path"])
-        layout = _INTEGRATED_LAYOUT
+        result = tool_laravel_bootstrap(os.path.join(repo, SCAFFOLD_BACKEND_DIR))
+        layout = {"backend": SCAFFOLD_BACKEND_DIR, "frontend": None}
     else:
         result = tool_laravel_bootstrap(
             _layer_path(state, "backend"),
@@ -1034,8 +1062,32 @@ def node_bootstrap(state: IssueState) -> dict:
             detail["mode"],
             detail["reason"],
         )
+
+    reasons = [detail["reason"]]
+    if layout["frontend"] == ".":
+        verdict, basis = "skipped", "integrated Vue app"
+    elif layout["frontend"]:
+        verdict, basis = "skipped", f"existing SPA {layout['frontend']}/"
+    else:
+        decision = classify_issue(state.get("subject", ""), state["issue"].get("description", "") or "")
+        if decision.scope != "backend" and decision.basis != "no signals":
+            spa_dir = spa_dir_for(layout["backend"])
+            starter = tool_starter_kit(repo, layout["backend"], spa_dir)
+            if not starter["success"]:
+                shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
+                raise RuntimeError(f"Starter kit failed: {starter['error']}")
+            layout = {**layout, "frontend": spa_dir}
+            reasons.append(starter["result"]["reason"])
+            verdict = f"added {spa_dir}/ (roles: {starter['result']['variant']})"
+            basis = f"issue asks for a user interface ({decision.evidence()})"
+        else:
+            verdict, basis = "skipped", f"no frontend request ({decision.evidence()})"
+    logger.info("STARTER: %s · GitLab issue #%s · %s", verdict, state["issue_id"], basis)
+
+    files = _commit_bootstrap(repo, "Nesti bootstrap\n\n" + "\n".join(reasons))
     logger.debug("← node_bootstrap (created=%s)", detail["created"])
-    return {"is_laravel": True, "bootstrapped": detail["created"], "layout": layout}
+    return {"is_laravel": True, "bootstrapped": detail["created"], "layout": layout,
+            "bootstrap_files": files}
 
 
 def node_load_skills(state: IssueState) -> dict:
@@ -1387,8 +1439,11 @@ def node_detect_stack(state: IssueState) -> dict:
     # route_after_code admits only responses with accepted file operations.
 
     layout = state.get("layout") or _INTEGRATED_LAYOUT
+    written = state.get("written_files")
+    # The bootstrap commit is part of the change: its files gate the layers too.
     result = tool_detect_stack(
-        state["repo_path"], state.get("written_files"),
+        state["repo_path"],
+        None if written is None else [*written, *state.get("bootstrap_files", [])],
         backend_dir=layout["backend"], frontend_dir=layout["frontend"] or "",
     )
     if not result["success"]:

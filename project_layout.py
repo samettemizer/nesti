@@ -3,9 +3,11 @@ Project layout resolution, ``state/layout.json`` persistence and the
 architecture scan behind ``nesti /arch``.
 
 ``NESTI_PROJECT_PATH`` names a project root holding one Laravel API folder and,
-optionally, one separate Vue SPA folder. A root Laravel app is resolved
-deterministically; anything else is resolved once by the active LLM provider
-and persisted. Never imports ``graph.tools`` (which imports this module).
+optionally, one separate Vue SPA folder. A root Laravel app (with an integrated
+Vue app or a ``.frontend`` SPA), Nesti's ``webservice/`` + ``frontend/`` scaffold
+and an empty root are resolved deterministically; anything else is resolved
+once by the active LLM provider and persisted. Never imports ``graph.tools``
+(which imports this module).
 """
 
 import json
@@ -19,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 STATE_DIR = Path(__file__).resolve().parent / "state"
 LAYOUT_FILE = STATE_DIR / "layout.json"
+
+SCAFFOLD_BACKEND_DIR = "webservice"
+SCAFFOLD_SPA_DIR = "frontend"
+ROOT_SPA_DIR = ".frontend"
 
 # The first twelve names copy graph.tools._STACK_SCAN_PRUNE (not imported: circular).
 _PRUNE = {
@@ -98,6 +104,17 @@ def _packages(pkg: dict) -> dict:
     return deps
 
 
+def spa_dir_for(backend: str) -> str:
+    """Conventional SPA folder for a backend folder: `.frontend` beside a root app, else `frontend`."""
+    return ROOT_SPA_DIR if backend == "." else SCAFFOLD_SPA_DIR
+
+
+def _is_spa(path: Path) -> bool:
+    """True for a real (non-symlink) folder without artisan whose package.json depends on vue."""
+    return (path.is_dir() and not path.is_symlink() and not (path / "artisan").exists()
+            and "vue" in _packages(_read_json(path / "package.json")))
+
+
 def _walk_files(path: Path) -> list[Path]:
     """Every file below *path*, pruning ``_PRUNE`` dirs; symlinked dirs not followed."""
     found: list[Path] = []
@@ -148,14 +165,21 @@ def _deterministic(root: Path) -> tuple[dict, str] | None:
     if (root / "artisan").is_file():
         if _has_plugin_vue(root):
             return {"backend": ".", "frontend": "."}, "root Laravel app with @vitejs/plugin-vue"
+        if _is_spa(root / ROOT_SPA_DIR):
+            return {"backend": ".", "frontend": ROOT_SPA_DIR}, "root Laravel app with a .frontend SPA"
         return {"backend": ".", "frontend": None}, "root Laravel app"
-    if not _visible(root):
+    visible = _visible(root)
+    if ((root / SCAFFOLD_BACKEND_DIR / "artisan").is_file()
+            and {p.name for p in visible if p.is_dir()} <= {SCAFFOLD_BACKEND_DIR, SCAFFOLD_SPA_DIR}):
+        spa = SCAFFOLD_SPA_DIR if _is_spa(root / SCAFFOLD_SPA_DIR) else None
+        return {"backend": SCAFFOLD_BACKEND_DIR, "frontend": spa}, "Nesti scaffold layout"
+    if not visible:
         return {"backend": None, "frontend": None}, "empty project"
     return None
 
 
 def deterministic_layout(root: Path) -> dict | None:
-    """Layout of a root Laravel app or an empty root; ``None`` when the LLM must decide."""
+    """Layout of a root Laravel app, Nesti's webservice/ scaffold or an empty root; ``None`` when the LLM must decide."""
     found = _deterministic(root)
     return found[0] if found else None
 
@@ -183,7 +207,7 @@ def validate_layout(root: Path, layout: dict) -> None:
     if backend == ".":
         if not (root / "artisan").is_file():
             raise LayoutError("backend '.' but the root has no artisan")
-        expected = "." if _has_plugin_vue(root) else None
+        expected = "." if _has_plugin_vue(root) else ROOT_SPA_DIR if _is_spa(root / ROOT_SPA_DIR) else None
         if frontend != expected:
             raise LayoutError(f"a root Laravel app has frontend {expected!r}, not {frontend!r}")
         return
@@ -311,19 +335,27 @@ def refresh_architecture(record: dict) -> dict:
 
 
 def clone_layout(clone: Path) -> dict:
-    """Layout of a pipeline clone: deterministic, else the saved layout validated against it."""
+    """
+    Layout of a pipeline clone: deterministic, else the saved layout validated against it.
+
+    A layout without a frontend gains the conventional SPA folder once Nesti's
+    starter kit has added it (an LLM-resolved backend folder included).
+    """
     layout = deterministic_layout(clone)
-    if layout is not None:
-        return layout
-    record = load_layout()
-    if not record:
-        raise LayoutError("layout.json not found: run nesti /arch")
-    layout = record.get("layout") or {}
-    try:
-        validate_layout(clone, layout)
-    except LayoutError as exc:
-        raise LayoutError(f"layout.json does not match the repository: {exc}; run nesti /arch") from exc
-    return {"backend": layout.get("backend"), "frontend": layout.get("frontend")}
+    if layout is None:
+        record = load_layout()
+        if not record:
+            raise LayoutError("layout.json not found: run nesti /arch")
+        saved = record.get("layout") or {}
+        try:
+            validate_layout(clone, saved)
+        except LayoutError as exc:
+            raise LayoutError(f"layout.json does not match the repository: {exc}; run nesti /arch") from exc
+        layout = {"backend": saved.get("backend"), "frontend": saved.get("frontend")}
+    if (layout["frontend"] is None and layout["backend"] is not None
+            and _is_spa(clone / spa_dir_for(layout["backend"]))):
+        layout["frontend"] = spa_dir_for(layout["backend"])
+    return layout
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +439,8 @@ def _tree(path: Path, rel: str, depth: int, layout: dict, domain_path: str | Non
 def _summary(backend_dir: str | None, frontend_dir: str | None,
              backend: dict | None, frontend: dict | None) -> list[str]:
     if backend is None:
-        return ["The project is empty; Nesti scaffolds a Laravel application with the first issue."]
+        return ["The project is empty: the first issue scaffolds the Laravel API in webservice/, and a "
+                "Sakai SPA in frontend/ when that issue asks for a user interface."]
     bp = "" if backend_dir == "." else f"{backend_dir}/"
     sentences = []
     if backend["style"] == "domain":
@@ -434,8 +467,7 @@ def _summary(backend_dir: str | None, frontend_dir: str | None,
         sentences.append("The backend follows Laravel's default application structure; "
                          "no custom domain or module layer was found.")
     if frontend and frontend.get("integrated"):
-        sentences.append("The Vue frontend is integrated in the Laravel app (resources/js), "
-                         "the layout of Nesti's own scaffold.")
+        sentences.append("The Vue frontend is integrated in the Laravel app (resources/js).")
     elif frontend:
         pk = frontend["packages"]
         parts = [f"vue {pk.get('vue', '?')}", f"primevue {pk.get('primevue', '?')}"]
@@ -445,7 +477,10 @@ def _summary(backend_dir: str | None, frontend_dir: str | None,
             parts.append("vue-router")
         if "pinia" in pk:
             parts.append("Pinia")
-        sentences.append(f"The frontend is a separate Vue SPA in `{frontend_dir}/` ({', '.join(parts)}).")
+        if backend_dir == ".":
+            sentences.append(f"Laravel API in the repository root, SPA in {frontend_dir}/ ({', '.join(parts)}).")
+        else:
+            sentences.append(f"The frontend is a separate Vue SPA in `{frontend_dir}/` ({', '.join(parts)}).")
     else:
         sentences.append("There is no frontend SPA.")
     return sentences

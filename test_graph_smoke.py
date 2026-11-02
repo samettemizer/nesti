@@ -52,6 +52,9 @@ from graph.edges import (                        # noqa: E402
 )
 from graph.tools import tool_detect_stack        # noqa: E402
 import skill_catalog                             # noqa: E402
+import project_layout                            # noqa: E402
+
+INTEGRATED = {"backend": ".", "frontend": "."}
 
 PHP_CODE = (
     "Implementation below.\n\n"
@@ -96,7 +99,7 @@ def reset_calls(issue_id: int) -> None:
     calls.update({
         "issue_id": issue_id, "issues": [], "docker": 0, "escalate": 0,
         "openapi": 0, "vitest": 0, "playwright": 0,
-        "bootstrap": [], "layers": [], "layer_paths": [],
+        "bootstrap": [], "starter": [], "layers": [], "layer_paths": [],
         "pushes": [], "mrs": [], "history_at_commit": None, "workspaces": [],
         "plan_prompts": [], "plan_systems": [], "code_prompts": [], "code_systems": [],
         "plan_messages": [], "code_messages": [],
@@ -133,7 +136,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
                 laravel_repo: bool = False, bootstrap_created: bool = False,
                 vue_repo: bool = False, plan_text: str = "",
                 doc_chunks=(), similar_solutions=(), recalled=(),
-                memory_error: str = "", expanded_doc_chunks=None):
+                memory_error: str = "", expanded_doc_chunks=None, layout=INTEGRATED):
     """
     Install fakes on graph.nodes (node functions resolve names at call time).
 
@@ -151,7 +154,14 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     prove that a backend change in a repository WITH .vue files still skips
     the frontend layers.  ``plan_text`` replaces the fake planner's answer
     (e.g. to declare a scope on line 1).
+
+    ``layout`` pins the clone layout (default: integrated, the layout the
+    root-relative fake code assumes); ``None`` resolves it for real.
     """
+    if layout is None:
+        nodes.clone_layout = project_layout.clone_layout
+    else:
+        nodes.clone_layout = lambda clone: dict(layout)
 
     def fake_set_status(issue_id, status, note=""):
         calls["issues"].append((issue_id, status, note))
@@ -185,6 +195,19 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             "output": "",
         }}
     nodes.tool_laravel_bootstrap = fake_bootstrap
+
+    def fake_starter(repo_path, backend_dir, spa_dir):
+        calls["starter"].append((repo_path, backend_dir, spa_dir))
+        spa = os.path.join(repo_path, spa_dir)
+        os.makedirs(os.path.join(spa, "src"), exist_ok=True)
+        with open(os.path.join(spa, "package.json"), "w") as handle:
+            json.dump({"dependencies": {"vue": "^3.5.0"}}, handle)
+        with open(os.path.join(spa, "src", "App.vue"), "w") as handle:
+            handle.write("<template><RouterView/></template>\n")
+        return {"success": True, "result": {
+            "variant": "spatie", "files": [f"{spa_dir}/package.json", f"{spa_dir}/src/App.vue"],
+            "reason": "starter kit (spatie roles)"}}
+    nodes.tool_starter_kit = fake_starter
 
     nodes.tool_gitlab_create_branch = lambda repo_path, issue_id, subject: {
         "success": True, "result": {"branch_name": f"feature/issue-{issue_id}-test"}}
@@ -700,7 +723,7 @@ check(f["is_laravel"] is True, "is_laravel set after a scaffold")
 print("\n── Scenario 18: bootstrap refusal → crash net, workspace removed ──")
 reset_calls(119)
 patch_tools(docker_outcomes=[True], code_responses=[LARAVEL_CODE])
-nodes.tool_laravel_bootstrap = lambda repo_path: {
+nodes.tool_laravel_bootstrap = lambda repo_path, spa_path="": {
     "success": False,
     "error": "repository has composer.json but no artisan: not a Laravel app "
              "and not greenfield"}
@@ -3055,7 +3078,7 @@ try:
     patch_tools(docker_outcomes=[True], code_responses=[
         "### FILE: backend/routes/api.php\n```php\n<?php\n```\n\n"
         "### FILE: backend/app/Http/Controllers/X.php\n```php\n<?php\n```\n\n"
-        "### FILE: frontend/src/components/X.vue\n```vue\n<template/>\n```\n"])
+        "### FILE: frontend/src/components/X.vue\n```vue\n<template/>\n```\n"], layout=None)
 
     def mono_clone(target_path):
         os.makedirs(target_path, exist_ok=True)
@@ -3076,6 +3099,7 @@ try:
           "Vitest and Playwright receive <clone>/frontend")
     check(calls["bootstrap"] == [(os.path.join(_clone, "backend"), os.path.join(_clone, "frontend"))],
           "node_bootstrap tops up backend/ with the SPA path")
+    check(calls["starter"] == [], "an existing SPA is continued, never re-scaffolded")
     check("REPOSITORY LAYOUT (strict)" in calls["code_systems"][0]
           and "primevue ^4.4.1" in calls["code_systems"][0],
           "the coding prompt carries the layout block with installed SPA versions")
@@ -3092,7 +3116,7 @@ def _domain_tree(root):
     _put(root, "artisan")
     _put(root, "composer.json", "{}")
     _put(root, "vite.config.js", "import vue from '@vitejs/plugin-vue';\n")
-    for d in ("Duyurular", "Members"):
+    for d in ("Announcements", "Members"):
         _put(root, f"app/Domains/{d}/Http/Controllers/{d}Controller.php",
              f"<?php\nnamespace App\\Domains\\{d}\\Http\\Controllers;\n// SENTINEL_{d}\n")
         _put(root, f"app/Domains/{d}/Models/X.php", "<?php\n")
@@ -3103,7 +3127,7 @@ def _domain_tree(root):
     _put(root, "routes/api.php",
          "<?php\nuse App\\Http\\Controllers\\TestController;\n"
          "Route::get('/test', [TestController::class, '__invoke']);\n"
-         "foreach (['Duyurular', 'Members'] as $d) {\n"
+         "foreach (['Announcements', 'Members'] as $d) {\n"
          "    require __DIR__.'/domains/'.$d.'.php';\n}\n")
 
 
@@ -3118,11 +3142,11 @@ _domain_probe = tempfile.mkdtemp(prefix="nesti-domain-")
 try:
     _domain_tree(_domain_probe)
     _cat = issue_domain.domain_catalog(Path(_domain_probe))
-    check([d["name"] for d in _cat["domains"]] == ["Duyurular", "Members"]
-          and _cat["domains"][0]["route_files"] == ["routes/domains/Duyurular.php"],
+    check([d["name"] for d in _cat["domains"]] == ["Announcements", "Members"]
+          and _cat["domains"][0]["route_files"] == ["routes/domains/Announcements.php"],
           "domain catalog lists the domains and their route files")
-    _dec = issue_domain.detect("Add GET /duyurular/aktif", "", _cat)
-    check(_dec.domain == "Duyurular" and not _dec.ask, "a route under a domain prefix decides it")
+    _dec = issue_domain.detect("Add GET /announcements/active", "", _cat)
+    check(_dec.domain == "Announcements" and not _dec.ask, "a route under a domain prefix decides it")
     check(issue_domain.detect("Add POST /api/members/{id}/notes", "", _cat).domain == "Members",
           "a leading api/ segment is ignored")
     _dec = issue_domain.detect("Add a GET /test endpoint", "", _cat)
@@ -3130,15 +3154,15 @@ try:
           "a route outside every domain asks")
     _dec = issue_domain.detect("Domain: Members", "", _cat)
     check(_dec.domain == "Members" and _dec.basis == "stated in the issue", "a stated domain decides it")
-    check(issue_domain.detect("Add GET /duyurular/x and GET /members/y", "", _cat).ask,
+    check(issue_domain.detect("Add GET /announcements/x and GET /members/y", "", _cat).ask,
           "routes spanning two domains ask")
     _dec = issue_domain.detect("Show the active announcements", "", _cat)
     check(_dec.domain is None and not _dec.ask, "no route or domain leaves it to the classifier")
-    _opts = ["Duyurular", "Members"]
+    _opts = ["Announcements", "Members"]
     check(issue_domain.parse_answer("2", _opts) == "Members"
-          and issue_domain.parse_answer("`Duyurular` lütfen", _opts) == "Duyurular"
-          and issue_domain.parse_answer("Members veya Duyurular", _opts) is None
-          and issue_domain.parse_answer("> 1. `Duyurular`\n\nMembers", _opts) == "Members",
+          and issue_domain.parse_answer("`Announcements` please", _opts) == "Announcements"
+          and issue_domain.parse_answer("Members or Announcements", _opts) is None
+          and issue_domain.parse_answer("> 1. `Announcements`\n\nMembers", _opts) == "Members",
           "answers parse by number or single name, ignoring the quoted question")
 finally:
     shutil.rmtree(_domain_probe, ignore_errors=True)
@@ -3173,24 +3197,24 @@ def _domain_run(n, subject, answer=None, classify_reply=None, answer_raises=Fals
 
 
 f = _domain_run(3401, "Add a GET /test endpoint")
-check(calls["asks"] == [["Duyurular", "Members"]]
+check(calls["asks"] == [["Announcements", "Members"]]
       and f["failure_reason"].startswith("Paused for a domain question")
       and not calls["bootstrap"] and not calls["plan_prompts"]
       and not any(os.path.exists(w) for w in calls["workspaces"]),
       "an unowned route asks once, pauses and cleans up before bootstrap or planning")
-f = _domain_run(3402, "Add GET /duyurular/aktif")
-check(not calls["asks"] and f["domain"]["name"] == "Duyurular", "a domain route decides without asking")
-check(all("This issue belongs to the Duyurular domain" in s and "routes/domains/Duyurular.php" in s
+f = _domain_run(3402, "Add GET /announcements/active")
+check(not calls["asks"] and f["domain"]["name"] == "Announcements", "a domain route decides without asking")
+check(all("This issue belongs to the Announcements domain" in s and "routes/domains/Announcements.php" in s
           for s in (calls["plan_systems"][0], calls["code_systems"][0])),
       "plan and code prompts carry the architecture block for the chosen domain")
-check("Current app/Domains/Duyurular/Http/Controllers/DuyurularController.php (complete)"
+check("Current app/Domains/Announcements/Http/Controllers/AnnouncementsController.php (complete)"
       in calls["plan_prompts"][0] and "MembersController.php (complete)" not in calls["plan_prompts"][0],
       "the plan prompt quotes the chosen domain's files only")
-_one = '```json\n{"domains": ["Duyurular"], "reason": "announcements"}\n```'
+_one = '```json\n{"domains": ["Announcements"], "reason": "announcements"}\n```'
 f = _domain_run(3403, "Show only active announcements", classify_reply=_one)
-check(not calls["asks"] and f["domain"]["name"] == "Duyurular", "a single classified domain is accepted")
+check(not calls["asks"] and f["domain"]["name"] == "Announcements", "a single classified domain is accepted")
 f = _domain_run(3404, "Show only active announcements",
-                classify_reply='{"domains": ["Duyurular", "Members"], "reason": "both"}')
+                classify_reply='{"domains": ["Announcements", "Members"], "reason": "both"}')
 check(calls["asks"] and "2 plausible domains" in f["failure_reason"],
       "two plausible classified domains ask")
 f = _domain_run(3405, "Add a GET /test endpoint", answer="Members")
@@ -3201,23 +3225,23 @@ check(f["domain"]["name"] == "" and not calls["asks"], "a frontend issue skips t
 
 http = _IssueHTTP()
 http.add_issue(40, ["nesti", "nesti::in-progress"])
-issue_domain.ask(http.client(), 40, ["Duyurular", "Members"])
+issue_domain.ask(http.client(), 40, ["Announcements", "Members"])
 check(http.issues[40]["labels"] == ["nesti", "nesti::pause"] and len(http.notes[40]) == 1
       and http.notes[40][0]["body"].startswith(issue_domain.QUESTION)
       and issue_domain.QUESTION_MARKER in http.notes[40][0]["body"],
       "ask posts one verified question and pauses the issue")
 check(issue_domain.reconcile(http.client())["waiting"] == [40], "an unanswered question waits")
-http.add_note(40, "> 1. `Duyurular`\n\nMembers", author=99)
+http.add_note(40, "> 1. `Announcements`\n\nMembers", author=99)
 check(issue_domain.reconcile(http.client())["resumed"] == [40]
       and http.issues[40]["labels"] == ["nesti"] and len(http.notes[40]) == 2,
       "a matching reply resumes the issue without a new note")
 http.add_note(40, "Run failed", author=15)
-check(issue_domain.answer(http.client().list_notes(40), 15, ["Duyurular", "Members"]) == "Members",
+check(issue_domain.answer(http.client().list_notes(40), 15, ["Announcements", "Members"]) == "Members",
       "the answer survives a later Nesti note")
 http2 = _IssueHTTP()
 http2.add_issue(41, ["nesti", "nesti::pause"])
-http2.add_note(41, issue_domain.format_question(["Duyurular", "Members"]), author=15)
-http2.add_note(41, "bilmiyorum", author=99)
+http2.add_note(41, issue_domain.format_question(["Announcements", "Members"]), author=15)
+http2.add_note(41, "no idea", author=99)
 http2.add_issue(42, ["nesti", "nesti::pause"])
 http2.add_note(42, "pausing this manually", author=99)
 r = issue_domain.reconcile(http2.client())
@@ -3226,6 +3250,420 @@ check(r["asked"] == [41] and len(http2.notes[41]) == 3 and "previous reply" in h
 check(r["resumed"] == r["waiting"] == r["errors"] == []
       and http2.issues[42]["labels"] == ["nesti", "nesti::pause"] and len(http2.notes[42]) == 1,
       "a manual pause is never lifted or commented")
+
+# ═════ Scenario 35: webservice scaffold, .frontend SPA, starter kit, empty repository ═════
+print("\n── Scenario 35: starter kit, layouts and empty-repository start ──")
+import starter_kit  # noqa: E402
+
+_VUE_PACKAGE = json.dumps({"dependencies": {"vue": "^3.5.0"}})
+# Laravel 13 skeleton files, verbatim.
+_L13_USER = """<?php
+
+namespace App\\Models;
+
+// use Illuminate\\Contracts\\Auth\\MustVerifyEmail;
+use Database\\Factories\\UserFactory;
+use Illuminate\\Database\\Eloquent\\Attributes\\Fillable;
+use Illuminate\\Database\\Eloquent\\Attributes\\Hidden;
+use Illuminate\\Database\\Eloquent\\Factories\\HasFactory;
+use Illuminate\\Foundation\\Auth\\User as Authenticatable;
+use Illuminate\\Notifications\\Notifiable;
+
+#[Fillable(['name', 'email', 'password'])]
+#[Hidden(['password', 'remember_token'])]
+class User extends Authenticatable
+{
+    /** @use HasFactory<UserFactory> */
+    use HasFactory, Notifiable;
+
+    /**
+     * Get the attributes that should be cast.
+     *
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'email_verified_at' => 'datetime',
+            'password' => 'hashed',
+        ];
+    }
+}
+"""
+_L13_SEEDER = """<?php
+
+namespace Database\\Seeders;
+
+use App\\Models\\User;
+use Illuminate\\Database\\Console\\Seeds\\WithoutModelEvents;
+use Illuminate\\Database\\Seeder;
+
+class DatabaseSeeder extends Seeder
+{
+    use WithoutModelEvents;
+
+    /**
+     * Seed the application's database.
+     */
+    public function run(): void
+    {
+        // User::factory(10)->create();
+
+        User::factory()->create([
+            'name' => 'Test User',
+            'email' => 'test@example.com',
+        ]);
+    }
+}
+"""
+_L13_PHPUNIT = """<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="APP_ENV" value="testing"/>
+        <env name="CACHE_STORE" value="array"/>
+        <env name="DB_CONNECTION" value="sqlite"/>
+        <env name="DB_DATABASE" value=":memory:"/>
+        <env name="DB_URL" value=""/>
+        <env name="SESSION_DRIVER" value="array"/>
+    </php>
+</phpunit>
+"""
+_INSTALL_API_ROUTES = """<?php
+
+use Illuminate\\Http\\Request;
+use Illuminate\\Support\\Facades\\Route;
+
+Route::get('/user', function (Request $request) {
+    return $request->user();
+})->middleware('auth:sanctum');
+"""
+
+
+def _skeleton(root, require=None, migrations=(), routes=None):
+    """A Laravel 13 skeleton app (no sandbox needed) at *root*."""
+    _put(root, "artisan")
+    _put(root, "composer.json", json.dumps({"require": {"php": "^8.4", **(require or {})}}))
+    _put(root, "app/Models/User.php", _L13_USER)
+    _put(root, "database/seeders/DatabaseSeeder.php", _L13_SEEDER)
+    for name, body in migrations:
+        _put(root, f"database/migrations/{name}", body)
+    if routes is not None:
+        _put(root, "routes/api.php", routes)
+
+
+def _tree_snapshot(root):
+    return {str(p.relative_to(root)): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()}
+
+
+def _has_route(text, path):
+    return re.search(rf"['\"]/?{path}['\"]", text) is not None
+
+
+_installs = []
+
+
+def _fake_starter_install(self, app_path, *, install_api, publish_sanctum, publish_permission):
+    _installs.append((install_api, publish_sanctum, publish_permission))
+    if install_api:
+        _put(app_path, "routes/api.php", _INSTALL_API_ROUTES)
+        composer_path = Path(app_path, "composer.json")
+        composer = json.loads(composer_path.read_text())
+        composer["require"]["laravel/sanctum"] = "^4.0"
+        composer_path.write_text(json.dumps(composer))
+    return True, "installed"
+
+
+def _starter(root, backend=".", spa=".frontend"):
+    _installs.clear()
+    with patch.object(dr.docker, "from_env", return_value=None), \
+            patch.object(DockerRunner, "run_starter_install", _fake_starter_install):
+        return _gt.tool_starter_kit(root, backend, spa)
+
+
+_PAT = ("2026_01_01_000000_create_personal_access_tokens_table.php", "<?php\n")
+_PERMISSION = ("2026_01_01_000001_create_permission_tables.php", "<?php\n")
+_CUSTOM_ROLES = ("2026_01_01_000002_create_roles_and_permissions_tables.php",
+                 "<?php\nSchema::create('roles', fn ($t) => $t->id());\n"
+                 "Schema::create(\"permissions\", fn ($t) => $t->id());\n")
+_EXISTING_ROUTES = ("<?php\n\nuse Illuminate\\Support\\Facades\\Route;\n\n"
+                    "Route::get('/health', fn () => ['ok' => true]);\n")
+
+with tempfile.TemporaryDirectory(prefix="nesti-s35-") as s35:
+    a, b, c, d, e = (os.path.join(s35, n) for n in "abcde")
+    _put(a, "artisan")
+    _put(a, ".frontend/package.json", _VUE_PACKAGE)
+    _put(b, "artisan")
+    _put(b, ".frontend/package.json", json.dumps({"dependencies": {"react": "^19.0.0"}}))
+    _put(c, "webservice/artisan")
+    _put(c, "webservice/composer.json", "{}")
+    _put(c, "frontend/package.json", _VUE_PACKAGE)
+    _put(d, "webservice/artisan")
+    _put(d, "docs/index.md")
+    _put(e, "api/artisan")
+    _put(e, "api/composer.json", "{}")
+    _put(e, "frontend/package.json", _VUE_PACKAGE)
+    check(project_layout.deterministic_layout(Path(a)) == {"backend": ".", "frontend": ".frontend"},
+          "root artisan + .frontend Vue SPA → ('.', '.frontend')")
+    check(project_layout.deterministic_layout(Path(b)) == {"backend": ".", "frontend": None},
+          "root artisan + a .frontend without vue → ('.', None)")
+    check(project_layout.deterministic_layout(Path(c)) == {"backend": "webservice", "frontend": "frontend"},
+          "webservice/artisan + frontend SPA → ('webservice', 'frontend')")
+    check(project_layout.deterministic_layout(Path(d)) is None,
+          "webservice/artisan beside an extra docs/ folder is not deterministic")
+    _saved = (project_layout.STATE_DIR, project_layout.LAYOUT_FILE)
+    project_layout.STATE_DIR = Path(s35, "state")
+    project_layout.LAYOUT_FILE = project_layout.STATE_DIR / "layout.json"
+    try:
+        project_layout.save_layout({"schema": 1, "layout": {"backend": ".", "frontend": None}})
+        _root_layout = project_layout.clone_layout(Path(a))
+        project_layout.save_layout({"schema": 1, "layout": {"backend": "api", "frontend": None}})
+        check(_root_layout == {"backend": ".", "frontend": ".frontend"}
+              and project_layout.clone_layout(Path(e)) == {"backend": "api", "frontend": "frontend"},
+              "clone_layout fills the starter SPA into a saved layout without a frontend")
+    finally:
+        project_layout.STATE_DIR, project_layout.LAYOUT_FILE = _saved
+    try:
+        project_layout.validate_layout(Path(a), {"backend": ".", "frontend": ".frontend"})
+        _valid = True
+    except project_layout.LayoutError:
+        _valid = False
+    check(_valid, "validate_layout accepts a saved ('.', '.frontend')")
+
+    g = os.path.join(s35, "gates")
+    _put(g, "artisan")
+    _put(g, "composer.json", "{}")
+    _put(g, "app/Models/User.php", "<?php\n")
+    _put(g, ".frontend/package.json", _VUE_PACKAGE)
+    _put(g, ".frontend/src/App.vue", "<template/>")
+    _gate = lambda files: tool_detect_stack(g, files, ".", ".frontend")["result"]  # noqa: E731
+    r = _gate([".frontend/src/views/About.vue"])
+    check(r["run_frontend"] and not r["run_phpunit"], "root backend: a .frontend change runs the frontend layers only")
+    r = _gate(["app/Models/Post.php"])
+    check(r["run_phpunit"] and not r["run_frontend"], "root backend: an app/ change runs PHPUnit only")
+    r = _gate([".frontend/src/x.vue", "app/Models/Post.php"])
+    check(r["run_phpunit"] and r["run_frontend"], "root backend: both sides run every layer")
+    _inv = nodes._repo_inventory(g, layout={"backend": ".", "frontend": ".frontend"})
+    check("- app/Models/: User.php" in _inv and "./app" not in _inv and ".frontend/src/App.vue" in _inv,
+          "a root backend's inventory lists app/… and .frontend/src/App.vue")
+
+    for name, files, expected in (
+        ("spatie", {"composer.json": json.dumps({"require": {"spatie/laravel-permission": "^6.0"}})}, "spatie"),
+        ("custom", {"composer.json": "{}", f"database/migrations/{_CUSTOM_ROLES[0]}": _CUSTOM_ROLES[1]}, "custom"),
+        ("none", {"composer.json": "{}"}, "none"),
+    ):
+        for rel, body in files.items():
+            _put(os.path.join(s35, "roles", name), rel, body)
+        check(starter_kit.role_schema(Path(s35, "roles", name)) == expected, f"role_schema → {expected}")
+
+    _user = Path(s35, "User.php")
+    _user.write_text(_L13_USER)
+    check(starter_kit.add_model_traits(_user, starter_kit.MODEL_TRAITS["spatie"]), "add_model_traits changes the skeleton User")
+    _traited = _user.read_text()
+    check("\nuse Laravel\\Sanctum\\HasApiTokens;\n" in _traited
+          and "\nuse Spatie\\Permission\\Traits\\HasRoles;\n" in _traited
+          and "    use HasRoles, HasApiTokens, HasFactory, Notifiable;\n" in _traited,
+          "both trait imports land and the class uses HasRoles, HasApiTokens, HasFactory, Notifiable")
+    check(not starter_kit.add_model_traits(_user, starter_kit.MODEL_TRAITS["spatie"])
+          and _user.read_text() == _traited, "add_model_traits is idempotent")
+    try:
+        starter_kit.model_with_traits("<?php\n\nnamespace App\\Models;\n", starter_kit.MODEL_TRAITS["none"])
+        _raised = False
+    except ValueError:
+        _raised = True
+    check(_raised, "a model without class User raises ValueError")
+    _seeder = Path(s35, "DatabaseSeeder.php")
+    _seeder.write_text(_L13_SEEDER)
+    _first = starter_kit.register_seeders(_seeder, ["UserSeeder"])
+    _seeded = _seeder.read_text()
+    check(_first and _seeded.count("UserSeeder::class") == 1
+          and not starter_kit.register_seeders(_seeder, ["UserSeeder"]) and _seeder.read_text() == _seeded,
+          "register_seeders inserts one call into the skeleton seeder, then is a no-op")
+
+    # tool_starter_kit: none variant on the bare skeleton (install:api runs in the fake sandbox).
+    none_app = os.path.join(s35, "none")
+    _skeleton(none_app)
+    r = _starter(none_app)
+    _routes = Path(none_app, "routes/api.php").read_text()
+    check(r["success"] and r["result"]["variant"] == "none" and _installs and _installs[0][0],
+          "none variant: install:api runs when Sanctum and routes/api.php are missing")
+    check(_has_route(_routes, "login") and _has_route(_routes, "users") and not _has_route(_routes, "roles")
+          and "Route::get('/user'" not in _routes,
+          "none variant: /login and /users routed, no /roles, install:api's /user stub gone")
+    check("use HasApiTokens, HasFactory, Notifiable;" in Path(none_app, "app/Models/User.php").read_text()
+          and "UserSeeder::class" in Path(none_app, "database/seeders/DatabaseSeeder.php").read_text(),
+          "none variant: User gets HasApiTokens and DatabaseSeeder calls UserSeeder")
+    _spa_pkg = json.loads(Path(none_app, ".frontend/package.json").read_text())
+    check(Path(none_app, ".frontend/src/views/pages/Users.vue").is_file()
+          and not Path(none_app, ".frontend/src/views/pages/Roles.vue").exists()
+          and _spa_pkg["devDependencies"]["@playwright/test"] == "1.50.0",
+          "none variant: the SPA has Users.vue, no Roles.vue, and pins @playwright/test 1.50.0")
+
+    spatie_app = os.path.join(s35, "spatie")
+    _skeleton(spatie_app, {"laravel/sanctum": "^4.0", "spatie/laravel-permission": "^6.0"},
+              (_PAT, _PERMISSION), _EXISTING_ROUTES)
+    r = _starter(spatie_app)
+    _routes = Path(spatie_app, "routes/api.php").read_text()
+    check(r["success"] and r["result"]["variant"] == "spatie" and _installs == [],
+          "spatie variant with Sanctum, routes and both migrations needs no sandbox")
+    check("Route::get('/health', fn () => ['ok' => true]);" in _routes and _has_route(_routes, "roles")
+          and "HasRoles" in Path(spatie_app, "app/Models/User.php").read_text()
+          and Path(spatie_app, ".frontend/src/views/pages/Roles.vue").is_file(),
+          "spatie variant keeps the existing route, adds /roles, HasRoles and Roles.vue")
+
+    custom_app = os.path.join(s35, "custom")
+    _skeleton(custom_app, {"laravel/sanctum": "^4.0"}, (_PAT, _CUSTOM_ROLES), _EXISTING_ROUTES)
+    r = _starter(custom_app)
+    check(r["success"] and r["result"]["variant"] == "custom"
+          and _has_route(Path(custom_app, "routes/api.php").read_text(), "roles")
+          and Path(custom_app, ".frontend/src/views/pages/Roles.vue").is_file(),
+          "custom variant routes /roles and adds Roles.vue")
+
+    clash_app = os.path.join(s35, "clash")
+    _skeleton(clash_app)
+    _put(clash_app, "app/Http/Controllers/Api/AuthController.php", "<?php\n// mine\n")
+    _before = _tree_snapshot(clash_app)
+    r = _starter(clash_app)
+    check(not r["success"] and "AuthController.php" in r["error"] and _tree_snapshot(clash_app) == _before,
+          "an existing starter contract file fails before any file or SPA is written")
+
+    kept_app = os.path.join(s35, "kept")
+    _skeleton(kept_app)
+    _put(kept_app, "database/seeders/UserSeeder.php", "<?php\n// custom demo users\n")
+    r = _starter(kept_app)
+    check(r["success"]
+          and Path(kept_app, "database/seeders/UserSeeder.php").read_text() == "<?php\n// custom demo users\n"
+          and Path(kept_app, "database/seeders/DatabaseSeeder.php").read_text() == _L13_SEEDER,
+          "an existing UserSeeder is kept byte-identical and DatabaseSeeder stays unchanged")
+    check(not _starter(kept_app)["success"], "an existing SPA folder refuses the starter kit")
+
+    pg = os.path.join(s35, "pg")
+    _put(pg, ".env.example", "APP_NAME=Laravel\nDB_CONNECTION=pgsql\nDB_HOST=127.0.0.1\nDB_DATABASE=alt\n")
+    _put(pg, "phpunit.xml", _L13_PHPUNIT)
+    check(_gt._align_phpunit_database(Path(pg)) == "alt_test"
+          and dr._pgsql_settings(pg)["DB_DATABASE"] == "alt_test",
+          "a pgsql app's phpunit.xml runs on <DB_DATABASE>_test")
+    my = os.path.join(s35, "mysql")
+    _put(my, ".env.example", "DB_CONNECTION=mysql\nDB_DATABASE=alt\n")
+    _put(my, "phpunit.xml", _L13_PHPUNIT)
+    check(_gt._align_phpunit_database(Path(my)) == "" and Path(my, "phpunit.xml").read_text() == _L13_PHPUNIT
+          and dr._pgsql_settings(my) is None, "a mysql app's phpunit.xml stays byte-identical")
+    already = os.path.join(s35, "already")
+    _put(already, ".env.example", "DB_CONNECTION=pgsql\nDB_DATABASE=alt\n")
+    _put(already, "phpunit.xml", _PG_XML)
+    check(_gt._align_phpunit_database(Path(already)) == "" and Path(already, "phpunit.xml").read_text() == _PG_XML,
+          "a phpunit.xml already on pgsql is left alone")
+
+    topup = os.path.join(s35, "topup")
+    _skeleton(topup)
+    _put(topup, "vite.config.js", "import laravel from 'laravel-vite-plugin';\n")
+    with patch.object(dr.docker, "from_env", return_value=None), \
+            patch.object(DockerRunner, "run_scramble_install", lambda self, path: (True, "")):
+        r = tool_laravel_bootstrap(topup)
+    check(r["success"] and not Path(topup, "vitest.config.js").exists()
+          and Path(topup, "tests/Feature/OpenApiDocumentationTest.php").is_file(),
+          "top-up of a root app without plugin-vue succeeds and writes no Vue test config")
+
+    from gitlab_client import GitLabClient  # noqa: E402
+    _bare = _git.Repo.init(Path(s35, "origin.git"), bare=True)
+    with patch.dict(os.environ, {"GITLAB_URL": "https://gitlab.test", "GITLAB_TOKEN": "t",
+                                 "GITLAB_USE_SSH": "true", "GITLAB_REPO_SSH": str(Path(s35, "origin.git")),
+                                 "GITLAB_DEFAULT_BRANCH": "main"}):
+        _first_clone = GitLabClient().clone(str(Path(s35, "first")))
+        check(_first_clone.active_branch.name == "main" and len(list(_bare.iter_commits("main"))) == 1,
+              "an empty repository gets one empty commit on main and the clone sits on main")
+        GitLabClient().clone(str(Path(s35, "second")))
+        check(len(list(_bare.iter_commits("main"))) == 1, "cloning a non-empty repository adds no commit")
+
+
+def _git_clone(setup):
+    """A fake clone: *setup* writes the tree, then one initial commit (empty for greenfield)."""
+    def clone(target_path):
+        os.makedirs(target_path, exist_ok=True)
+        calls["workspaces"].append(os.path.dirname(target_path))
+        setup(target_path)
+        with _git.Repo.init(target_path) as repo:
+            repo.git.add(A=True)
+            repo.index.commit("Initial commit")
+        return {"success": True, "result": {"repo_path": target_path}}
+    return clone
+
+
+def _scaffold_bootstrap(repo_path, spa_path=""):
+    calls["bootstrap"].append(repo_path)
+    created = not os.path.isfile(os.path.join(repo_path, "artisan"))
+    if created:
+        for rel, body in (("artisan", ""), ("composer.json", "{}"), ("routes/api.php", "<?php\n"),
+                          ("app/Models/User.php", "<?php\n")):
+            _put(repo_path, rel, body)
+    return {"success": True, "result": {"created": created, "mode": "scaffold" if created else "top-up",
+                                        "reason": "scaffolded" if created else "already fully wired",
+                                        "output": ""}}
+
+
+def _starter_run(n, description, setup, code, **kw):
+    """A graph run on a git-initialised clone; returns (final, clone, commits seen at push)."""
+    reset_calls(n)
+    patch_tools(docker_outcomes=[True], code_responses=[code], layout=None, **kw)
+    nodes.tool_gitlab_clone = _git_clone(setup)
+    nodes.tool_laravel_bootstrap = _scaffold_bootstrap
+    commits, push = [], nodes.tool_gitlab_commit_and_push
+
+    def counting_push(repo_path, branch_name, message):
+        with _git.Repo(repo_path) as repo:
+            commits.append(len(list(repo.iter_commits())))
+        return push(repo_path, branch_name, message)
+    nodes.tool_gitlab_commit_and_push = counting_push
+    final = compiled.invoke(initial(n, "Add an About page", description), config={"recursion_limit": 60})
+    return final, os.path.join(calls["workspaces"][0], "repo"), commits
+
+
+_ABOUT = ("### FILE: {spa}/src/views/About.vue\n```vue\n<template><h1>About</h1></template>\n```\n\n"
+          "### FILE: {spa}/e2e/about.spec.js\n```js\n// playwright\n```\n")
+_root_laravel = lambda root: (_put(root, "artisan"), _put(root, "composer.json", "{}"))  # noqa: E731
+
+f, _clone, _commits = _starter_run(3501, "Scope: frontend\n\nShow an About page.", lambda root: None,
+                                   _ABOUT.format(spa="frontend"))
+_paths = dict(calls["layer_paths"])
+check(calls["bootstrap"] == [os.path.join(_clone, "webservice")]
+      and calls["starter"] == [(_clone, "webservice", "frontend")],
+      "greenfield frontend issue: webservice/ scaffold, then the starter kit in frontend/")
+check(f["layout"] == {"backend": "webservice", "frontend": "frontend"}
+      and {"webservice/artisan", "webservice/routes/api.php", "frontend/src/App.vue"} <= set(f["bootstrap_files"]),
+      "greenfield frontend issue: final layout and the committed bootstrap files")
+check(_commits == [2], "the clone holds the initial and the bootstrap commit before commit_and_push")
+check(_paths.get("docker") == os.path.join(_clone, "webservice")
+      and _paths.get("vitest") == _paths.get("playwright") == os.path.join(_clone, "frontend")
+      and f["mr_url"], "PHPUnit runs in webservice/, Vitest + Playwright in frontend/, and the MR opens")
+
+f, _clone, _commits = _starter_run(
+    3502, "Scope: backend\n\nAdd GET /api/health.", lambda root: None,
+    "### FILE: webservice/app/Http/Controllers/HealthController.php\n```php\n<?php\n```\n")
+check(not calls["starter"] and f["layout"] == {"backend": "webservice", "frontend": None}
+      and calls["vitest"] == 0 and f["mr_url"],
+      "greenfield backend issue: no starter kit, no SPA, no Vitest")
+
+f, _clone, _commits = _starter_run(3503, "Scope: frontend\n\nShow an About page.", _root_laravel,
+                                   _ABOUT.format(spa=".frontend"))
+check(calls["starter"] == [(_clone, ".", ".frontend")] and f["layout"] == {"backend": ".", "frontend": ".frontend"},
+      "root Laravel app + frontend issue: the starter kit goes into .frontend/")
+
+f, _clone, _commits = _starter_run(
+    3504, "Scope: backend\n\nAdd GET /api/health.", _root_laravel,
+    "### FILE: app/Http/Controllers/HealthController.php\n```php\n<?php\n```\n")
+check(f["bootstrap_files"] == [] and _commits == [1], "a top-up that changes nothing makes no bootstrap commit")
+
+f = run(3505, "Add an About page", "Scope: frontend\n\nShow an About page.",
+        docker_outcomes=[True], code_responses=[VUE_CODE], laravel_repo=True)
+check(calls["starter"] == [], "an integrated Vue app never gets the starter kit")
 
 # ═════ Scenario 13: TaskEngine thin wrapper ═════
 print("\n── Scenario 13: TaskEngine.run_once() ──")

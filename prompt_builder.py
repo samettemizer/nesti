@@ -469,7 +469,9 @@ _TEST_SPA_LAYERS = """\
 - Vitest and then Playwright run when the change touches the SPA folder. Playwright builds the
   SPA (`npm run build`) and serves it with `vite preview` on http://127.0.0.1:4173; the Laravel
   API is NOT running. Every spec stubs each /api request it triggers with page.route(...) and
-  realistic JSON shaped like the backend's API Resources. Never declare e2e/nesti-fixtures.json."""
+  realistic JSON shaped like the backend's API Resources. Never declare e2e/nesti-fixtures.json.
+  Reuse the SPA's existing e2e helpers (for example a signed-in session helper in e2e/support/)
+  instead of re-implementing sign-in in each spec."""
 
 _TEST_LOCATORS = """\
 - Use precise Playwright locators: getByRole('radio', { name: 'Done', exact: true }),
@@ -578,26 +580,38 @@ def _task_scope_block(scope: str, documentation: str) -> str:
     return "\n".join(lines)
 
 
-def _is_separated(layout: dict | None) -> bool:
-    """True for a layout whose Laravel API lives in its own folder, not the clone root."""
-    return bool(layout) and layout.get("backend") not in (None, ".")
+def is_separated(layout: dict | None) -> bool:
+    """True for a layout whose Vue code (if any) is not integrated in the Laravel app."""
+    return bool(layout) and layout.get("backend") is not None and layout.get("frontend") != "."
 
 
 def _layout_block(layout: dict, spa_versions: dict) -> str:
     """The REPOSITORY LAYOUT block for a separated layout."""
     backend, frontend = layout["backend"], layout.get("frontend")
-    text = (
-        f"REPOSITORY LAYOUT (strict): The Laravel API lives in {backend}/; every backend path in "
-        "these instructions (app/…, routes/…, database/…, tests/…) is relative to it — write "
-        f"FILE paths as {backend}/app/…. "
-    )
+    if backend == ".":
+        text = (
+            "REPOSITORY LAYOUT (strict): The Laravel API lives in the repository root: PHP paths keep "
+            "their plain Laravel form (app/…, routes/…, tests/…). "
+        )
+    else:
+        text = (
+            f"REPOSITORY LAYOUT (strict): The Laravel API lives in {backend}/; every backend path in "
+            "these instructions (app/…, routes/…, database/…, tests/…) is relative to it — write "
+            f"FILE paths as {backend}/app/…. "
+        )
     if not frontend:
         return text + "This project has no SPA: never create .vue, JavaScript or CSS files."
-    text += (
-        f"The Vue SPA lives in {frontend}/, a separate application (FILE paths {frontend}/src/…, "
-        f"{frontend}/e2e/…); it reaches the API only over HTTP. Never put Vue, JavaScript or CSS "
-        f"into {backend}/."
-    )
+    if backend == ".":
+        text += (
+            f"The SPA lives in {frontend}/; every Vue/JS/CSS/test file goes under {frontend}/, never "
+            "into resources/js or resources/css of the Laravel app."
+        )
+    else:
+        text += (
+            f"The Vue SPA lives in {frontend}/, a separate application (FILE paths {frontend}/src/…, "
+            f"{frontend}/e2e/…); it reaches the API only over HTTP. Never put Vue, JavaScript or CSS "
+            f"into {backend}/."
+        )
     if spa_versions:
         text += (
             " Installed SPA dependencies: "
@@ -638,7 +652,7 @@ def _planning_system_prompt(
     scope: str, documentation: str, layout: dict | None = None, domain: dict | None = None,
 ) -> str:
     """The planning system prompt for *scope* (already normalised)."""
-    separated = _is_separated(layout)
+    separated = is_separated(layout)
     standards = [_PLAN_COMMON_STANDARDS]
     if scope != "frontend":
         standards += [_PLAN_BACKEND_STANDARDS, _SEEDER_REMOVAL_STANDARDS]
@@ -672,7 +686,7 @@ def _coding_system_prompt(
     scope: str, documentation: str, layout: dict | None = None, domain: dict | None = None,
 ) -> str:
     """The coding system prompt for *scope* (already normalised)."""
-    separated = _is_separated(layout)
+    separated = is_separated(layout)
     spa = separated and bool(layout.get("frontend"))
     testing = ["TESTING (layers follow the files you create, modify or delete):"]
     if scope != "frontend":

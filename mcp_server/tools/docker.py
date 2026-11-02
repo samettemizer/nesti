@@ -98,14 +98,16 @@ def openapi_export(workspace_path: str) -> dict:
 @app.tool()
 def laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
     """
-    Ensure repo_path is a Laravel 13 + Scramble + PrimeVue application.
+    Ensure repo_path is a Laravel 13 API with Scramble.
     Three outcomes: a greenfield directory (no artisan, no composer.json) is
-    scaffolded (mode "scaffold"); an existing Laravel app (artisan present) is
-    topped up with only the missing configs and Scramble wiring (mode "top-up");
-    a non-Laravel PHP project (composer.json without artisan) is refused with
-    success=False rather than scaffolded over.
+    scaffolded as an API-only Laravel app — Sanctum, Scramble and
+    spatie/laravel-permission, no Vue (mode "scaffold"); an existing Laravel
+    app (artisan present) is topped up with only the missing configs and
+    Scramble wiring (mode "top-up"); a non-Laravel PHP project (composer.json
+    without artisan) is refused with success=False rather than scaffolded over.
     Returns created: bool, mode: str, reason: str, and output: str.
     spa_path (separated layout, repo_path = the Laravel API folder) tops up
     that Vue SPA folder with the Vitest/Playwright configs and package.json keys.
+    The SPA starter kit is not exposed over MCP.
     """
     return tool_laravel_bootstrap(repo_path, spa_path)

@@ -4,8 +4,8 @@ Docker runner – executes generated code inside an isolated sandbox container.
 Responsibilities:
 - Write generated files into a temporary workspace directory.
 - Mount that workspace into a Docker container.
-- Run one of four container recipes — Laravel/PHPUnit tests, OpenAPI (Scramble)
-  export, greenfield bootstrap, or Scramble install — inside the container.
+- Run one of the container recipes — Laravel/PHPUnit tests, OpenAPI (Scramble)
+  export, greenfield bootstrap, Scramble install or starter-kit install — inside the container.
 - Return stdout/stderr and a boolean success flag.
 
 The AI developer never runs code on the host machine directly.
@@ -136,8 +136,9 @@ _BOOTSTRAP_COMMAND_TEMPLATE = [
         "php artisan key:generate --force;",
         "touch database/database.sqlite;",
         "php artisan install:api --no-interaction;",
-        "composer require --no-interaction dedoc/scramble;",
-        "php artisan vendor:publish --provider=\"Dedoc\\\\Scramble\\\\ScrambleServiceProvider\" --tag=\"scramble-config\"",
+        "composer require --no-interaction dedoc/scramble spatie/laravel-permission;",
+        "php artisan vendor:publish --provider=\"Dedoc\\\\Scramble\\\\ScrambleServiceProvider\" --tag=\"scramble-config\";",
+        "php artisan vendor:publish --provider=\"Spatie\\\\Permission\\\\PermissionServiceProvider\"",
     ]),
 ]
 
@@ -152,6 +153,21 @@ _SCRAMBLE_INSTALL_COMMAND = [
         "php artisan vendor:publish --provider=\"Dedoc\\\\Scramble\\\\ScrambleServiceProvider\" --tag=\"scramble-config\"",
     ]),
 ]
+
+# Starter-kit prerequisites, appended by DockerRunner.run_starter_install per boolean flag.
+_STARTER_INSTALL_BASE = " ".join([
+    "set -e;",
+    _CAPTURE_OWNER,
+    _TRAP_OWNER,
+    "composer install --no-interaction --prefer-dist --no-progress;",
+    "[ -f .env ] || cp .env.example .env;",
+    "php artisan key:generate --force;",
+])
+_STARTER_INSTALL_API = "php artisan install:api --without-migration-prompt --no-interaction;"
+_STARTER_PUBLISH_SANCTUM = "php artisan vendor:publish --tag=sanctum-migrations --no-interaction;"
+_STARTER_PUBLISH_PERMISSION = (
+    "php artisan vendor:publish --provider=\"Spatie\\\\Permission\\\\PermissionServiceProvider\" --no-interaction;"
+)
 
 # Boost commands register only under APP_ENV=local; the cache paths keep the
 # app's own bootstrap/cache untouched.
@@ -239,8 +255,9 @@ class DockerRunner:
 
     def run_bootstrap(self, repo_path: str) -> tuple[bool, str]:
         """
-        Scaffold a greenfield Laravel app (pinned to ``NESTI_LARAVEL_VERSION``)
-        plus the Scramble package into *repo_path*.
+        Scaffold a greenfield Laravel API (pinned to ``NESTI_LARAVEL_VERSION``)
+        into *repo_path*: Sanctum via ``install:api``, Scramble and
+        spatie/laravel-permission with their published config and migration.
 
         Returns ``(success, output)`` — success is True on exit code 0.
         """
@@ -258,6 +275,25 @@ class DockerRunner:
         return self._run(
             repo_path, _SCRAMBLE_INSTALL_COMMAND, self.bootstrap_timeout, "scramble-install"
         )
+
+    def run_starter_install(
+        self, app_path: str, *, install_api: bool, publish_sanctum: bool, publish_permission: bool
+    ) -> tuple[bool, str]:
+        """
+        Install the starter kit's prerequisites into the existing Laravel app at *app_path*:
+        ``install:api`` (Sanctum + routes/api.php), the Sanctum migration and the
+        spatie/laravel-permission migration + config, each only when flagged.
+        Flags are booleans so no caller-supplied text reaches the shell.
+
+        Returns ``(success, output)`` — success is True on exit code 0.
+        """
+        steps = [step for flag, step in (
+            (install_api, _STARTER_INSTALL_API),
+            (publish_sanctum, _STARTER_PUBLISH_SANCTUM),
+            (publish_permission, _STARTER_PUBLISH_PERMISSION),
+        ) if flag]
+        script = " ".join([_STARTER_INSTALL_BASE, *steps])
+        return self._run(app_path, ["bash", "-lc", script], self.bootstrap_timeout, "starter-install")
 
     def run_boost_script(self, app_path: str, script: str, *, network: bool) -> tuple[bool, str]:
         """
