@@ -39,9 +39,15 @@ die() { echo "install.sh: $*" >&2; exit 1; }
 
 # --- 1. Prerequisites --------------------------------------------------------
 STEP="prerequisites"
-for bin in docker git curl python3; do
+for bin in docker git curl; do
     command -v "$bin" >/dev/null 2>&1 || die "'$bin' is required but not installed."
 done
+# Host Python: active venv, then ./.venv, then PATH, then the
+use_python() { [ -n "$1" ] && "$@" -c 'import sys; sys.exit(sys.version_info < (3, 6))' </dev/null >/dev/null 2>&1 && PYTHON=("$@"); }
+use_python "${VIRTUAL_ENV:+$VIRTUAL_ENV/Scripts/python.exe}" || use_python "${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}" \
+    || use_python "$PWD/.venv/Scripts/python.exe" || use_python "$PWD/.venv/bin/python" \
+    || use_python python3 || use_python python || use_python py -3 \
+    || die "no working Python 3 found (tried \$VIRTUAL_ENV, .venv, python3, python, py -3). Install Python 3 or create .venv; on Windows, turn off the Store 'App execution aliases' for python.exe/python3.exe."
 docker info >/dev/null 2>&1 || die "'docker info' failed: start Docker or add your user to the docker group."
 if command -v docker-compose >/dev/null 2>&1; then
     COMPOSE=(docker-compose)
@@ -56,17 +62,17 @@ STEP=".env"
 # Prints the value of the first KEY= line of FILE (empty when absent).
 file_get() {
     [ -f "$2" ] || return 0
-    python3 - "$2" "$1" <<'PY'
+    "${PYTHON[@]}" - "$2" "$1" <<'PY'
 import re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
 m = re.search(rf"^{re.escape(sys.argv[2])}=(.*)$", text, re.M)
-print(m.group(1) if m else "")
+sys.stdout.write(m.group(1) if m else "")  # no newline
 PY
 }
 
 # Replaces the first KEY= line of .env, else appends it; the value travels in the environment.
 env_set() {
-    NESTI_ENV_VALUE="$2" python3 - "$ENV_FILE" "$1" <<'PY'
+    NESTI_ENV_VALUE="$2" "${PYTHON[@]}" - "$ENV_FILE" "$1" <<'PY'
 import os, re, sys
 path, key, value = sys.argv[1], sys.argv[2], os.environ["NESTI_ENV_VALUE"]
 text = open(path, encoding="utf-8").read()
@@ -75,7 +81,7 @@ if pattern.search(text):
     text = pattern.sub(lambda _: f"{key}={value}", text, count=1)
 else:
     text = text.rstrip("\n") + f"\n{key}={value}\n"
-open(path, "w", encoding="utf-8").write(text)
+open(path, "w", encoding="utf-8", newline="\n").write(text)
 PY
 }
 
@@ -200,7 +206,7 @@ env_set GITLAB_DEFAULT_BRANCH "$GITLAB_DEFAULT_BRANCH"
 env_set GITLAB_ISSUE_LABEL "$GITLAB_ISSUE_LABEL"
 env_set NESTI_PROJECT_PATH "$NESTI_PROJECT_PATH"
 env_set NESTI_CONSUMER_PRIORITY "$NESTI_CONSUMER_PRIORITY"
-GITLAB_HOST=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname)' "$GITLAB_URL")
+GITLAB_HOST=$("${PYTHON[@]}" -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname, end="")' "$GITLAB_URL")
 GITLAB_REPO_HTTPS="$GITLAB_URL/$GITLAB_PROJECT_PATH.git"
 GITLAB_REPO_SSH="git@$GITLAB_HOST:$GITLAB_PROJECT_PATH.git"
 env_set GITLAB_REPO_HTTPS "$GITLAB_REPO_HTTPS"
@@ -232,7 +238,7 @@ env_set TELEGRAM_CHAT_ID "$REPLY_VALUE"
 STEP="GitLab check"
 NESTI_GL_TOKEN=$GITLAB_TOKEN NESTI_GL_URL=$GITLAB_URL NESTI_GL_PROJECT=$GITLAB_PROJECT_PATH \
 NESTI_GL_LABEL=$GITLAB_ISSUE_LABEL NESTI_GL_VERIFY=$(default_for GITLAB_SSL_VERIFY) \
-python3 - <<'PY' || die "GitLab check failed."
+"${PYTHON[@]}" - <<'PY' || die "GitLab check failed."
 import json, os, ssl, sys, urllib.error, urllib.parse, urllib.request
 
 base = os.environ["NESTI_GL_URL"] + "/api/v4"
