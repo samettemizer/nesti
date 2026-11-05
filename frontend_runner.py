@@ -15,7 +15,7 @@ is not an ordinary test failure.
 
 Container lifecycle
 ───────────────────
-The detach → ``wait(timeout=…)`` → ``logs()`` → ``finally: remove(force=True)``
+The detach → ``wait(timeout=…)`` → ``logs()`` → ``finally: remove(force=True, v=True)``
 sequence is copied deliberately from DockerRunner rather than using the
 shorter blocking ``containers.run(remove=True)`` form:
 
@@ -25,7 +25,11 @@ shorter blocking ``containers.run(remove=True)`` form:
     forever.  Playwright makes that a realistic failure mode, not a theoretical
     one, which is why the timeout has to be enforceable here.
   • The ``finally`` block still guarantees no sandbox container survives the
-    call, which is the property Absolute Rule 8 protects.
+    call, which is the property Absolute Rule 8 protects.  ``v=True`` also
+    deletes the anonymous volume mounted at ``<workdir>/node_modules``: npm
+    installs there, never into the host workspace, so host mount options
+    (``noexec`` breaks esbuild's postinstall) and stale host packages cannot
+    affect a run.
 
 The command comes from each image's CMD, so the install/build/test recipe
 lives in exactly one place: the Dockerfile.
@@ -43,6 +47,7 @@ mismatched report — is an ordinary failure carrying the original logs.
 
 import logging
 import os
+import secrets
 import tempfile
 from pathlib import Path
 
@@ -192,13 +197,16 @@ class FrontendRunner:
         }
         if result_directory is not None:
             volumes[os.path.abspath(result_directory)] = {"bind": RESULTS_MOUNT, "mode": "rw"}
+        name = f"nesti-fe-{secrets.token_hex(6)}"
         container = None
         try:
             container = self.client.containers.run(
                 image=image,
+                name=name,
                 # No command: each sandbox image's CMD owns its recipe.
                 volumes=volumes,
                 working_dir=self.workdir,
+                mounts=[docker.types.Mount(f"{self.workdir}/node_modules", None, type="volume")],
                 remove=False,
                 stdout=True,
                 stderr=True,
@@ -236,8 +244,8 @@ class FrontendRunner:
             logger.error("Unexpected Docker error while running %s: %s", layer, exc)
             return False, str(exc), None
         finally:
-            if container is not None:
-                try:
-                    container.remove(force=True)
-                except Exception:  # pylint: disable=broad-except
-                    pass
+            # By name: containers.run can raise after creating the container.
+            try:
+                self.client.containers.get(name).remove(force=True, v=True)
+            except Exception:  # pylint: disable=broad-except
+                pass

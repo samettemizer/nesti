@@ -89,7 +89,10 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
    timeout enforceable — do not "simplify" either runner to a blocking
    `containers.run(remove=True)`, which cannot take a run-duration timeout.
    A pgsql PHPUnit run's `nesti-pg-*` sidecar (with its volume) and
-   `nesti-run-*` network are removed in the same way, on every path.
+   `nesti-run-*` network are removed in the same way, on every path. Both
+   frontend sandboxes install npm dependencies into an anonymous volume at
+   `/app/node_modules` (never the host workspace — a `noexec` host mount
+   breaks esbuild); `remove(force=True, v=True)` deletes it with the container.
 9. **Every function in `graph/tools.py` must return `{"success": bool, ...}`.**
 10. **Never store secrets in code** — all credentials come from `.env`.
 11. **`node_cleanup` must always run** — it is the final node in every path.

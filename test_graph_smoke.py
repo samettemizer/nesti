@@ -505,7 +505,7 @@ try:
     check(r["stack"] == "fullstack" and r["run_phpunit"] is True,
           "composer.json alone flips vue → fullstack")
 
-    # node_modules is populated by the Vitest sandbox from attempt 2 onward and
+    # MCP callers may pass host projects with installed node_modules, and
     # Vue component libraries ship .vue files — those must never be detected.
     os.makedirs(os.path.join(probe, "node_modules", "primevue"))
     open(os.path.join(probe, "node_modules", "primevue", "Vendor.vue"), "w").close()
@@ -2290,6 +2290,7 @@ def runner_case(root, exit_code, report=None, logs="sandbox log", error=None, st
     """Run the real runner against a report-writing detached fake container."""
     results = []
     removed = []
+    names = []
     waits = []
     class Container:
         def wait(self, timeout):
@@ -2299,11 +2300,19 @@ def runner_case(root, exit_code, report=None, logs="sandbox log", error=None, st
             return {"StatusCode": exit_code}
         def logs(self, **kwargs):
             return logs.encode()
-        def remove(self, force):
-            removed.append(force)
+    class Created:
+        def __init__(self, name):
+            self.name = name
+        def remove(self, force, v):
+            removed.append((self.name, force, v))
     def start(**kwargs):
         check(kwargs["detach"] is True and kwargs["remove"] is False,
               "runner retains enforceable detached lifecycle")
+        check(kwargs["name"].startswith("nesti-fe-"), "sandbox container carries a nesti- name")
+        names.append(kwargs["name"])
+        check([(m["Target"], m["Type"], m["Source"]) for m in kwargs["mounts"]]
+              == [("/app/node_modules", "volume", None)],
+              "node_modules installs into an anonymous container volume")
         directory = next(path for path, mount in kwargs["volumes"].items()
                          if mount["bind"] == "/nesti-results")
         results.append(directory)
@@ -2315,12 +2324,14 @@ def runner_case(root, exit_code, report=None, logs="sandbox log", error=None, st
                 report if isinstance(report, str) else json.dumps(report), encoding="utf-8")
         return Container()
     with patch.object(fr.docker, "from_env",
-                      return_value=SimpleNamespace(containers=SimpleNamespace(run=start))):
+                      return_value=SimpleNamespace(containers=SimpleNamespace(run=start, get=Created))):
         runner = fr.FrontendRunner()
         result = runner.run_playwright(root)
     check(all(not Path(directory).exists() for directory in results),
           "result mount removed after outcome")
-    check(removed == ([] if start_error else [True]), "every started container removed forcibly")
+    # Even when run() raises (start failed after create), removal goes by name.
+    check(removed == [(names[0], True, True)],
+          "every created container removed forcibly by name with its anonymous volume")
     if not start_error:
         check(waits == [runner.timeout], "container waits with configured timeout")
     return result
@@ -2354,6 +2365,9 @@ with tempfile.TemporaryDirectory(prefix="nesti-runner-") as root:
     check(runner_case(root, 0, ready_report)["passed"], "ready setup reaches ordinary green browser gate")
     result = runner_case(root, 1, start_error=docker.errors.ImageNotFound("missing image"))
     check(not result["passed"] and result["fixture_request"] is None, "missing image remains ordinary failure")
+    result = runner_case(root, 1, start_error=docker.errors.APIError("start failed after create"))
+    check(not result["passed"] and result["fixture_request"] is None,
+          "start failure after create is an ordinary failure, container still removed")
     import builtins
     original_open = builtins.open
     def denied_report(path, mode="r", *args, **kwargs):

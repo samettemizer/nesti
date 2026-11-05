@@ -69,10 +69,9 @@ _ISSUE_LIST_LIMIT = 25
 _REQUEST_TIMEOUT = 15  # seconds, matches the clients' own timeouts
 
 # Directories never treated as project source during stack detection.
-# ``node_modules`` is the load-bearing entry: the Vitest sandbox mounts the
-# workspace read-write, so from the second attempt onward the tree contains
-# installed dependencies — and Vue component libraries ship thousands of .vue
-# files.  Without pruning, every retry would report has_vue=True and the walk
+# ``node_modules`` is the load-bearing entry: MCP callers may pass host projects
+# with installed dependencies — and Vue component libraries ship thousands of .vue
+# files.  Without pruning, every scan would report has_vue=True and the walk
 # would crawl the whole dependency tree.
 _STACK_SCAN_PRUNE = frozenset({
     ".git", "node_modules", "vendor", "dist", "build", ".next", "out",
