@@ -42,8 +42,9 @@ def project_from_remote(remote: str, gitlab_url: str) -> str:
     if (prefix := gitlab.path.strip("/")) and path.startswith(prefix + "/"):
         path = path[len(prefix) + 1:]
     path = path.removesuffix(".git").strip("/")
-    if "/" not in path:
-        raise ValueError(f"the git remote path {path!r} is not namespace/project")
+    # GitLab paths are [A-Za-z0-9_.-] segments; anything else (e.g. `*`, `[ab]`) would glob Redis keys.
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", path):
+        raise ValueError(f"the git remote path {path!r} is not a GitLab namespace/project path")
     return path
 
 

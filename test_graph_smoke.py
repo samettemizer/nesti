@@ -3836,6 +3836,14 @@ try:
     _refused = _bind_tools.tool_issue_list_pending()
     check(not _refused["success"] and "nesti mcp" in _refused["error"],
           "a client without a resolvable project is refused, never served .env's project")
+    _globbed = []
+    for _remote in ("https://gitlab.test/acme/*", "git@gitlab.test:acme/[ab].git"):
+        gitlab_project.bind_client(_remote)
+        with patch("graph.tools.get_semantic_memory") as _memory:
+            _globbed.append((_bind_tools.tool_memory_forget_episodes(1, "r")["success"],
+                             _memory.called))
+    check(_globbed == [(False, False), (False, False)],
+          "a wildcard remote is refused before Redis, so it cannot delete other projects' episodes")
 finally:
     gitlab_project._bound = None
 

@@ -322,8 +322,8 @@ class SemanticMemory:
             return 0
         try:
             # Run-scoped pattern bounded by max_attempts × 4 layers: a handful of keys,
-            # never a database-wide scan in practice. Identities hold no glob characters
-            # (GitLab hosts and paths, validated run ids).
+            # never a database-wide scan in practice. Identities hold no glob characters:
+            # project_from_remote and the .env project are GitLab paths, run ids are validated.
             keys = self._redis.keys(f"{EPISODE_PREFIX}{project}:{int(issue_id)}:{run_id}:*")
             return int(self._redis.delete(*keys)) if keys else 0
         except Exception as exc:  # pylint: disable=broad-except
