@@ -4,7 +4,7 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 annotated-doc==0.0.5
 anyio==4.15.1
-certifi==2026.7.22
+# certifi==2026.7.22
 click==8.5.0
 cloudpickle==3.1.2
 filelock==4.0.12

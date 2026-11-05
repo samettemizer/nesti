@@ -1,5 +1,7 @@
 anthropic>=0.25.0
 requests>=2.31.0
+# Exclude compromised emSign trust roots (GHSA-6q48-6c7w-9gw2).
+certifi>=2026.10.19
 python-dotenv>=1.0.0
 docker>=7.0.0
 gitpython>=3.1.40

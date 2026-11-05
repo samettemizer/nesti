@@ -1,4 +1,4 @@
-"""Offline startup and skill-index regressions. Run: python test_startup.py."""
+"""Startup regressions; Linux images with FASTEMBED_CACHE_PATH also check real embedding memory."""
 
 import hashlib
 import io
@@ -162,6 +162,34 @@ with tempfile.TemporaryDirectory() as directory:
           and memory.upsert_chunks.call_args.args[0][0]["doc_hash"]
           == hashlib.sha256(guide.read_bytes()).hexdigest(),
           "changed documents are replaced with their current hash before polling")
+
+
+# Use the image's cached model, never download weights during a regression check.
+if sys.platform == "linux" and os.environ.get("FASTEMBED_CACHE_PATH"):
+    import resource
+
+    import numpy as np
+    from fastembed import TextEmbedding
+
+    with patch.dict(os.environ, {"NESTI_MEMORY_ENABLED": "true"}):
+        bounded = embedding.Embedder()
+    bounded._model = TextEmbedding(
+        model_name=bounded.model_name, local_files_only=True,
+    )
+    passages = [
+        f"Document {i}: " + "Validate the request before updating the database transaction. " * 80
+        for i in range(65)
+    ]
+    vectors = bounded.embed_documents(passages)
+    check(len(vectors) == len(passages) and all(len(v) == bounded.dim for v in vectors),
+          "large document input keeps every vector, including the final partial batch")
+    for index in (0, 7, 64):
+        expected = next(bounded._model.embed([passages[index]], batch_size=1))
+        check(np.allclose(vectors[index], expected, rtol=1e-4, atol=1e-5),
+              f"batched document {index} matches standalone inference without reordering")
+    peak_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    check(peak_kib < 1024 * 1024,
+          f"real embedding stays below 1 GiB peak RSS (observed {peak_kib / 1024:.0f} MiB)")
 
 
 _record = logging.LogRecord(
