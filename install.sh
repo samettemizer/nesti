@@ -15,6 +15,11 @@ Configures Nesti for one GitLab project and starts its containers.
           environment variable of the same name, then .env, then .env.example)
   --help  show this help
 
+Windows: run in Git Bash with Docker Desktop's WSL 2 Linux engine.
+Checkout paths accept C:/..., C:\..., or /c/...; containers use the
+equivalent /run/desktop/mnt/host/c/... path, saved in .env.
+The Windows launcher preserves Docker arguments in new shell sessions.
+
 Example (non-interactive):
   GITLAB_TOKEN=... GITLAB_PROJECT_PATH=group/project ./install.sh --yes
 EOF
@@ -36,6 +41,16 @@ INTERACTIVE=0
 if [ "$YES" -eq 0 ] && [ -t 0 ]; then INTERACTIVE=1; fi
 
 die() { echo "install.sh: $*" >&2; exit 1; }
+
+WINDOWS=0
+case "$(uname -s)" in
+    MINGW*|MSYS*)
+        WINDOWS=1
+        # Docker arguments and saved Linux paths must bypass Git Bash conversion.
+        export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+        export MSYS2_ENV_CONV_EXCL="${MSYS2_ENV_CONV_EXCL:+$MSYS2_ENV_CONV_EXCL;}NESTI_ENV_VALUE;NESTI_PROJECT_PATH"
+        ;;
+esac
 
 # --- 1. Prerequisites --------------------------------------------------------
 STEP="prerequisites"
@@ -85,16 +100,26 @@ open(path, "w", encoding="utf-8", newline="\n").write(text)
 PY
 }
 
-# Default for KEY: environment variable, then .env, then .env.example.
+# Default for KEY: environment variable, then .env, then .env.example; placeholders fall through to empty.
 default_for() {
     local key=$1 value
     value=${!key-}
-    [ -n "$value" ] || value=$(file_get "$key" "$ENV_FILE")
-    [ -n "$value" ] || value=$(file_get "$key" .env.example)
+    is_placeholder "$key" "$value" && value=$(file_get "$key" "$ENV_FILE")
+    is_placeholder "$key" "$value" && value=$(file_get "$key" .env.example)
+    is_placeholder "$key" "$value" && value=""
     printf '%s' "$value"
 }
 
-is_placeholder() { [ -z "$1" ] || [[ "$1" == your_* ]]; }
+# is_placeholder KEY VALUE: empty for any key; the old sample host for GITLAB_URL;
+# a your_* sample only for secrets and the Telegram chat id (real names may start with your_).
+is_placeholder() {
+    [ -n "$2" ] || return 0
+    case $1 in
+        GITLAB_URL) [ "${2%/}" = https://gitlab.yourdomain.com ] ;;
+        *_TOKEN|*_API_KEY|TELEGRAM_CHAT_ID) [[ "$2" == your_* ]] ;;
+        *) return 1 ;;
+    esac
+}
 
 # ask KEY "Prompt" [validator] → sets REPLY_VALUE; re-asks interactively, dies with --yes.
 ask() {
@@ -122,12 +147,12 @@ ask_secret() {
     while :; do
         value=""
         if [ "$INTERACTIVE" -eq 1 ]; then
-            if is_placeholder "$current"; then state="not set"; else state="set, Enter keeps it"; fi
+            if is_placeholder "$key" "$current"; then state="not set"; else state="set, Enter keeps it"; fi
             read -r -s -p "$prompt ($state): " value || value=""
             echo
         fi
         value=${value:-$current}
-        if [ -z "$required" ] || ! is_placeholder "$value"; then
+        if [ -z "$required" ] || ! is_placeholder "$key" "$value"; then
             REPLY_VALUE=$value
             return 0
         fi
@@ -149,10 +174,24 @@ yes_no() {
 valid_url() { [[ "$1" =~ ^https?://[^/[:space:]]+ ]]; }
 valid_project() { [[ "$1" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]]; }
 valid_nonempty() { [ -n "$1" ]; }
+# Convert saved Docker Desktop paths back to local paths when re-running setup.
+local_project_path() {
+    if [ "$WINDOWS" -eq 1 ]; then
+        cygpath -m -- "${1#/run/desktop/mnt/host}"
+    else
+        printf '%s\n' "$1"
+    fi
+}
 valid_path() {
-    [[ "$1" == /* ]] || { echo "  must be an absolute path" >&2; return 1; }
-    [ ! -L "$1" ] || { echo "  must not be a symlink" >&2; return 1; }
-    [ ! -e "$1" ] || [ -d "$1" ] || { echo "  exists and is not a directory" >&2; return 1; }
+    local path
+    path=$(local_project_path "$1") || return 1
+    if [ "$WINDOWS" -eq 1 ]; then
+        [[ "$path" == [A-Za-z]:/* ]] || { echo "  must be an absolute local drive path (C:/... or /c/...)" >&2; return 1; }
+    else
+        [[ "$path" == /* ]] || { echo "  must be an absolute path" >&2; return 1; }
+    fi
+    [ ! -L "$path" ] || { echo "  must not be a symlink" >&2; return 1; }
+    [ ! -e "$path" ] || [ -d "$path" ] || { echo "  exists and is not a directory" >&2; return 1; }
 }
 valid_consumers() {
     local name seen=" "
@@ -173,7 +212,7 @@ chmod 600 "$ENV_FILE"
 
 # --- 3. Prompts ----------------------------------------------------------------
 STEP="prompts"
-ask GITLAB_URL "GitLab URL" valid_url
+ask GITLAB_URL "GitLab URL (e.g. https://gitlab.com or https://gitlab.yourdomain.com)" valid_url
 GITLAB_URL=${REPLY_VALUE%/}
 ask_secret GITLAB_TOKEN "GitLab token (api scope)" required
 GITLAB_TOKEN=$REPLY_VALUE
@@ -188,15 +227,23 @@ PROJECT_NAME=${GITLAB_PROJECT_PATH##*/}
 if [ -z "${NESTI_PROJECT_PATH-}" ]; then
     # The saved path only stays the default while it still names this project.
     current_path=$(file_get NESTI_PROJECT_PATH "$ENV_FILE")
+    if [ -n "$current_path" ]; then current_path=$(local_project_path "$current_path"); fi
     if [ -n "$current_path" ] && [ "$(basename "$current_path")" = "$PROJECT_NAME" ]; then
         NESTI_PROJECT_PATH=$current_path
     else
         NESTI_PROJECT_PATH="$(dirname "$PWD")/$PROJECT_NAME"
     fi
 fi
+NESTI_PROJECT_PATH=$(local_project_path "$NESTI_PROJECT_PATH")
 ask NESTI_PROJECT_PATH "Local checkout of the project" valid_path
-NESTI_PROJECT_PATH=${REPLY_VALUE%/}
-ask NESTI_CONSUMER_PRIORITY "Consumer subscriptions, in order (subset of ${CONSUMERS// /,})" valid_consumers
+PROJECT_CHECKOUT=$(local_project_path "$REPLY_VALUE")
+NESTI_PROJECT_PATH=$PROJECT_CHECKOUT
+if [ "$WINDOWS" -eq 1 ]; then
+    project_drive=${PROJECT_CHECKOUT:0:1}
+    NESTI_PROJECT_PATH="/run/desktop/mnt/host/${project_drive,,}${PROJECT_CHECKOUT:2}"
+fi
+export NESTI_PROJECT_PATH
+ask NESTI_CONSUMER_PRIORITY "Consumer subscriptions priority" valid_consumers
 NESTI_CONSUMER_PRIORITY=$REPLY_VALUE
 
 env_set GITLAB_URL "$GITLAB_URL"
@@ -212,11 +259,11 @@ GITLAB_REPO_SSH="git@$GITLAB_HOST:$GITLAB_PROJECT_PATH.git"
 env_set GITLAB_REPO_HTTPS "$GITLAB_REPO_HTTPS"
 env_set GITLAB_REPO_SSH "$GITLAB_REPO_SSH"
 
-for api in DEEPSEEK ANTHROPIC OPENROUTER; do
+for api in OPENROUTER ANTHROPIC DEEPSEEK; do
     enabled=$(default_for "${api}_API_ENABLED")
     def=n
     [ "$enabled" = true ] && def=y
-    if yes_no "Enable the pay-per-token ${api} API fallback?" "$def"; then
+    if yes_no "Enable the ${api} Platform API (billed per token)?" "$def"; then
         ask_secret "${api}_API_KEY" "${api} API key" required
         env_set "${api}_API_KEY" "$REPLY_VALUE"
         if [ "$api" = OPENROUTER ]; then
@@ -278,26 +325,34 @@ PY
 
 # --- 5. Project checkout ---------------------------------------------------------
 STEP="project checkout"
-if [ -e "$NESTI_PROJECT_PATH" ]; then
-    [ -d "$NESTI_PROJECT_PATH" ] && [ ! -L "$NESTI_PROJECT_PATH" ] \
-        || die "$NESTI_PROJECT_PATH must be a directory, not a symlink."
-    echo "Project checkout: $NESTI_PROJECT_PATH (existing)"
+if [ -e "$PROJECT_CHECKOUT" ]; then
+    [ -d "$PROJECT_CHECKOUT" ] && [ ! -L "$PROJECT_CHECKOUT" ] \
+        || die "$PROJECT_CHECKOUT must be a directory, not a symlink."
+    echo "Project checkout: $PROJECT_CHECKOUT (existing)"
 else
     if [ "$(default_for GITLAB_USE_SSH)" = true ]; then
-        git clone "$GITLAB_REPO_SSH" "$NESTI_PROJECT_PATH"
+        git clone "$GITLAB_REPO_SSH" "$PROJECT_CHECKOUT"
     else
         # The token goes in a one-off header, so it is never written to .git/config.
         git -c http.extraHeader="Authorization: Basic $(printf 'oauth2:%s' "$GITLAB_TOKEN" | base64 -w0)" \
-            clone "$GITLAB_REPO_HTTPS" "$NESTI_PROJECT_PATH"
+            clone "$GITLAB_REPO_HTTPS" "$PROJECT_CHECKOUT"
     fi
-    echo "Project checkout: $NESTI_PROJECT_PATH (cloned)"
+    echo "Project checkout: $PROJECT_CHECKOUT (cloned)"
 fi
 
 # --- 6. Containers -------------------------------------------------------------
 STEP="containers"
 mkdir -p state logs
 docker image inspect postgres:15 >/dev/null 2>&1 || docker pull postgres:15
-"${COMPOSE[@]}" build
+# Stats and orchestrator share an image tag; concurrent exports race on a clean install.
+COMPOSE_PARALLEL_LIMIT=1 "${COMPOSE[@]}" build
+if [ "$WINDOWS" -eq 1 ]; then
+    docker run --rm --name "nesti-install-check-$$" --network none \
+        --mount "type=bind,source=$NESTI_PROJECT_PATH,target=$NESTI_PROJECT_PATH,readonly" \
+        --entrypoint python nesti-orchestrator:latest \
+        -c 'import os, sys; assert os.path.isdir(sys.argv[1]), sys.argv[1]' "$NESTI_PROJECT_PATH" \
+        || die "project mount failed: use Docker Desktop's WSL 2 Linux engine and a shared local drive."
+fi
 "${COMPOSE[@]}" up -d
 
 # --- 7. Readiness --------------------------------------------------------------
@@ -331,18 +386,26 @@ for name in "${wanted[@]}"; do
     if authenticated "$name"; then AUTHED="${AUTHED:+$AUTHED, }$name"; fi
 done
 if [ -z "$AUTHED" ] && ! grep -qE '^(DEEPSEEK|ANTHROPIC|OPENROUTER)_API_ENABLED=true$' "$ENV_FILE"; then
-    echo "Warning: no consumer subscription is logged in and no API fallback is enabled; Nesti cannot call an LLM." >&2
+    echo "Warning: no consumer subscription is logged in and no Platform API is enabled; Nesti cannot call an LLM." >&2
 fi
 
 # --- 9. Launcher ---------------------------------------------------------------
 STEP="launcher"
 LAUNCHER="$HOME/.local/bin/nesti"
 TARGET=$(readlink -f scripts/nesti)
-if [ "$(readlink -f "$LAUNCHER" 2>/dev/null || true)" != "$TARGET" ]; then
-    if yes_no "Link $LAUNCHER to scripts/nesti?" y; then
+if [ "$WINDOWS" -eq 1 ] || [ "$(readlink -f "$LAUNCHER" 2>/dev/null || true)" != "$TARGET" ]; then
+    if yes_no "Install $LAUNCHER for scripts/nesti?" y; then
         mkdir -p "$HOME/.local/bin"
-        ln -sf "$TARGET" "$LAUNCHER"
-        echo "Linked $LAUNCHER."
+        if [ "$WINDOWS" -eq 1 ]; then
+            # A new shell needs the Docker argument guard; Git Bash ln may copy instead of linking.
+            rm -f "$LAUNCHER"
+            printf '#!/usr/bin/env bash\nexport MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*"\nexec %q "$@"\n' "$TARGET" > "$LAUNCHER"
+            chmod +x "$LAUNCHER"
+            "$LAUNCHER" /provider >/dev/null || die "installed launcher could not reach the provider CLI."
+        else
+            ln -sf "$TARGET" "$LAUNCHER"
+        fi
+        echo "Installed $LAUNCHER."
     fi
 fi
 case ":$PATH:" in
@@ -362,7 +425,8 @@ cat <<EOF
 
 Nesti is installed.
   Project:   $GITLAB_URL/$GITLAB_PROJECT_PATH
-  Checkout:  $NESTI_PROJECT_PATH
+  Checkout:  $PROJECT_CHECKOUT
+  Mount:     $NESTI_PROJECT_PATH
   Label:     $GITLAB_ISSUE_LABEL
   Providers: ${AUTHED:-none authenticated}
 

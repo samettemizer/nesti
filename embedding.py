@@ -103,11 +103,11 @@ class Embedder:
     # ------------------------------------------------------------------
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed passages (no instruction prefix).  ``[]`` on any failure."""
+        """Embed passages in small batches to bound inference memory; ``[]`` on failure."""
         if not texts or not self._load():
             return []
         try:
-            return [_to_floats(vector) for vector in self._model.embed(texts)]
+            return [_to_floats(vector) for vector in self._model.embed(texts, batch_size=8)]
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("Document embedding failed: %s", exc)
             return []
