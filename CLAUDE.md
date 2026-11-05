@@ -35,6 +35,8 @@ docker_runner.py             PHP sandbox (+ postgres:15 sidecar when phpunit.xml
                              OpenAPI export, bootstrap, FILE-block writer
 frontend_runner.py           Vitest + Playwright sandboxes
 gitlab_issues_client.py      issue intake + label lock; gitlab_client.py: repo + MR
+gitlab_project.py            acted-on GitLab project: .env (orchestrator) or the MCP client's git remote;
+                             identity() scopes every per-issue Redis key
 skill_catalog.py             offline corpus selection; skill_loader.py: issue URLs
 embedding.py, vector_store.py, semantic_cache.py   vector memory
 reranker.py                  opt-in CPU rerank of retrieved docs (NESTI_RERANKER_ENABLED);

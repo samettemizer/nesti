@@ -126,6 +126,7 @@ class IssueState(TypedDict, total=False):
     retrieved_chunks: int              # doc chunks injected into the last prompt
     past_solutions: int                # similar merged issues injected at plan time
     recalled_failures: int             # older failed attempts injected at code time
+    run_id: str                        # random per graph run; scopes episodic memory to this run
 
     # ── Terminal flags ─────────────────────────────────────────────────────
     mr_url: str                        # set when MR is opened

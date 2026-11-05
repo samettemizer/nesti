@@ -36,6 +36,8 @@ os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"   # unreachable → memory fal
 os.environ["MAX_CODE_RETRIES"] = "2"                 # → max_attempts = 3
 os.environ["NESTI_STACK"] = "auto"                   # exercise real detection
 os.environ["NESTI_RERANKER_ENABLED"] = "false"
+os.environ["GITLAB_URL"] = "https://gitlab.test"       # scopes Redis keys (gitlab_project.identity)
+os.environ["GITLAB_PROJECT_PATH"] = "ai/hello-world"
 os.environ.pop("TELEGRAM_BOT_TOKEN", None)
 os.environ.pop("TELEGRAM_CHAT_ID", None)
 os.environ.pop("DEEPSEEK_API_KEY", None)
@@ -126,6 +128,7 @@ def initial(issue_id: int, subject: str = "", description: str = "Implement the 
         "playwright_passed": False, "playwright_output": "",
         "fixture_request": None, "dependency_status": "",
         "retrieved_chunks": 0, "past_solutions": 0, "recalled_failures": 0,
+        "run_id": f"test-{issue_id}",
         "mr_url": "", "failure_reason": "", "error": "",
     }
 
@@ -281,12 +284,14 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
         list(expanded_doc_chunks if limit == 20 and expanded_doc_chunks is not None else doc_chunks))
     nodes.tool_memory_find_similar = lambda text, limit=2: _memory(
         "memory_similar", text, list(similar_solutions))
-    nodes.tool_memory_recall_failures = lambda issue_id, text, attempt, limit=2: _memory(
-        "memory_recall", {"issue_id": issue_id, "text": text, "attempt": attempt},
+    nodes.tool_memory_recall_failures = lambda issue_id, run_id, text, attempt, limit=2: _memory(
+        "memory_recall",
+        {"issue_id": issue_id, "run_id": run_id, "text": text, "attempt": attempt},
         list(recalled))
-    nodes.tool_memory_remember_failure = lambda issue_id, attempt, layer, output: _memory(
+    nodes.tool_memory_remember_failure = lambda issue_id, run_id, attempt, layer, output: _memory(
         "memory_remember_failure",
-        {"issue_id": issue_id, "attempt": attempt, "layer": layer, "output": output},
+        {"issue_id": issue_id, "run_id": run_id, "attempt": attempt, "layer": layer,
+         "output": output},
         {"stored": True})
     nodes.tool_memory_remember_solution = (
         lambda issue_id, subject, description, plan, stack, mr_url: _memory(
@@ -294,8 +299,8 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             {"issue_id": issue_id, "subject": subject, "plan": plan,
              "stack": stack, "mr_url": mr_url},
             {"stored": True}))
-    nodes.tool_memory_forget_episodes = lambda issue_id: _memory(
-        "memory_forget", issue_id, {"deleted": 0})
+    nodes.tool_memory_forget_episodes = lambda issue_id, run_id: _memory(
+        "memory_forget", (issue_id, run_id), {"deleted": 0})
 
     # LLM fakes (instance attributes shadow bound methods)
     if plan_exc:
@@ -1025,7 +1030,11 @@ check(len(calls["memory_remember_solution"]) == 1
       and calls["memory_remember_solution"][0]["plan"] == f["plan"]
       and calls["memory_remember_solution"][0]["stack"] == "php",
       "the merged plan is written back to the solution cache with the real MR URL")
-check(calls["memory_forget"] == [1190], "episodes are dropped once the issue is done")
+check(calls["memory_forget"] == [(1190, "test-1190")],
+      "the run's episodes are dropped once the issue is done")
+check({e["run_id"] for e in calls["memory_remember_failure"] + calls["memory_recall"]}
+      == {"test-1190"},
+      "every episode write and recall carries the run's id")
 check(f["retrieved_chunks"] == 2 and f["past_solutions"] == 1 and f["recalled_failures"] == 1,
       "state counters report what reached the prompts")
 check("## Past Nesti Experience" in calls["plan_prompts"][0]
@@ -1301,9 +1310,10 @@ finally:
 
 import semantic_cache as _sc  # noqa: E402
 _sm = _sc.SemanticMemory()   # REDIS_URL points at 127.0.0.1:1 (unreachable)
-check(_sm.available is False and _sm.find_similar_solutions("x") == []
-      and _sm.remember_solution(1, "s", "d", "p", "php", "u") is False
-      and _sm.recall_failures(1, "x", attempt=5) == [] and _sm.forget_episodes(1) == 0,
+check(_sm.available is False and _sm.find_similar_solutions("gitlab.test/a/b", "x") == []
+      and _sm.remember_solution("gitlab.test/a/b", 1, "s", "d", "p", "php", "u") is False
+      and _sm.recall_failures("gitlab.test/a/b", 1, "r", "x", attempt=5) == []
+      and _sm.forget_episodes("gitlab.test/a/b", 1, "r") == 0,
       "SemanticMemory degrades on an unreachable Redis: reads [], writes False")
 check(_sm.status()["solutions"] is None and _sm.status()["engine"] == "unavailable",
       "unreadable memory counts are None, never guessed")
@@ -3697,6 +3707,137 @@ check(engine.run_once() is True, "run_once returns True when MR opened")
 check(calls["docker"] == 1, "graph executed via wrapper")
 task_engine.tool_issue_list_pending = lambda: {"success": True, "result": []}
 check(engine.run_once() is False, "run_once returns False when no pending issues")
+
+# ═════ Duplicate-poller warning (heartbeat in a GitLab CI/CD variable) ═════
+print("\n── Duplicate-poller heartbeat ──")
+from unittest.mock import MagicMock  # noqa: E402
+_slot: dict = {"value": None}
+
+
+def _swap(value):
+    previous, _slot["value"] = _slot["value"], value
+    return {"success": True, "result": {"previous": previous}}
+
+
+_alerts: list = []
+_clock = [1000.0]
+_real_swap, _real_notify = task_engine.tool_issue_swap_poll_heartbeat, task_engine.telegram_notify
+task_engine.tool_issue_swap_poll_heartbeat = _swap
+task_engine.telegram_notify = _alerts.append
+
+
+def _poll(engine, step=30.0):
+    _clock[0] += step
+    with patch("task_engine.time.time", return_value=_clock[0]):
+        return engine.run_once()
+
+
+try:
+    _a, _b = task_engine.TaskEngine(poll_interval=60), task_engine.TaskEngine(poll_interval=60)
+    for _engine in (_a, _b, _a):
+        _poll(_engine)
+    check(_alerts == [], "a first foreign heartbeat (possibly a restarted predecessor) is not alerted")
+    _poll(_b)
+    check(len(_alerts) == 1 and "Multiple Nesti instances are running for the same project "
+          "gitlab.test/ai/hello-world" in _alerts[0],
+          "the second consecutive foreign heartbeat within one poll interval alerts")
+    _poll(_a)
+    _poll(_b)
+    check(len(_alerts) == 2, "each poller alerts once per streak, not on every poll")
+    _slot["value"] = json.dumps({"instance": _a._instance, "t": _clock[0]})
+    _c = task_engine.TaskEngine(poll_interval=60)
+    _poll(_c, 20)
+    _poll(_c, 60)
+    check(len(_alerts) == 2, "a restarted instance seeing its predecessor once, then itself, stays quiet")
+    _d = task_engine.TaskEngine(poll_interval=60)
+    for _ in range(2):
+        _slot["value"] = json.dumps({"instance": "other-host", "t": _clock[0]})
+        _poll(_d, 61)
+    check(len(_alerts) == 2, "a heartbeat older than the poll interval is not a live poller")
+
+    task_engine.tool_issue_swap_poll_heartbeat = lambda value: {"success": False, "error": "403"}
+    _e = task_engine.TaskEngine(poll_interval=60)
+    with patch("task_engine.logger") as _log:
+        _results = [_e.run_once(), _e.run_once()]
+    _heartbeat_warnings = [c for c in _log.warning.call_args_list
+                           if str(c.args[0]).startswith("Poll heartbeat unavailable")]
+    check(_results == [False, False] and len(_heartbeat_warnings) == 1,
+          "an unavailable heartbeat warns once and never blocks polling")
+
+    def _must_not_swap(value):
+        raise AssertionError("single run swapped the heartbeat")
+    task_engine.tool_issue_swap_poll_heartbeat = _must_not_swap
+    check(task_engine.TaskEngine().run_once() is False,
+          "a single run (poll_interval 0) never touches the heartbeat")
+finally:
+    task_engine.tool_issue_swap_poll_heartbeat = _real_swap
+    task_engine.telegram_notify = _real_notify
+
+_hb = gic.GitLabIssuesClient()
+_hb.session = MagicMock()
+_hb.session.get.return_value.status_code = 404
+_first = _hb.swap_poll_heartbeat("x")
+check(_first is None and not _hb.session.put.called
+      and _hb.session.post.call_args.kwargs["json"]["key"] == "NESTI_POLL_HEARTBEAT"
+      and _hb.session.post.call_args.kwargs["json"]["value"] == "x",
+      "a missing heartbeat variable is created and reports no previous poller")
+_hb.session.get.return_value.status_code = 200
+_hb.session.get.return_value.json.return_value = {"value": "x"}
+check(_hb.swap_poll_heartbeat("y") == "x"
+      and _hb.session.put.call_args.kwargs["json"] == {"value": "y"}
+      and _hb.session.post.call_count == 1,
+      "an existing heartbeat is overwritten and its previous value returned")
+
+# ═════ MCP: each client connection acts on its own GitLab project ═════
+print("\n── MCP client project binding ──")
+import gitlab_project  # noqa: E402
+import gitlab_client  # noqa: E402
+import graph.tools as _bind_tools  # noqa: E402
+
+_remotes = {
+    "https://gitlab.com/acme/shop.git": "acme/shop",
+    "https://oauth2:SECRET@gitlab.com/acme/shop": "acme/shop",
+    "git@gitlab.com:group/sub/proj.git": "group/sub/proj",
+    "ssh://git@gitlab.com:2222/group/proj.git": "group/proj",
+}
+check(all(gitlab_project.project_from_remote(r, "https://gitlab.com") == p
+          for r, p in _remotes.items())
+      and gitlab_project.project_from_remote(
+          "https://example.com/gitlab/g/p.git", "https://example.com/gitlab") == "g/p",
+      "https, credentialed, scp, ssh-with-port and sub-path remotes resolve to namespace/project")
+_bad = []
+for _remote in ("", "https://gitlab.com/shop", "https://u:SECRET@github.com/x/y.git"):
+    try:
+        gitlab_project.project_from_remote(_remote, "https://gitlab.com")
+    except ValueError as exc:
+        _bad.append(str(exc))
+check(len(_bad) == 3 and "github.com" in _bad[2] and not any("SECRET" in m for m in _bad),
+      "empty, namespace-less and foreign-host remotes are refused without echoing credentials")
+try:
+    gitlab_project.bind_client("git@gitlab.test:Group/Proj.git")
+    check(gitlab_project.path() == "Group/Proj"
+          and gitlab_project.identity() == "gitlab.test/group/proj"
+          and gic.GitLabIssuesClient().project_path == "Group/Proj",
+          "a bound client acts on its remote's project, not GITLAB_PROJECT_PATH")
+    with patch("gitlab_project.requests.get") as _get:
+        _get.return_value.json.return_value = {"default_branch": "develop"}
+        check(gitlab_client.GitLabClient().default_branch == "develop",
+              "a bound client targets its project's GitLab default branch")
+    with patch("project_layout.load_layout",
+               return_value={"gitlab_project": "gitlab.test/other/proj"}):
+        _layout = _bind_tools.tool_project_layout()
+    with patch("project_layout.load_layout",
+               return_value={"gitlab_project": "gitlab.test/group/proj"}):
+        _own = _bind_tools.tool_project_layout()
+    check(not _layout["success"] and "gitlab.test/other/proj" in _layout["error"]
+          and "gitlab.test/group/proj" in _layout["error"] and _own["success"],
+          "project_layout serves only the layout recorded for the client's project")
+    gitlab_project.bind_client("")
+    _refused = _bind_tools.tool_issue_list_pending()
+    check(not _refused["success"] and "nesti mcp" in _refused["error"],
+          "a client without a resolvable project is refused, never served .env's project")
+finally:
+    gitlab_project._bound = None
 
 # ═════ Static acceptance checks ═════
 print("\n── Static acceptance checks ──")

@@ -51,6 +51,7 @@ from docker_runner import _PG_IDENTIFIER, DockerRunner, _pgsql_settings
 from frontend_runner import FrontendRunner
 from gitlab_client import GitLabClient
 from gitlab_issues_client import GitLabIssuesClient
+import gitlab_project
 from issue_dependencies import FixtureDependencies
 from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
@@ -264,6 +265,13 @@ def tool_project_layout() -> dict:
         record = project_layout.load_layout()
         if record is None:
             return _err("layout.json not found: run nesti /arch on the orchestrator")
+        identity = gitlab_project.identity()
+        if record.get("gitlab_project") != identity:
+            return _err(
+                f"layout.json describes {record.get('gitlab_project') or 'an unrecorded project'}, "
+                f"not {identity}: only the orchestrator configured for {identity} records its layout "
+                "(nesti /arch)."
+            )
         return _ok(record)
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_project_layout() failed: %s", exc)
@@ -417,6 +425,19 @@ def tool_issue_reconcile_domain_questions() -> dict:
         return _ok(issue_domain.reconcile(GitLabIssuesClient()))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_reconcile_domain_questions() failed: %s", exc)
+        return _err(exc)
+
+
+def tool_issue_swap_poll_heartbeat(value: str) -> dict:
+    """
+    Write this poller's heartbeat to the project and return the previous one.  Graph-internal.
+
+    result: {"previous": str | None}
+    """
+    try:
+        return _ok({"previous": GitLabIssuesClient().swap_poll_heartbeat(value)})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_swap_poll_heartbeat() failed: %s", exc)
         return _err(exc)
 
 
@@ -1524,6 +1545,8 @@ def tool_skill_catalog_status() -> dict:
 # importing this module performs no network I/O.
 
 _MEMORY_UNAVAILABLE = {"stored": False, "reason": "memory unavailable"}
+_RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_RUN_ID_ERROR = "run_id must be 1-64 characters from A-Z a-z 0-9 _ -"
 
 
 def tool_memory_search_docs(text: str, stack: str = "", limit: int = 6) -> dict:
@@ -1547,15 +1570,16 @@ def tool_memory_search_docs(text: str, stack: str = "", limit: int = 6) -> dict:
 
 def tool_memory_find_similar(text: str, limit: int = 2) -> dict:
     """
-    Previously merged issues similar to *text* (Redis solution cache).
+    Previously merged issues of this project similar to *text* (Redis solution cache).
     result: [{"issue_id", "subject", "plan", "mr_url", "stack", "similarity"},
              ...] most similar first, above NESTI_SOLUTION_MIN_SCORE.
     """
     try:
+        project = gitlab_project.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok([])
-        return _ok(memory.find_similar_solutions(text, limit=limit))
+        return _ok(memory.find_similar_solutions(project, text, limit=limit))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_find_similar failed: %s", exc)
         return _err(exc)
@@ -1569,55 +1593,73 @@ def tool_memory_remember_solution(
     result: {"stored": bool} (plus "reason" when not stored).
     """
     try:
+        project = gitlab_project.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok(dict(_MEMORY_UNAVAILABLE))
-        stored = memory.remember_solution(issue_id, subject, description, plan, stack, mr_url)
+        stored = memory.remember_solution(
+            project, issue_id, subject, description, plan, stack, mr_url
+        )
         return _ok({"stored": True} if stored else {"stored": False, "reason": "write failed"})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_remember_solution(issue #%s) failed: %s", issue_id, exc)
         return _err(exc)
 
 
-def tool_memory_remember_failure(issue_id: int, attempt: int, layer: str, output: str) -> dict:
+def tool_memory_remember_failure(
+    issue_id: int, run_id: str, attempt: int, layer: str, output: str
+) -> dict:
     """
-    Store one failed attempt of an issue in episodic memory.
+    Store one failed attempt of an issue's run *run_id* in episodic memory.
     result: {"stored": bool} (plus "reason" when not stored).
     """
+    if not _RUN_ID.fullmatch(run_id or ""):
+        return _err(_RUN_ID_ERROR)
     try:
+        project = gitlab_project.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok(dict(_MEMORY_UNAVAILABLE))
-        stored = memory.remember_failure(issue_id, attempt, layer, output)
+        stored = memory.remember_failure(project, issue_id, run_id, attempt, layer, output)
         return _ok({"stored": True} if stored else {"stored": False, "reason": "write failed"})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_remember_failure(issue #%s) failed: %s", issue_id, exc)
         return _err(exc)
 
 
-def tool_memory_recall_failures(issue_id: int, text: str, attempt: int, limit: int = 2) -> dict:
+def tool_memory_recall_failures(
+    issue_id: int, run_id: str, text: str, attempt: int, limit: int = 2
+) -> dict:
     """
-    Older failed attempts of an issue similar to *text*.  ``attempt`` is the
+    Older failed attempts of an issue's run *run_id* similar to *text*.  ``attempt`` is the
     attempt about to run; the one that just failed (attempt - 1) is excluded
     because its output is already in the conversation history.
     result: [{"issue_id", "attempt", "layer", "summary", "similarity"}, ...].
     """
+    if not _RUN_ID.fullmatch(run_id or ""):
+        return _err(_RUN_ID_ERROR)
     try:
+        project = gitlab_project.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok([])
-        return _ok(memory.recall_failures(issue_id, text, attempt=attempt, limit=limit))
+        return _ok(
+            memory.recall_failures(project, issue_id, run_id, text, attempt=attempt, limit=limit)
+        )
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_recall_failures(issue #%s) failed: %s", issue_id, exc)
         return _err(exc)
 
 
-def tool_memory_forget_episodes(issue_id: int) -> dict:
+def tool_memory_forget_episodes(issue_id: int, run_id: str) -> dict:
     """
-    Drop every episodic-memory row of an issue.  result: {"deleted": int}.
+    Drop every episodic-memory row of an issue's run *run_id*.  result: {"deleted": int}.
     """
+    if not _RUN_ID.fullmatch(run_id or ""):
+        return _err(_RUN_ID_ERROR)
     try:
-        return _ok({"deleted": get_semantic_memory().forget_episodes(issue_id)})
+        project = gitlab_project.identity()
+        return _ok({"deleted": get_semantic_memory().forget_episodes(project, issue_id, run_id)})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_forget_episodes(issue #%s) failed: %s", issue_id, exc)
         return _err(exc)

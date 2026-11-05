@@ -17,6 +17,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import gitlab_project
+
 logger = logging.getLogger(__name__)
 
 STATE_DIR = Path(__file__).resolve().parent / "state"
@@ -304,6 +306,7 @@ def load_layout() -> dict | None:
 def save_layout(record: dict) -> None:
     """Atomically write *record* to ``layout.json``."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    record["gitlab_project"] = gitlab_project.identity()
     target = LAYOUT_FILE
     tmp = target.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

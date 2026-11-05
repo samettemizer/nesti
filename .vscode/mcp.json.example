@@ -2,8 +2,8 @@
   "servers": {
     "nesti": {
       "type": "stdio",
-      "command": "docker",
-      "args": ["exec", "-i", "nesti-mcp", "python", "-m", "mcp_server.server"]
+      "command": "nesti",
+      "args": ["mcp", "${workspaceFolder}"]
     }
   }
 }

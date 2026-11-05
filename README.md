@@ -1,4 +1,4 @@
-# Nesti — autonomous developer
+# Nesti
 
 Nesti turns opted-in GitLab issues into Laravel 13 + PrimeVue 5 Merge Requests.
 It plans and generates code through an LLM cascade, then runs the applicable
@@ -283,11 +283,12 @@ tools over stdio. It runs alongside the orchestrator and makes no LLM calls.
 Connect Claude Code:
 
 ```bash
-claude mcp add nesti docker exec -i nesti-mcp python -m mcp_server.server
+claude mcp add nesti -- nesti mcp
 ```
 
 For VS Code, use [`.vscode/mcp.json.example`](.vscode/mcp.json.example).
-Other MCP clients can use the same `docker exec -i` command.
+Other MCP clients run `nesti mcp` from the project's git checkout, or `nesti mcp <checkout>`:
+each connection acts on the GitLab project of that checkout's `origin` remote.
 Dependency mutations remain internal to the orchestrator to preserve a single
 polling writer.
 

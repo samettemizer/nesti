@@ -50,6 +50,7 @@ from collections.abc import Iterator
 
 import requests
 
+import gitlab_project
 from e2e_fixtures import (
     active_dependency,
     format_dependency_note,
@@ -64,6 +65,7 @@ _DEFAULT_ISSUE_LABEL = "nesti"
 _IN_PROGRESS_SUFFIX = "::in-progress"
 _PAUSE_SUFFIX = "::pause"
 _REQUEST_TIMEOUT = 15
+_POLL_HEARTBEAT_VARIABLE = "NESTI_POLL_HEARTBEAT"
 _PER_PAGE = 100
 _MAX_PAGES = 1000
 _ISSUE_STATES = ("opened", "closed", "all")
@@ -79,7 +81,7 @@ class GitLabIssuesClient:
     def __init__(self) -> None:
         self.base_url = os.environ["GITLAB_URL"].rstrip("/")
         self.token = os.environ["GITLAB_TOKEN"]
-        self.project_path = os.environ["GITLAB_PROJECT_PATH"]
+        self.project_path = gitlab_project.path()
         self.issue_label = (
             os.environ.get("GITLAB_ISSUE_LABEL", _DEFAULT_ISSUE_LABEL).strip()
             or _DEFAULT_ISSUE_LABEL
@@ -663,3 +665,25 @@ class GitLabIssuesClient:
         )
         response.raise_for_status()
         return response.json()
+
+    def swap_poll_heartbeat(self, value: str) -> str | None:
+        """
+        Write *value* to the project's poll-heartbeat CI/CD variable; return the previous value.
+
+        Needs Maintainer. Every orchestrator polling the project writes here, so a
+        foreign value reveals a second poller even on another machine.
+        """
+        url = f"{self._project_api}/variables/{_POLL_HEARTBEAT_VARIABLE}"
+        current = self.session.get(url, timeout=_REQUEST_TIMEOUT)
+        if current.status_code == 404:
+            self.session.post(
+                f"{self._project_api}/variables",
+                json={"key": _POLL_HEARTBEAT_VARIABLE, "value": value,
+                      "protected": False, "masked": False},
+                timeout=_REQUEST_TIMEOUT,
+            ).raise_for_status()
+            return None
+        current.raise_for_status()
+        previous = current.json().get("value")
+        self.session.put(url, json={"value": value}, timeout=_REQUEST_TIMEOUT).raise_for_status()
+        return previous

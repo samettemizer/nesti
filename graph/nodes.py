@@ -1301,6 +1301,7 @@ def node_code(state: IssueState) -> dict:
         layer, last_output = _last_failure_output(state)
         rc = tool_memory_recall_failures(
             issue_id,
+            state["run_id"],
             f"{layer} failure: {condense(last_output, _EPISODE_QUERY_CHARS)}",
             attempt=attempt,
             limit=2,
@@ -1680,7 +1681,7 @@ def node_pause_dependency(state: IssueState) -> dict:
 
     if status == "paused":
         _store.delete(issue_id)
-        forgot = tool_memory_forget_episodes(issue_id)
+        forgot = tool_memory_forget_episodes(issue_id, state["run_id"])
         if not forgot["success"]:
             logger.warning("Failed to drop the episodes of issue #%s: %s", issue_id, forgot["error"])
         logger.info("Issue #%s paused: %s", issue_id, detail.get("reason", ""))
@@ -1783,7 +1784,7 @@ def node_on_layer_failure(state: IssueState) -> dict:
     # After the conversation append on purpose: a memory outage must never cost
     # the pipeline its primary corrective feedback.
     stored = tool_memory_remember_failure(
-        state["issue_id"], state.get("attempt", 0), layer, failure_output
+        state["issue_id"], state["run_id"], state.get("attempt", 0), layer, failure_output
     )
     if not stored["success"]:
         logger.warning("Failed to store episodic memory: %s", stored["error"])
@@ -1886,7 +1887,7 @@ def node_commit(state: IssueState) -> dict:
         )
     elif remembered["result"].get("stored"):
         logger.info("Solution of issue #%s stored in the solution cache.", issue_id)
-    tool_memory_forget_episodes(issue_id)
+    tool_memory_forget_episodes(issue_id, state["run_id"])
     # Work is done – drop the conversation history for this issue.
     _store.delete(issue_id)
     logger.debug("← node_commit (mr=%s)", mr_url)
@@ -1931,7 +1932,7 @@ def node_failure(state: IssueState) -> dict:
 
     # Every reopened issue starts fresh, including failures before coding.
     _store.delete(issue_id)
-    tool_memory_forget_episodes(issue_id)
+    tool_memory_forget_episodes(issue_id, state["run_id"])
 
     logger.debug("← node_failure (%s)", reason)
     return {"failure_reason": reason}

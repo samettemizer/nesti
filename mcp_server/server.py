@@ -26,12 +26,15 @@ Implementation notes
 """
 
 import asyncio
+import os
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402  (after load_dotenv)
+
+import gitlab_project  # noqa: E402
 
 app = FastMCP("nesti")
 
@@ -42,6 +45,7 @@ from mcp_server.tools import issues, gitlab, docker, skills, oauth, memory, proj
 
 async def main() -> None:
     """Serve the MCP app over stdio until the client disconnects."""
+    gitlab_project.bind_client(os.environ.get("NESTI_CLIENT_REMOTE", ""))
     await app.run_stdio_async()
 
 

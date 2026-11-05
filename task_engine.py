@@ -30,12 +30,19 @@ TaskEngine only:
   4. Acts as the crash net: if the graph itself raises, the issue is
      reopened and a Telegram alert is sent (a paused or dependency-held issue
      refuses that reopen, so a crash never undoes a hold).
+  5. In loop mode, swaps the project's poll heartbeat (a GitLab CI/CD
+     variable) first and alerts when another instance polls the same project.
 
-main.py is unchanged: it still constructs TaskEngine() and calls run_once().
+main.py constructs TaskEngine(poll_interval=…) and calls run_once().
 """
 
+import html
+import json
 import logging
 import os
+import secrets
+import socket
+import time
 
 from graph.builder import graph
 from graph.state import IssueState
@@ -44,17 +51,56 @@ from graph.tools import (
     tool_issue_reconcile_dependencies,
     tool_issue_set_status,
     tool_issue_reconcile_domain_questions,
+    tool_issue_swap_poll_heartbeat,
 )
+import gitlab_project
 import stats
 from telegram_notifier import notify as telegram_notify
 
 logger = logging.getLogger(__name__)
 
+# One foreign heartbeat can be a restarted predecessor; two in a row are a live second poller.
+_FOREIGN_POLLS_TO_WARN = 2
+
 
 class TaskEngine:
-    def __init__(self) -> None:
-        # All clients live behind graph/tools.py now; nothing to construct.
-        pass
+    def __init__(self, poll_interval: int = 0) -> None:
+        self.poll_interval = poll_interval  # 0 = single run, no duplicate-poller check
+        self._instance = f"{socket.gethostname()}-{secrets.token_hex(3)}"
+        self._foreign_polls = 0
+        self._heartbeat_failing = False
+
+    def _check_other_pollers(self) -> None:
+        """Swap the project's poll heartbeat; warn once per streak of another live poller."""
+        now = time.time()
+        swapped = tool_issue_swap_poll_heartbeat(json.dumps({"instance": self._instance, "t": now}))
+        if not swapped["success"]:
+            if not self._heartbeat_failing:
+                logger.warning(
+                    "Poll heartbeat unavailable; a second Nesti on this project cannot be "
+                    "detected: %s", swapped["error"],
+                )
+            self._heartbeat_failing = True
+            return
+        self._heartbeat_failing = False
+        try:
+            previous = json.loads(swapped["result"]["previous"] or "null")
+            other, seen = previous["instance"], float(previous["t"])
+        except (TypeError, ValueError, KeyError):
+            other, seen = self._instance, 0.0
+        self._foreign_polls = (
+            self._foreign_polls + 1
+            if other != self._instance and now - seen < self.poll_interval
+            else 0
+        )
+        if self._foreign_polls == _FOREIGN_POLLS_TO_WARN:
+            message = (
+                f"Multiple Nesti instances are running for the same project "
+                f"{gitlab_project.identity()}: this instance {self._instance}, "
+                f"other instance {other}."
+            )
+            logger.warning(message)
+            telegram_notify(f"⚠️ {html.escape(message)}")
 
     def run_once(self) -> bool:
         """
@@ -62,6 +108,8 @@ class TaskEngine:
 
         Returns True if a Merge Request was successfully opened, False otherwise.
         """
+        if self.poll_interval:
+            self._check_other_pollers()
         # ── 1. Reconcile fixture dependencies ─────────────────────────────
         # Before selection on purpose: a parent released here is eligible in
         # this very poll, and an unreadable issue list aborts the poll rather
@@ -144,6 +192,7 @@ class TaskEngine:
             "retrieved_chunks":  0,
             "past_solutions":    0,
             "recalled_failures": 0,
+            "run_id":            secrets.token_hex(6),
             "mr_url":         "",
             "failure_reason": "",
             "error":          "",

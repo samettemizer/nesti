@@ -1,0 +1,97 @@
+"""
+The GitLab project this process acts on.
+
+The orchestrator acts on ``GITLAB_PROJECT_PATH`` from ``.env``. An MCP server
+process serves one client connection and acts on that client's project, read
+from the client checkout's git remote (``bind_client``); without a resolvable
+remote it refuses project tools instead of falling back to ``.env``.
+"""
+
+import logging
+import os
+import re
+from urllib.parse import quote, urlsplit
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+# None in the orchestrator; in an MCP process {"path": ..., "default_branch"?: ...} or {"error": ...}.
+_bound: dict | None = None
+
+
+def project_from_remote(remote: str, gitlab_url: str) -> str:
+    """Return ``namespace/…/project`` for a git remote on ``gitlab_url``'s host; ``ValueError`` otherwise."""
+    remote = remote.strip()
+    if not remote:
+        raise ValueError("no git remote was passed")
+    if "://" in remote:
+        parts = urlsplit(remote)
+        host, path = parts.hostname or "", parts.path
+    else:
+        match = re.fullmatch(r"(?:[^@/]+@)?([^:/]+):(.+)", remote)
+        if not match:
+            raise ValueError("the git remote is neither a URL nor host:path")
+        host, path = match.groups()
+    gitlab = urlsplit(gitlab_url)
+    if host.lower() != (gitlab.hostname or "").lower():
+        raise ValueError(
+            f"the git remote is on {host or 'an unknown host'}, not on GITLAB_URL's {gitlab.hostname}"
+        )
+    path = path.strip("/")
+    if (prefix := gitlab.path.strip("/")) and path.startswith(prefix + "/"):
+        path = path[len(prefix) + 1:]
+    path = path.removesuffix(".git").strip("/")
+    if "/" not in path:
+        raise ValueError(f"the git remote path {path!r} is not namespace/project")
+    return path
+
+
+def bind_client(remote: str) -> None:
+    """Bind this (MCP) process to the GitLab project of the client's git remote, or to an error."""
+    global _bound
+    try:
+        _bound = {"path": project_from_remote(remote, os.environ["GITLAB_URL"])}
+        logger.info("Nesti MCP acts on the client's project %s.", identity())
+    except (KeyError, ValueError) as exc:
+        _bound = {
+            "error": f"Nesti MCP does not know this client's GitLab project: {exc}. "
+            "Start it with `nesti mcp` inside the project's git checkout."
+        }
+        logger.warning(_bound["error"])
+
+
+def client_bound() -> bool:
+    """True in an MCP process bound to a client (successfully or not)."""
+    return _bound is not None
+
+
+def path() -> str:
+    """The acted-on project's ``namespace/project`` path; raises ``ValueError`` for an unresolved client."""
+    if _bound is None:
+        return os.environ["GITLAB_PROJECT_PATH"]
+    if "error" in _bound:
+        raise ValueError(_bound["error"])
+    return _bound["path"]
+
+
+def default_branch() -> str:
+    """The acted-on project's target branch: ``.env`` for the orchestrator, GitLab's default for a client."""
+    if _bound is None:
+        return os.environ.get("GITLAB_DEFAULT_BRANCH", "main")
+    project = path()
+    if "default_branch" not in _bound:
+        response = requests.get(
+            f"{os.environ['GITLAB_URL'].rstrip('/')}/api/v4/projects/{quote(project, safe='')}",
+            headers={"PRIVATE-TOKEN": os.environ["GITLAB_TOKEN"]},
+            verify=os.environ.get("GITLAB_SSL_VERIFY", "true").lower() != "false",
+            timeout=15,
+        )
+        response.raise_for_status()
+        _bound["default_branch"] = response.json()["default_branch"] or "main"
+    return _bound["default_branch"]
+
+
+def identity() -> str:
+    """``host/namespace/project`` in lower case, e.g. ``gitlab.com/acme/shop``; scopes Redis records."""
+    return f"{urlsplit(os.environ['GITLAB_URL']).hostname}/{path()}".lower()
