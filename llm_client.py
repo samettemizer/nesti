@@ -659,10 +659,11 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
 
     Anthropic accepts a consumer OAuth token only when the request looks like
     Claude Code's own traffic: `Authorization: Bearer` (not the `x-api-key`
-    the anthropic SDK sends), the `oauth-2025-04-20` beta header, and a system
-    prompt that identifies as Claude Code. That is why this is a raw requests
-    call instead of reusing AnthropicLLMClient's SDK path. The accepted-risk
-    decision it implements is recorded in the scripts/oauth.py docstring.
+    the anthropic SDK sends), the `oauth-2025-04-20` beta header, and a first
+    system block that is exactly the Claude Code identity string. That is why
+    this is a raw requests call instead of reusing AnthropicLLMClient's SDK
+    path. The accepted-risk decision it implements is recorded in the
+    scripts/oauth.py docstring.
     """
 
     name = "Claude Pro/Max (consumer)"
@@ -688,6 +689,11 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
         msg_list = [
             m for m in self._history(user_prompt, messages) if m.get("role") != "system"
         ]
+        # The OAuth token is accepted only when the first block is the bare identity string (anything appended → 429).
+        # One breakpoint, on the system prompt: the user prompt differs on every request, so a breakpoint there only buys the cache-write premium.
+        system = [{"type": "text", "text": self._SYSTEM_PREFIX}]
+        if system_prompt:  # Anthropic rejects empty text blocks
+            system.append({"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}})
         resp = _post_json(
             self.name, self._API_URL,
             headers={
@@ -699,9 +705,7 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
             json={
                 "model": self.model,
                 "max_tokens": _DEFAULT_MAX_TOKENS,
-                # One breakpoint, on the system prompt: the user prompt differs on every request, so a breakpoint there only buys the cache-write premium.
-                "system": [{"type": "text", "text": f"{self._SYSTEM_PREFIX}\n\n{system_prompt}",
-                            "cache_control": {"type": "ephemeral"}}],
+                "system": system,
                 "messages": msg_list,
             },
             timeout=self.timeout,

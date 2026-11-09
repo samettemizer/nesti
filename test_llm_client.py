@@ -61,7 +61,7 @@ class ProviderBoundaryTests(unittest.TestCase):
                 stream = False
                 expected_usage = "'prompt_tokens': 17"
                 if isinstance(client, llm.ClaudeConsumerClient):
-                    expected_system = client._SYSTEM_PREFIX + "\n\n" + _SYSTEM
+                    expected_system = client._SYSTEM_PREFIX + _SYSTEM
                     data = {"content": [{"text": _OUTPUT}],
                             "usage": {"input_tokens": 17, "output_tokens": 29}}
                     expected_usage = "'input_tokens': 17"
@@ -108,7 +108,15 @@ class ProviderBoundaryTests(unittest.TestCase):
                 else:
                     self.assertEqual([msg for msg in sent["messages"] if msg["role"] != "system"], _MESSAGES)
                 if isinstance(client, llm.ClaudeConsumerClient):
-                    self.assertEqual(sent["system"], [{"type": "text", "text": expected_system, "cache_control": {"type": "ephemeral"}}])
+                    self.assertEqual(sent["system"], [
+                        {"type": "text", "text": client._SYSTEM_PREFIX},
+                        {"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}},
+                    ])
+                    with patch.object(llm._ConsumerLLMBase, "_credentials", return_value=credentials), \
+                            patch("requests.adapters.HTTPAdapter.send", autospec=True, side_effect=send):
+                        client._call("", "Say ok")
+                    self.assertEqual(json.loads(captured[-1].body)["system"],
+                                     [{"type": "text", "text": client._SYSTEM_PREFIX}])
                 text = "\n".join(logs.output)
                 self.assertIn(f"system_chars={len(expected_system)} content_chars={len(_MESSAGES[0]['content'])} "
                               f"http_body_bytes={len(body)}", text)
