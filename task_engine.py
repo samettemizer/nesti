@@ -21,16 +21,13 @@ frontend-only change never runs PHPUnit, and a change that did not touch the
 API surface never pays for a Scramble export.
 
 TaskEngine only:
-  1. Reconciles fixture dependencies (graph.tools): paused issues whose
-     backend dependency MR has merged are resumed BEFORE pending selection,
-     even when the queue would otherwise be empty.
-  2. Polls GitLab Issues for the next pending issue (via graph.tools – no
+  1. Polls GitLab Issues for the next pending issue (via graph.tools – no
      direct GitLabIssuesClient / GitLabClient / DockerRunner imports here).
-  3. Seeds the initial IssueState and invokes the compiled graph.
-  4. Acts as the crash net: if the graph itself raises, the issue is
-     reopened and a Telegram alert is sent (a paused or dependency-held issue
-     refuses that reopen, so a crash never undoes a hold).
-  5. In loop mode, swaps the project's poll heartbeat (a GitLab CI/CD
+  2. Seeds the initial IssueState and invokes the compiled graph.
+  3. Acts as the crash net: if the graph itself raises, the issue is
+     reopened and a Telegram alert is sent (a paused issue refuses that
+     reopen, so a crash never undoes a hold).
+  4. In loop mode, swaps the project's poll heartbeat (a GitLab CI/CD
      variable) first and alerts when another instance polls the same project.
 
 main.py constructs TaskEngine(poll_interval=…) and calls run_once().
@@ -48,7 +45,6 @@ from graph.builder import graph
 from graph.state import IssueState
 from graph.tools import (
     tool_issue_list_pending,
-    tool_issue_reconcile_dependencies,
     tool_issue_set_status,
     tool_issue_reconcile_domain_questions,
     tool_issue_swap_poll_heartbeat,
@@ -110,20 +106,6 @@ class TaskEngine:
         """
         if self.poll_interval:
             self._check_other_pollers()
-        # ── 1. Reconcile fixture dependencies ─────────────────────────────
-        # Before selection on purpose: a parent released here is eligible in
-        # this very poll, and an unreadable issue list aborts the poll rather
-        # than selecting work against an unknown dependency state.
-        reconciled = tool_issue_reconcile_dependencies()
-        if not reconciled["success"]:
-            logger.error("Fixture dependency reconciliation failed: %s", reconciled["error"])
-            return False
-        summary = reconciled["result"]
-        if summary["resumed"] or summary["waiting"] or summary["errors"]:
-            logger.info(
-                "Fixture dependencies: resumed %s, waiting %s, errors %s",
-                summary["resumed"], summary["waiting"], summary["errors"],
-            )
         questions = tool_issue_reconcile_domain_questions()
         if not questions["success"]:
             logger.error("Domain question reconciliation failed: %s", questions["error"])
@@ -164,6 +146,7 @@ class TaskEngine:
             "branch_name":    "",
             "workspace":      "",
             "domain":         None,
+            "app_facts":      "",
             "messages":       [],
             "attempt":        0,
             "max_attempts":   max_attempts,
@@ -188,8 +171,6 @@ class TaskEngine:
             "vitest_output":     "",
             "playwright_passed": False,
             "playwright_output": "",
-            "fixture_request":   None,
-            "dependency_status": "",
             "retrieved_chunks":  0,
             "past_solutions":    0,
             "recalled_failures": 0,
@@ -202,9 +183,9 @@ class TaskEngine:
         # ── 4. Run the graph ──────────────────────────────────────────────
         stats.begin(issue_id, subject)
         try:
-            # A fullstack retry cycle traverses up to 8 nodes (on_layer_failure →
+            # A fullstack retry cycle traverses up to 7 nodes (on_layer_failure →
             # code → detect_stack → phpunit_test → openapi_test → vitest_test →
-            # playwright_test → pause_dependency), and setup → detect_domain →
+            # playwright_test), and setup → detect_domain →
             # bootstrap → load_skills → plan adds a fixed prologue; size the recursion limit
             # so large MAX_CODE_RETRIES values never trip LangGraph's default of 25.
             final_state = graph.invoke(

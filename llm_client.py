@@ -35,6 +35,7 @@ from abc import ABC, abstractmethod
 import anthropic
 import requests
 
+from prompt_builder import CACHE_BREAK
 from scripts.oauth import (
     OPENROUTER_API_BASE, PROVIDERS, TokenStore, configured_model,
 )
@@ -107,6 +108,39 @@ def _anthropic_text(provider: str, data: dict) -> str:
     return text
 
 
+def _without_cache_break(
+    user_prompt: str, messages: list[dict] | None
+) -> tuple[str, list[dict] | None]:
+    """*user_prompt* and *messages* without CACHE_BREAK; *messages* is returned as-is when no message carries it."""
+    if messages and any(isinstance(m.get("content"), str) and CACHE_BREAK in m["content"] for m in messages):
+        messages = [
+            {**m, "content": m["content"].replace(CACHE_BREAK, "")} if isinstance(m.get("content"), str) else m
+            for m in messages
+        ]
+    return user_prompt.replace(CACHE_BREAK, ""), messages
+
+
+def _cache_marked(messages: list[dict]) -> list[dict]:
+    """Split the last user message at CACHE_BREAK into a cached prefix block and the rest."""
+    marked = [dict(m) for m in messages]
+    last = next((i for i in range(len(marked) - 1, -1, -1) if marked[i].get("role") == "user"
+                 and isinstance(marked[i].get("content"), str) and CACHE_BREAK in marked[i]["content"]), None)
+    for i, message in enumerate(marked):
+        if i == last or not isinstance(message.get("content"), str):
+            continue
+        message["content"] = message["content"].replace(CACHE_BREAK, "")
+    if last is not None:
+        head, tail = marked[last]["content"].split(CACHE_BREAK, 1)
+        tail = tail.replace(CACHE_BREAK, "")
+        blocks = []
+        if head:
+            blocks.append({"type": "text", "text": head, "cache_control": {"type": "ephemeral"}})
+        if tail:
+            blocks.append({"type": "text", "text": tail})
+        marked[last]["content"] = blocks
+    return marked
+
+
 def _post_json(provider: str, url: str, **kwargs) -> requests.Response:
     """Keep Requests' serialization and report its prepared body, without content."""
     request = None
@@ -138,6 +172,8 @@ class BaseLLMClient(ABC):
     # or by a per-token API bill.
     billing: str = "platform API"
     model: str = ""
+    # True when the provider turns prompt_builder.CACHE_BREAK into a prompt-cache breakpoint.
+    caches_user_prefix: bool = False
 
     @property
     def label(self) -> str:
@@ -490,6 +526,7 @@ class AnthropicLLMClient(BaseLLMClient):
     """
 
     name = "Claude Sonnet (API key)"
+    caches_user_prefix = True
 
     def __init__(self) -> None:
         self.model: str = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
@@ -518,7 +555,7 @@ class AnthropicLLMClient(BaseLLMClient):
         # Anthropic keeps the system prompt separate and rejects system-role
         # entries inside the messages array, so strip any that were carried in
         # the shared history.
-        msg_list = [m for m in msg_list if m.get("role") != "system"]
+        msg_list = _cache_marked([m for m in msg_list if m.get("role") != "system"])
 
         payload = {
             "model": self.model,
@@ -679,6 +716,7 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
     """
 
     name = "Claude Pro/Max (consumer)"
+    caches_user_prefix = True
     provider_key = "claude"
     _API_URL = "https://api.anthropic.com/v1/messages"
     _SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -698,11 +736,11 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
     ) -> str:
         token = self._credentials()["access_token"]
         # Anthropic rejects system-role entries inside `messages`.
-        msg_list = [
+        msg_list = _cache_marked([
             m for m in self._history(user_prompt, messages) if m.get("role") != "system"
-        ]
+        ])
         # The OAuth token is accepted only when the first block is the bare identity string (anything appended → 429).
-        # One breakpoint, on the system prompt: the user prompt differs on every request, so a breakpoint there only buys the cache-write premium.
+        # Breakpoints: the system prompt, plus the user prompt's attempt-stable prefix (prompt_builder.CACHE_BREAK).
         system = [{"type": "text", "text": self._SYSTEM_PREFIX}]
         if system_prompt:  # Anthropic rejects empty text blocks
             system.append({"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}})
@@ -1142,11 +1180,11 @@ class LLMClient:
         self._planners: list[BaseLLMClient] = [*consumers]
         if hermes.available:
             self._planners.append(hermes)
-        else:
-            logger.warning(
-                "Hermes-3 not enabled (HERMES3_LLM_URL / HERMES3_LLM_MODEL missing) "
-                "– excluded from planner chain."
-            )
+        # else:
+        #     logger.warning(
+        #         "Hermes-3 not enabled (HERMES3_LLM_URL / HERMES3_LLM_MODEL missing) "
+        #         "– excluded from planner chain."
+        #     )
         # Keep paid tiers even when disabled: available is re-checked before
         # every call, so a flag change cannot strand a constructed client.
         self._planners.extend((openrouter, deepseek, claude))
@@ -1155,11 +1193,11 @@ class LLMClient:
         self._coders: list[BaseLLMClient] = [*consumers]
         if qwen.available:
             self._coders.append(qwen)
-        else:
-            logger.warning(
-                "Qwen3 not enabled (LOCAL_LLM_URL / LOCAL_LLM_MODEL missing) "
-                "– excluded from coder chain."
-            )
+        # else:
+        #    logger.warning(
+        #         "Qwen3 not enabled (LOCAL_LLM_URL / LOCAL_LLM_MODEL missing) "
+        #         "– excluded from coder chain."
+        #     )
         self._coders.extend((openrouter, deepseek, claude))
 
         # Minimum coder tier; raised by escalate_coder() after test failures
@@ -1209,8 +1247,10 @@ class LLMClient:
                 logger.debug("Planner %s skipped – unavailable.", provider.name)
                 continue
             try:
+                user, history = (user_prompt, messages) if provider.caches_user_prefix \
+                    else _without_cache_break(user_prompt, messages)
                 with stats.llm_request("plan", provider):
-                    result = provider.generate_plan(system_prompt, user_prompt, messages)
+                    result = provider.generate_plan(system_prompt, user, history)
                 self._last_planner = provider
                 if idx > 0:
                     logger.info(
@@ -1257,8 +1297,10 @@ class LLMClient:
         for idx in self._coder_order():
             provider = self._coders[idx]
             try:
+                user, history = (user_prompt, messages) if provider.caches_user_prefix \
+                    else _without_cache_break(user_prompt, messages)
                 with stats.llm_request("code", provider):
-                    result = provider.generate_code(system_prompt, user_prompt, messages)
+                    result = provider.generate_code(system_prompt, user, history)
                 self._last_coder = provider
                 if idx > self._min_coder_tier:
                     logger.info(

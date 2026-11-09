@@ -84,6 +84,33 @@ _TEST_COMMAND = [
     ]),
 ]
 
+APP_FACTS_MARK = "@@NESTI-FACTS@@"
+
+# Laravel Boost ApplicationInfo ({} → e30=) and DatabaseSchema ({"summary": true}), each between
+# APP_FACTS_MARK lines. Migrations run against the throwaway sandbox database only, exactly as
+# the PHPUnit recipe does.
+_APP_FACTS_COMMAND = [
+    "bash",
+    "-lc",
+    " ".join([
+        "set -e;",
+        _CAPTURE_OWNER,
+        _TRAP_OWNER,
+        "composer install --no-interaction --prefer-dist --no-progress;",
+        '[ "$DB_CONNECTION" = pgsql ] || export DB_CONNECTION=sqlite DB_DATABASE="$PWD/database/database.sqlite";',
+        "[ -f .env ] || cp .env.example .env;",
+        "php artisan key:generate --force;",
+        "php artisan config:clear;",
+        'if [ "$DB_CONNECTION" = sqlite ]; then rm -f database/database.sqlite; touch database/database.sqlite; fi;',
+        "php artisan migrate --force;",
+        f"echo '{APP_FACTS_MARK}';",
+        "php artisan boost:execute-tool 'Laravel\\Boost\\Mcp\\Tools\\ApplicationInfo' e30=;",
+        f"echo '{APP_FACTS_MARK}';",
+        "php artisan boost:execute-tool 'Laravel\\Boost\\Mcp\\Tools\\DatabaseSchema' eyJzdW1tYXJ5IjogdHJ1ZX0=;",
+        f"echo '{APP_FACTS_MARK}'",
+    ]),
+]
+
 _OPENAPI_COMMAND = [
     "bash",
     "-lc",
@@ -308,13 +335,32 @@ class DockerRunner:
             network_disabled=not network,
         )
 
+    def run_app_facts(self, workspace_path: str) -> tuple[bool, str]:
+        """
+        Print Boost's ApplicationInfo and DatabaseSchema summary of the Laravel app at
+        *workspace_path*, each segment delimited by APP_FACTS_MARK, after migrating a
+        throwaway database (the pgsql sidecar when phpunit.xml declares pgsql).
+
+        Returns ``(success, output)`` — success is True on exit code 0.
+        """
+        settings = _pgsql_settings(workspace_path)
+        if settings is None:
+            return self._run(workspace_path, _APP_FACTS_COMMAND, self.timeout, "app-facts",
+                             environment=_BOOST_ENV)
+        return self._run_with_postgres(workspace_path, settings, command=_APP_FACTS_COMMAND,
+                                       label="app-facts", environment=_BOOST_ENV)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _run_with_postgres(self, workspace_path: str, settings: dict[str, str]) -> tuple[bool, str]:
+    def _run_with_postgres(
+        self, workspace_path: str, settings: dict[str, str], *,
+        command: list[str] = _TEST_COMMAND, label: str = "phpunit",
+        environment: dict[str, str] | None = None,
+    ) -> tuple[bool, str]:
         """
-        Run the PHPUnit recipe against a disposable PostgreSQL sidecar.
+        Run *command* (default: the PHPUnit recipe) against a disposable PostgreSQL sidecar.
 
         A per-run ``nesti-run-<hex>`` network and ``nesti-pg-<hex>`` container
         hold a non-superuser login role owning the phpunit.xml database; both
@@ -352,12 +398,12 @@ class DockerRunner:
                 msg = "PostgreSQL sidecar setup failed: " + created.output.decode("utf-8", errors="replace")
                 logger.error(msg)
                 return False, msg
-            environment = {
+            pg_environment = {
                 "DB_CONNECTION": "pgsql", "DB_HOST": host, "DB_PORT": "5432",
                 "DB_DATABASE": database, "DB_USERNAME": username, "DB_PASSWORD": password,
             }
-            return self._run(workspace_path, _TEST_COMMAND, self.timeout, "phpunit",
-                             environment=environment, network=network.name)
+            return self._run(workspace_path, command, self.timeout, label,
+                             environment={**(environment or {}), **pg_environment}, network=network.name)
         except Exception as exc:  # pylint: disable=broad-except
             msg = f"PostgreSQL sidecar failed: {exc}"
             logger.error(msg)

@@ -26,7 +26,7 @@ def detect_stack(
     workspace_path: str,
     written_files: list[str] | None = None,
     backend_dir: str = ".",
-    frontend_dir: str = ".",
+    frontend_dir: str = "",
 ) -> dict:
     """
     Detect which test layers apply to the code at workspace_path.
@@ -40,8 +40,8 @@ def detect_stack(
     written_files yields the conservative answer: every layer the repository
     supports runs.
     Call this first to decide which of the run tools below to use.
-    backend_dir/frontend_dir name a separated layout's folders ("." = root,
-    frontend_dir "" = no SPA).
+    backend_dir '.' = repository root; frontend_dir '' = no SPA, else e.g.
+    '.frontend' or 'frontend'.
     """
     return tool_detect_stack(workspace_path, written_files, backend_dir, frontend_dir)
 
@@ -69,15 +69,11 @@ def docker_run_vitest(workspace_path: str) -> dict:
 @app.tool()
 def docker_run_playwright(workspace_path: str) -> dict:
     """
-    Run Playwright E2E tests against workspace_path in a headless Chromium
-    sandbox. Installs dependencies; for a Laravel app runs the migrations,
-    DatabaseSeeder and the fixtures declared in e2e/nesti-fixtures.json; builds
-    the app; and serves it via the webServer entry in playwright.config.js.
-    Returns passed: bool, output: str and fixture_request: dict | None.
-    fixture_request ({endpoint, model, seeder, table}) is set only when the
-    sandbox verified that a declared fixture's seeder class and file are both
-    absent and stopped before the browser started; any other failure is an
-    ordinary test failure with fixture_request None.
+    Run Playwright E2E tests against the SPA at workspace_path in a headless
+    Chromium sandbox. Installs dependencies, builds the SPA and serves it via
+    the webServer entry in playwright.config.js; the Laravel API does not run,
+    so specs stub every request.
+    Returns passed: bool and output: str.
     """
     return tool_playwright_run_tests(workspace_path)
 

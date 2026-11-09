@@ -1,5 +1,6 @@
 """Offline prompt composition, budget visibility and measurement regressions."""
 from copy import deepcopy
+from functools import partial
 import os
 import unittest
 from unittest.mock import patch
@@ -9,9 +10,10 @@ from skill_loader import Skill
 
 
 ISSUE = {"id": 31, "subject": "Add TitleLength", "description": "Show title length; keep the API unchanged."}
+SPA = {"backend": "backend", "frontend": "frontend"}
 BUILDERS = (
-    ("plan", prompts.build_plan_prompt, (ISSUE,)),
-    ("code", prompts.build_code_prompt, (ISSUE, "SCOPE: frontend\nAdd the column and its tests.")),
+    ("plan", partial(prompts.build_plan_prompt, layout=SPA), (ISSUE,)),
+    ("code", partial(prompts.build_code_prompt, layout=SPA), (ISSUE, "SCOPE: frontend\nAdd the column and its tests.")),
 )
 
 
@@ -141,14 +143,19 @@ class PromptBuilderTests(unittest.TestCase):
         for build in (prompts._planning_system_prompt, prompts._coding_system_prompt):
             for scope in prompts.SCOPES:
                 with self.subTest(build=build.__name__, scope=scope):
-                    plain, specific = build(scope, ""), build(scope, "README", None, domain)
+                    plain, specific = build(scope, "", SPA), build(scope, "README", SPA, domain)
+                    if scope != "backend":
+                        if build is prompts._coding_system_prompt:
+                            self.assertIn("PRIMEVUE SPA", plain)
+                        self.assertNotIn("Blade", plain)
+                        self.assertNotIn("resources/js", plain)
                     cut = plain.index("TASK SCOPE:")
                     self.assertEqual(plain[:cut], specific[:cut])
                     self.assertTrue(plain.startswith(prompts._PONYTAIL))
-        first = prompts.build_code_prompt(ISSUE, "Add the column.", repo_context="app/A.php")[1]
+        first = prompts.build_code_prompt(ISSUE, "Add the column.", repo_context="app/A.php", layout=SPA)[1]
         retry = prompts.build_code_prompt(
             ISSUE, "Add the column.", repo_context="app/A.php\napp/B.php",
-            recalled_failures=[{"attempt": 1, "layer": "phpunit", "summary": "red"}])[1]
+            recalled_failures=[{"attempt": 1, "layer": "phpunit", "summary": "red"}], layout=SPA)[1]
         cut = first.index("\n## Existing Repository State")
         self.assertEqual(first[:cut], retry[:cut])
         self.assertIn("## Approved Implementation Plan", first[:cut])

@@ -118,35 +118,6 @@ services:
       # Localhost only, same rule as nesti-redis.
       - "127.0.0.1:6333:6333"
 
-  nesti-serena:
-    # Serena MCP server: semantic code retrieval over NESTI_PROJECT_PATH. The
-    # orchestrator's planner queries it read-only (serena_client.py) at
-    # http://nesti-serena:9121/mcp; the port is not published. The project is
-    # mounted read-only, and Serena's project data (.serena: project.yml,
-    # memories, symbol cache) lives in nesti_serena_data instead of the checkout.
-    # NESTI_SERENA_ENABLE=false leaves the container idle.
-    # shortcut: language-server downloads live in the container layer and repeat
-    # after a recreate; mount a volume on SERENA_HOME if that startup cost matters.
-    image: ghcr.io/oraios/serena:2.1.0
-    container_name: nesti-serena
-    restart: unless-stopped
-    environment:
-      - NESTI_PROJECT_PATH=${NESTI_PROJECT_PATH:?Set NESTI_PROJECT_PATH in .env}
-      - NESTI_SERENA_ENABLE=${NESTI_SERENA_ENABLE:-true}
-    volumes:
-      - "${NESTI_PROJECT_PATH:?Set NESTI_PROJECT_PATH in .env}:${NESTI_PROJECT_PATH:?Set NESTI_PROJECT_PATH in .env}:ro"
-      - nesti_serena_data:/workspaces/serena/projects
-    entrypoint: ["/bin/bash", "-c"]
-    command:
-      - |
-        case "$${NESTI_SERENA_ENABLE,,}" in 0|false|no|off) exec sleep infinity;; esac
-        set -e
-        sed -i 's|^project_serena_folder_location:.*|project_serena_folder_location: "/workspaces/serena/projects/$$projectFolderName/.serena"|' "$$SERENA_HOME/serena_config.yml"
-        data="/workspaces/serena/projects/$$(basename "$$NESTI_PROJECT_PATH")/.serena"
-        mkdir -p "$$data"
-        [ -f "$$data/project.yml" ] || serena project create "$$NESTI_PROJECT_PATH" --language php --language vue
-        exec serena start-mcp-server --project "$$NESTI_PROJECT_PATH" --transport streamable-http --host 0.0.0.0 --port 9121 --context ide --mode planning --mode no-onboarding --agent-interface tools --enable-web-dashboard false
-
   # Build with `up --build`, but leave sandbox containers to the test runners.
   nesti-sandbox-php:
     build:
@@ -176,7 +147,4 @@ volumes:
     driver: local
   # Same lifecycle: survives `down`, removed only by `docker-compose down -v`.
   nesti_qdrant_data:
-    driver: local
-  # Serena project data (symbol cache, memories); same lifecycle as above.
-  nesti_serena_data:
     driver: local

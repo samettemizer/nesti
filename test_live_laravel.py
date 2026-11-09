@@ -18,24 +18,12 @@ What it proves, in order:
   1. a greenfield directory becomes a Laravel 13 API: Sanctum, Scramble,
      spatie/laravel-permission, the API-only welcome page, the spatie seed data
      and a README — no Vue
-  1b. the integrated top-up wires Vue into it once the app has a plugin-vue
-     vite.config.js: Vitest/Playwright configs and the pinned package.json
-  2. a realistic feature (migration → model → factory → seeder → FormRequest →
-     controller → API Resource → route → tests → Vue component registered on
-     the served page → specs → E2E fixture manifest) is written through the
-     FILE-block contract
+  2. a realistic backend feature (migration → model → factory → seeder →
+     FormRequest → controller → API Resource → route → tests) is written
+     through the FILE-block contract
   3. `php artisan migrate` + `php artisan test` go green in the PHP sandbox
   4. the OpenAPI gate passes for a documented surface AND fails, naming the
      route, for an undocumented one
-  5. Vitest goes green
-  6. Playwright goes green against `php artisan serve`: the image-owned
-     fixture helper seeds the declared, deliberately unregistered TaskSeeder
-     explicitly, and the browser sees exactly the 15 real rows on `/`
-  7. the fixture matrix with the real helper, Laravel kernel, SQLite and
-     Chromium: a valid empty state, existing/registered seeders, a missing
-     seeder (the only dependency request), and ordinary failures for broken
-     seeders, unrelated seed errors, HTTP/shape/mapping errors and a model on
-     another database (refused before migration)
   8. the starter kit (spatie roles) on that app: a Sakai SPA in .frontend/,
      PHPUnit, the documented /api/login|users|roles|permissions, Vitest and
      Playwright all green
@@ -97,53 +85,6 @@ _SCAFFOLD_EXPECTED = (
 _WELCOME_TEXT = ("At Nesti, we use Laravel solely to serve an API. "
                  "Please check the README.md for more information.")
 
-# Integrated Vue wiring a project brings itself (the scaffold no longer ships it).
-_INTEGRATED_VITE_CONFIG = """import { defineConfig } from 'vite';
-import laravel from 'laravel-vite-plugin';
-import tailwindcss from '@tailwindcss/vite';
-import vue from '@vitejs/plugin-vue';
-
-export default defineConfig({
-    plugins: [
-        laravel({
-            input: ['resources/css/app.css', 'resources/js/app.js'],
-            refresh: true,
-        }),
-        tailwindcss(),
-        vue(),
-    ],
-    resolve: {
-        alias: {
-            // Runtime compiler required: app.js relies on Vue compiling the
-            // in-DOM template of <div id="app">, so alias to the full build.
-            vue: 'vue/dist/vue.esm-bundler.js',
-        },
-    },
-});
-"""
-_INTEGRATED_WEB_ROUTES = """<?php
-
-use Illuminate\\Support\\Facades\\Route;
-
-Route::get('/', fn () => view('app'));
-"""
-# The PHP sandbox never builds assets, so Blade views with @vite render without Vite.
-_INTEGRATED_TEST_CASE = """<?php
-
-namespace Tests;
-
-use Illuminate\\Foundation\\Testing\\TestCase as BaseTestCase;
-
-abstract class TestCase extends BaseTestCase
-{
-    protected function setUp(): void
-    {
-        parent::setUp();
-
-        $this->withoutVite();
-    }
-}
-"""
 _STARTER_PATHS = ("/api/login", "/api/users", "/api/roles", "/api/permissions")
 _CUSTOM_ROLES_MIGRATION = """<?php
 
@@ -438,185 +379,6 @@ class TaskApiTest extends TestCase
     }
 }"""
 
-_COMPONENT = """<template>
-    <div class="task-table" data-testid="task-table">
-        <InputText v-model="search" placeholder="Search tasks" data-testid="task-search" />
-        <DataTable :value="filtered" data-key="id">
-            <template #empty>No tasks found.</template>
-            <Column field="title" header="Title" sortable>
-                <template #body="{ data }">
-                    <span data-testid="task-title">{{ data.title }}</span>
-                </template>
-            </Column>
-            <Column field="due_date" header="Due date" sortable />
-            <Column field="is_done" header="Done" sortable />
-        </DataTable>
-    </div>
-</template>
-
-<script setup>
-import { computed, onMounted, ref } from 'vue';
-import Column from 'primevue/column';
-import DataTable from 'primevue/datatable';
-import InputText from 'primevue/inputtext';
-
-const props = defineProps({
-    tasks: { type: Array, default: () => [] },
-});
-
-const emit = defineEmits(['refresh']);
-
-const rows = ref([...props.tasks]);
-const search = ref('');
-
-const filtered = computed(() => {
-    const needle = search.value.trim().toLowerCase();
-
-    if (!needle) {
-        return rows.value;
-    }
-
-    return rows.value.filter((task) => String(task.title).toLowerCase().includes(needle));
-});
-
-async function load() {
-    const response = await fetch('/api/tasks', { headers: { Accept: 'application/json' } });
-    const payload = await response.json();
-
-    rows.value = payload.data ?? [];
-    emit('refresh');
-}
-
-onMounted(() => {
-    if (props.tasks.length === 0) {
-        load();
-    }
-});
-</script>"""
-
-_COMPONENT_SPEC = """import { mount } from '@vue/test-utils';
-import Aura from '@primeuix/themes/aura';
-import PrimeVue from 'primevue/config';
-import { describe, expect, it } from 'vitest';
-import TaskTable from '../TaskTable.vue';
-
-const tasks = [
-    { id: 1, title: 'Alpha task', due_date: '2026-01-01', is_done: false },
-    { id: 2, title: 'Beta task', due_date: '2026-02-01', is_done: true },
-];
-
-function build() {
-    return mount(TaskTable, {
-        props: { tasks },
-        global: { plugins: [[PrimeVue, { theme: { preset: Aura } }]] },
-    });
-}
-
-describe('TaskTable', () => {
-    it('renders the three columns', () => {
-        const headers = build().findAll('th').map((th) => th.text());
-
-        expect(headers.join(' ')).toContain('Title');
-        expect(headers.join(' ')).toContain('Due date');
-        expect(headers.join(' ')).toContain('Done');
-    });
-
-    it('renders the rows handed in through the tasks prop', () => {
-        const text = build().text();
-
-        expect(text).toContain('Alpha task');
-        expect(text).toContain('Beta task');
-    });
-});"""
-
-# The response waiter is registered before navigation so the page's own GET
-# /api/tasks cannot slip past it; the visible titles must be exactly the
-# first page the real API returned, which an unmounted feature, a mock or a
-# doubly seeded database (30 rows) all fail.
-_E2E_SPEC = """import { expect, test } from '@playwright/test';
-
-test('the served home page renders the real seeded tasks', async ({ page }) => {
-    const tasksResponse = page.waitForResponse((response) =>
-        response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/tasks');
-
-    await page.goto('/');
-
-    const response = await tasksResponse;
-    expect(response.status()).toBe(200);
-    const payload = await response.json();
-    expect(payload.meta.total).toBe(15);
-    const titles = payload.data.map((task) => task.title);
-    expect(titles).toHaveLength(10);
-
-    await expect(page.getByTestId('task-table')).toBeVisible();
-    await expect(page.getByTestId('task-search')).toBeVisible();
-    await expect(page.locator('th', { hasText: 'Title' }).first()).toBeVisible();
-    await expect(page.locator('th', { hasText: 'Due date' }).first()).toBeVisible();
-    await expect(page.getByTestId('task-title')).toHaveText(titles);
-});"""
-
-# Step 7's valid empty state: the real API answers zero rows and the page
-# shows the DataTable's explicit empty slot.
-_E2E_EMPTY_SPEC = """import { expect, test } from '@playwright/test';
-
-test('the served home page shows the real empty state', async ({ page }) => {
-    const tasksResponse = page.waitForResponse((response) =>
-        response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/tasks');
-
-    await page.goto('/');
-
-    const response = await tasksResponse;
-    expect(response.status()).toBe(200);
-    const payload = await response.json();
-    expect(payload.meta.total).toBe(0);
-    expect(payload.data).toEqual([]);
-
-    await expect(page.getByTestId('task-table')).toBeVisible();
-    await expect(page.getByText('No tasks found.')).toBeVisible();
-    await expect(page.getByTestId('task-title')).toHaveCount(0);
-});"""
-
-# The E2E data contract: GET /api/tasks needs real Task rows, prepared by
-# TaskSeeder — which DatabaseSeeder deliberately does NOT call, so step 6
-# proves the helper's explicit-class seeding rather than the default seed.
-_TASK_REQUIREMENT = {
-    "endpoint": "/api/tasks",
-    "model": "App\\Models\\Task",
-    "seeder": "Database\\Seeders\\TaskSeeder",
-}
-_FIXTURE_MANIFEST = json.dumps({"version": 1, "fixtures": [_TASK_REQUIREMENT]}, indent=4)
-
-# The one template the fixture is allowed to extend: registering a feature
-# component is exactly what the coding prompt tells the model to do here.
-_APP_JS = """import { createApp } from 'vue';
-import PrimeVue from 'primevue/config';
-import Aura from '@primeuix/themes/aura';
-import 'primeicons/primeicons.css';
-import TaskTable from './components/TaskTable.vue';
-
-const app = createApp({});
-
-app.use(PrimeVue, { theme: { preset: Aura } });
-app.component('task-table', TaskTable);
-
-app.mount('#app');"""
-
-_APP_BLADE = """<!DOCTYPE html>
-<html lang="{{ str_replace('_', '-', app()->getLocale()) }}">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="csrf-token" content="{{ csrf_token() }}">
-    <title>{{ config('app.name', 'Laravel') }}</title>
-    @vite(['resources/css/app.css', 'resources/js/app.js'])
-</head>
-<body>
-    <div id="app">
-        <task-table></task-table>
-    </div>
-</body>
-</html>"""
-
 # A route Scramble is told to skip: the gate must notice it is registered but
 # absent from the exported document.
 _CONTROLLER_WITH_HIDDEN = _CONTROLLER.replace(
@@ -649,12 +411,6 @@ def _feature_blocks() -> str:
         _block("app/Http/Controllers/TaskController.php", "php", _CONTROLLER),
         _block("routes/api.php", "php", _ROUTES_API),
         _block("tests/Feature/TaskApiTest.php", "php", _FEATURE_TEST),
-        _block("resources/js/components/TaskTable.vue", "vue", _COMPONENT),
-        _block("resources/js/components/__tests__/TaskTable.test.js", "js", _COMPONENT_SPEC),
-        _block("e2e/tasks.spec.js", "js", _E2E_SPEC),
-        _block("e2e/nesti-fixtures.json", "json", _FIXTURE_MANIFEST),
-        _block("resources/js/app.js", "js", _APP_JS),
-        _block("resources/views/app.blade.php", "blade", _APP_BLADE),
     ))
 
 
@@ -731,30 +487,11 @@ def step_bootstrap(repo: str) -> None:
     )
 
 
-def step_integrated_wiring(repo: str) -> None:
-    step = "1b. integrated Vue top-up"
-    for rel, body in (("vite.config.js", _INTEGRATED_VITE_CONFIG),
-                      ("routes/web.php", _INTEGRATED_WEB_ROUTES),
-                      ("tests/TestCase.php", _INTEGRATED_TEST_CASE)):
-        Path(repo, rel).write_text(body, encoding="utf-8")
-    result = tool_laravel_bootstrap(repo)
-    if not result["success"]:
-        _fail(step, result["error"][-_OUTPUT_TAIL:])
-    missing = [rel for rel in ("vitest.config.js", "playwright.config.js") if not Path(repo, rel).is_file()]
-    if missing:
-        _fail(step, f"top-up did not write {', '.join(missing)}")
-    package = json.loads(Path(repo, "package.json").read_text(encoding="utf-8"))
-    pin = package.get("devDependencies", {}).get("@playwright/test")
-    if pin != "1.50.0" or "vue" not in package.get("dependencies", {}):
-        _fail(step, f'package.json needs vue and @playwright/test "1.50.0", got {pin!r}')
-    _record(step, True, result["result"]["reason"])
-
-
 def step_write_feature(repo: str) -> None:
     written_ok, written = DockerRunner.write_files(_feature_blocks(), repo)
     if not written_ok:
-        _fail("2. write the fixture feature", "no FILE blocks were parsed")
-    _record("2. write the fixture feature", True, ", ".join(written))
+        _fail("2. write the backend feature", "no FILE blocks were parsed")
+    _record("2. write the backend feature", True, ", ".join(written))
 
 
 def step_phpunit(repo: str) -> None:
@@ -813,292 +550,13 @@ def step_openapi_red(repo: str) -> None:
         _record("4b. OpenAPI gate (undocumented)", True,
                 f"undocumented={detail['undocumented']}")
     finally:
-        # Restore the green surface so the frontend layers run against it.
+        # Restore the green surface so the starter-kit steps run against it.
         Path(repo, "app/Http/Controllers/TaskController.php").write_text(
             _CONTROLLER, encoding="utf-8")
         Path(repo, "routes/api.php").write_text(_ROUTES_API, encoding="utf-8")
 
 
-def step_vitest(repo: str) -> None:
-    started = time.monotonic()
-    passed, output = FrontendRunner().run_vitest(repo)
-    took = time.monotonic() - started
-    if not passed:
-        _fail("5. Vitest component layer", output[-_OUTPUT_TAIL:])
-    _record("5. Vitest component layer", True, f"green ({took:.0f}s)")
-
-
-def step_playwright(repo: str) -> None:
-    started = time.monotonic()
-    result = FrontendRunner().run_playwright(repo)
-    took = time.monotonic() - started
-    output = result["output"]
-    if not result["passed"]:
-        _fail("6. Playwright E2E layer",
-              f"fixture_request={result['fixture_request']}\n{output[-_OUTPUT_TAIL:]}")
-    if result["fixture_request"] is not None:
-        _fail("6. Playwright E2E layer",
-              f"a green run carried fixture_request={result['fixture_request']}")
-    if not _BROWSER_RUN.search(output):
-        _fail("6. Playwright E2E layer", f"the browser suite did not run:\n{output[-_OUTPUT_TAIL:]}")
-    _record("6. Playwright E2E layer", True,
-            f"green against `php artisan serve`; {_helper_line(output, _EXPLICIT_SEED_LOG)} "
-            f"({took:.0f}s)")
-
-
-# ── Step 7: the fixture matrix ───────────────────────────────────────────────
-
-_MANIFEST_PATH = "e2e/nesti-fixtures.json"
-_SPEC_PATH = "e2e/tasks.spec.js"
-_SEEDER_PATH = "database/seeders/TaskSeeder.php"
-_DATABASE_SEEDER_PATH = "database/seeders/DatabaseSeeder.php"
-_MODEL_PATH = "app/Models/Task.php"
-_ROUTES_API_PATH = "routes/api.php"
-_DATABASE_CONFIG_PATH = "config/database.php"
-_SENTINEL_PATH = "database/other.sqlite"
-
-# Every file step 7 rewrites; all of it is restored afterwards.
-_FIXTURE_CASE_FILES = (
-    _MANIFEST_PATH, _SPEC_PATH, _SEEDER_PATH, _DATABASE_SEEDER_PATH, _MODEL_PATH,
-    _ROUTES_API_PATH, _DATABASE_CONFIG_PATH, _SENTINEL_PATH,
-)
-
-_FIXTURE_REQUEST = {**_TASK_REQUIREMENT, "table": "tasks"}
-_EXPLICIT_SEED_LOG = "row(s) after Database\\Seeders\\TaskSeeder, fixture satisfied"
 _BROWSER_RUN = re.compile(r"Running \d+ tests? using")
-
-_DATABASE_SEEDER_TEMPLATE = """<?php
-
-namespace Database\\Seeders;
-
-use Illuminate\\Database\\Seeder;
-
-class DatabaseSeeder extends Seeder
-{
-    public function run(): void
-    {
-        __BODY__
-    }
-}"""
-
-
-def _database_seeder(body: str) -> str:
-    return _DATABASE_SEEDER_TEMPLATE.replace("__BODY__", body)
-
-
-_SEED_CALL = "Task::factory()->count(15)->create();"
-_NOOP_SEEDER = _SEEDER.replace(_SEED_CALL, "// Seeds nothing.")
-_THROWING_SEEDER = _SEEDER.replace(
-    _SEED_CALL, "throw new \\RuntimeException('TaskSeeder exploded on purpose');")
-_MISNAMED_SEEDER = _SEEDER.replace("class TaskSeeder extends", "class TaskSeederRenamed extends")
-_UNPARSABLE_SEEDER = _SEEDER.replace(_SEED_CALL, "Task::factory()->count(15)->create(")
-
-_MODEL_OTHER_TABLE = _MODEL.replace(
-    "    use HasFactory;\n", "    use HasFactory;\n\n    protected $table = 'task_items';\n")
-_MODEL_OTHER_DATABASE = _MODEL.replace(
-    "    use HasFactory;\n", "    use HasFactory;\n\n    protected $connection = 'sqlite_other';\n")
-
-_CONNECTIONS_OPENER = "'connections' => ["
-_OTHER_CONNECTION = """'connections' => [
-
-        'sqlite_other' => [
-            'driver' => 'sqlite',
-            'database' => database_path('other.sqlite'),
-            'prefix' => '',
-        ],
-"""
-
-_INDEX_ROUTE = "Route::get('/tasks', [TaskController::class, 'index']);"
-
-
-def _routes_api(get_route: str) -> str:
-    """routes/api.php with the GET /tasks route swapped for *get_route*."""
-    return _ROUTES_API.replace(
-        "use Illuminate\\Support\\Facades\\Route;",
-        "use App\\Http\\Resources\\TaskResource;\n"
-        "use App\\Models\\Task;\n"
-        "use Illuminate\\Support\\Facades\\Route;",
-    ).replace(_INDEX_ROUTE, get_route)
-
-
-def _helper_line(output: str, needle: str = "") -> str:
-    """The helper's line containing *needle*, else its last line."""
-    lines = [line.strip() for line in output.splitlines() if "[nesti-fixtures]" in line]
-    matching = [line for line in lines if needle in line] if needle else []
-    return (matching or lines or ["(no [nesti-fixtures] output)"])[-1]
-
-
-def _apply_files(repo: str, files: dict[str, str | bytes | None]) -> None:
-    for rel, content in files.items():
-        path = Path(repo, rel)
-        if content is None:
-            path.unlink(missing_ok=True)
-        elif isinstance(content, bytes):
-            path.write_bytes(content)
-        else:
-            path.write_text(content, encoding="utf-8")
-
-
-def _check_fixture_case(
-    step: str,
-    result: dict,
-    took: float,
-    kind: str,
-    needles: tuple[str, ...] = (),
-    absent: tuple[str, ...] = (),
-) -> None:
-    """Assert one case: kind is "pass", "blocked" or "fail" (ordinary failure)."""
-    output = result["output"]
-    browser_ran = bool(_BROWSER_RUN.search(output))
-    if kind == "pass":
-        ok = (result["passed"] and result["fixture_request"] is None and browser_ran
-              and "[nesti-fixtures] ready" in output)
-    elif kind == "blocked":
-        ok = (not result["passed"] and result["fixture_request"] == _FIXTURE_REQUEST
-              and not browser_ran and "[nesti-fixtures] missing seeder" in output)
-    else:
-        ok = (not result["passed"] and result["fixture_request"] is None
-              and not browser_ran and "[nesti-fixtures] FAILED" in output)
-    missing = [needle for needle in needles if needle not in output]
-    present = [needle for needle in absent if needle in output]
-    if not ok or missing or present:
-        _fail(step,
-              f"expected {kind}: passed={result['passed']} "
-              f"fixture_request={result['fixture_request']} browser_ran={browser_ran} "
-              f"missing={missing} unexpected={present}\n{output[-_OUTPUT_TAIL:]}")
-    _record(step, True,
-            f"passed={result['passed']} fixture_request={result['fixture_request']} "
-            f"browser_ran={browser_ran} ({took:.0f}s): {_helper_line(output, needles[0] if needles else '')}")
-
-
-def step_fixture_dependencies(repo: str) -> None:
-    """
-    Step 7: drive the real image-owned fixture helper through every outcome.
-
-    Only harness-owned files change between cases (manifest, specs, seeders,
-    model, API routes, a database connection); every E2E run recreates its
-    own SQLite file.  The final case restores the positive fixture, so the
-    workspace ends with built assets and the 15-row database.
-    """
-    snapshot: dict[str, bytes | None] = {
-        rel: (Path(repo, rel).read_bytes() if Path(repo, rel).is_file() else None)
-        for rel in _FIXTURE_CASE_FILES
-    }
-    skeleton_config = (snapshot[_DATABASE_CONFIG_PATH] or b"").decode("utf-8")
-    if _CONNECTIONS_OPENER not in skeleton_config:
-        _fail("7. fixture matrix", f"{_DATABASE_CONFIG_PATH} has no {_CONNECTIONS_OPENER!r}")
-    other_config = skeleton_config.replace(_CONNECTIONS_OPENER, _OTHER_CONNECTION, 1)
-
-    # The positive fixture: manifest + existing, unregistered TaskSeeder.
-    positive: dict[str, str | bytes | None] = {
-        _MANIFEST_PATH: _FIXTURE_MANIFEST,
-        _SPEC_PATH: _E2E_SPEC,
-        _SEEDER_PATH: _SEEDER,
-        _DATABASE_SEEDER_PATH: snapshot[_DATABASE_SEEDER_PATH],
-        _MODEL_PATH: _MODEL,
-        _ROUTES_API_PATH: _ROUTES_API,
-        _DATABASE_CONFIG_PATH: snapshot[_DATABASE_CONFIG_PATH],
-        _SENTINEL_PATH: None,
-    }
-    registered = _database_seeder("$this->call(TaskSeeder::class);")
-    sentinel = Path(repo, _SENTINEL_PATH)
-    database = Path(repo, "database/database.sqlite")
-
-    def other_database_untouched() -> str | None:
-        if not sentinel.is_file() or sentinel.read_bytes() != b"":
-            return f"{_SENTINEL_PATH} was modified"
-        if sentinel.stat().st_mtime_ns != sentinel_mtime[0]:
-            return f"{_SENTINEL_PATH} was touched"
-        if database.stat().st_size != 0:
-            return "database/database.sqlite was migrated although the helper refused"
-        return None
-
-    sentinel_mtime = [0]
-
-    def prepare_sentinel() -> None:
-        sentinel.write_bytes(b"")
-        sentinel_mtime[0] = sentinel.stat().st_mtime_ns
-
-    cases: list[tuple[str, dict[str, str | bytes | None], str, tuple[str, ...], tuple[str, ...]]] = [
-        ("7a. no manifest, no task seeding → real empty state",
-         {_MANIFEST_PATH: None, _SPEC_PATH: _E2E_EMPTY_SPEC},
-         "pass", ("0 declared fixture(s)",), ("db:seed --class",)),
-        ("7b. TaskSeeder registered in DatabaseSeeder → 15 rows, not 30",
-         {_DATABASE_SEEDER_PATH: registered},
-         "pass", (), ("db:seed --class",)),
-        ("7c. TaskSeeder absent, unregistered → dependency request",
-         {_SEEDER_PATH: None},
-         "blocked", ("[nesti-fixtures] missing seeder",), ()),
-        ("7d. TaskSeeder absent, referenced by DatabaseSeeder → dependency request",
-         {_SEEDER_PATH: None, _DATABASE_SEEDER_PATH: registered},
-         "blocked",
-         ("default seeding stopped: Target class [Database\\Seeders\\TaskSeeder] does not exist.",),
-         ()),
-        ("7e. no-op TaskSeeder → ordinary failure",
-         {_SEEDER_PATH: _NOOP_SEEDER},
-         "fail", ("still returns no rows",), ()),
-        ("7f. throwing TaskSeeder → ordinary failure",
-         {_SEEDER_PATH: _THROWING_SEEDER},
-         "fail", ("TaskSeeder exploded on purpose",), ()),
-        ("7g. TaskSeeder.php with the wrong class name → ordinary failure",
-         {_SEEDER_PATH: _MISNAMED_SEEDER},
-         "fail", ("cannot be loaded although database/seeders/TaskSeeder.php exists",), ()),
-        ("7h. TaskSeeder.php with a syntax error → ordinary failure",
-         {_SEEDER_PATH: _UNPARSABLE_SEEDER},
-         "fail", ("ParseError",), ()),
-        ("7i. DatabaseSeeder calls an undeclared missing class → ordinary failure",
-         {_DATABASE_SEEDER_PATH: _database_seeder("$this->call(UnrelatedSeeder::class);")},
-         "fail", ("Target class [Database\\Seeders\\UnrelatedSeeder] does not exist.",), ()),
-        ("7j. DatabaseSeeder throws → ordinary failure",
-         {_DATABASE_SEEDER_PATH: _database_seeder(
-             "throw new \\RuntimeException('unrelated default-seed failure');")},
-         "fail", ("unrelated default-seed failure",), ()),
-        ("7k. endpoint behind auth → ordinary failure",
-         {_ROUTES_API_PATH: _routes_api(_INDEX_ROUTE.replace(";", "->middleware('auth');"))},
-         "fail", ("answered HTTP 401",), ()),
-        ("7l. endpoint redirects → ordinary failure",
-         {_ROUTES_API_PATH: _routes_api("Route::get('/tasks', fn () => redirect('/'));")},
-         "fail", ("answered HTTP 302",), ()),
-        ("7m. endpoint is not a collection → ordinary failure",
-         {_ROUTES_API_PATH: _routes_api(
-             "Route::get('/tasks', fn () => response()->json(['tasks' => []]));")},
-         "fail", ("neither a JSON array nor an object with an array",), ()),
-        ("7n. endpoint answers [] without reading tasks → ordinary failure",
-         {_ROUTES_API_PATH: _routes_api("Route::get('/tasks', fn () => response()->json([]));")},
-         "fail", ("ran no SELECT on table tasks",), ()),
-        ("7o. endpoint filters out existing rows → ordinary failure",
-         {_DATABASE_SEEDER_PATH: registered,
-          _ROUTES_API_PATH: _routes_api(
-              "Route::get('/tasks', fn () => TaskResource::collection("
-              "Task::query()->where('id', '<', 0)->paginate(10)));")},
-         "fail", ("although table tasks has records",), ()),
-        ("7p. declared model's table does not exist → ordinary failure",
-         {_MODEL_PATH: _MODEL_OTHER_TABLE},
-         "fail", ("table task_items does not exist after migration",), ()),
-        ("7q. declared model on another database → refused before migration",
-         {_MODEL_PATH: _MODEL_OTHER_DATABASE, _DATABASE_CONFIG_PATH: other_config},
-         "fail", ("is not the recreated workspace SQLite file",),
-         ("[nesti-fixtures] migrate --force", "db:seed")),
-        ("7r. positive fixture restored → explicit TaskSeeder, 15 rows",
-         {},
-         "pass", (_EXPLICIT_SEED_LOG,), ()),
-    ]
-
-    try:
-        for step, changes, kind, needles, absent in cases:
-            _apply_files(repo, {**positive, **changes})
-            if _MODEL_PATH in changes and changes[_MODEL_PATH] is _MODEL_OTHER_DATABASE:
-                prepare_sentinel()
-            started = time.monotonic()
-            result = FrontendRunner().run_playwright(repo)
-            took = time.monotonic() - started
-            _check_fixture_case(step, result, took, kind, needles, absent)
-            if sentinel.exists():
-                problem = other_database_untouched()
-                if problem:
-                    _fail(step, problem)
-    finally:
-        _apply_files(repo, positive)
 
 
 # ── Steps 8–10: the starter kit ──────────────────────────────────────────────
@@ -1127,9 +585,9 @@ def _starter_layers(step: str, app: str, variant: str) -> str:
     passed, output = FrontendRunner().run_vitest(spa)
     if not passed:
         _fail(step, f"Vitest:\n{output[-_OUTPUT_TAIL:]}")
-    e2e = FrontendRunner().run_playwright(spa)
-    if not e2e["passed"] or not _BROWSER_RUN.search(e2e["output"]):
-        _fail(step, f"Playwright:\n{e2e['output'][-_OUTPUT_TAIL:]}")
+    passed, output = FrontendRunner().run_playwright(spa)
+    if not passed or not _BROWSER_RUN.search(output):
+        _fail(step, f"Playwright:\n{output[-_OUTPUT_TAIL:]}")
     return f"variant {variant}; PHPUnit {tests}; documented {list(expected)}; Vitest + Playwright green"
 
 
@@ -1211,7 +669,6 @@ def main() -> int:
         step_images()
         if args.from_step <= 1:
             step_bootstrap(repo)
-            step_integrated_wiring(repo)
         if args.from_step <= 2:
             step_write_feature(repo)
         if args.from_step <= 3:
@@ -1219,12 +676,6 @@ def main() -> int:
         if args.from_step <= 4:
             step_openapi_green(repo)
             step_openapi_red(repo)
-        if args.from_step <= 5:
-            step_vitest(repo)
-        if args.from_step <= 6:
-            step_playwright(repo)
-        if args.from_step <= 7:
-            step_fixture_dependencies(repo)
         if args.from_step <= 8:
             step_starter_kit(repo)
         if args.from_step <= 10:

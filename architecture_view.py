@@ -112,8 +112,6 @@ def render_page(record: dict, out: Path) -> Path:
         pk = frontend.get("packages") or {}
         rows = [("path", frontend["path"])] + [(n, pk[n]) for n in
                                                ("vue", "primevue", "vue-router", "pinia", "typescript") if n in pk]
-        if frontend.get("integrated"):
-            rows.append(("integrated", "resources/js"))
         cards.append(_card("Frontend", rows))
     cards.append(_card("Other", [("folders", ", ".join(arch.get("other_dirs") or []) or "—")]))
     domains = ""

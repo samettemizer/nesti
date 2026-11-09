@@ -6,15 +6,14 @@ The issues drive one full pass of the Laravel + PrimeVue pipeline:
 
     1. backend + database + /api  → PHPUnit + OpenAPI layers
     2. PrimeVue DataTable         → Vitest + Playwright layers
-    3. PrimeVue Dialog form       → Vitest + Playwright layers (PHPUnit only if
-                                    a seeder is registered), posting to issue 1's API
+    3. PrimeVue Dialog form       → Vitest + Playwright layers, posting to issue 1's API
 
 Idempotent: an issue whose title already exists as an OPEN issue carrying the
 opt-in label is skipped, so re-running after a partial seed never duplicates
 work. GitLab titles are not unique, so the match is on exact title.
 
-Creation goes through GitLabIssuesClient.create_issue, the same verified
-single-POST path Nesti uses for fixture-dependency issues.
+Creation goes through GitLabIssuesClient.create_issue, the verified
+single-POST path.
 
 Usage:
     python scripts/seed_live_issues.py --dry-run
@@ -67,11 +66,11 @@ Acceptance Criteria:
         "description": """Context: the task API exists but nothing renders it.
 
 Requirements:
-- `resources/js/components/TaskTable.vue` fetching `GET /api/tasks`.
+- `frontend/src/components/TaskTable.vue` fetching `GET /api/tasks`.
 - PrimeVue `DataTable` + `Column` for `title`, `due_date` and `is_done`.
 - Sortable columns.
 - A search input filtering rows client-side.
-- Mounted on `/`.
+- Shown on a `/tasks` page registered in the SPA router.
 
 https://primevue.dev/llms/components/datatable.md
 
@@ -87,7 +86,7 @@ Acceptance Criteria:
         "description": """Context: tasks can be listed but not created from the UI.
 
 Requirements:
-- `resources/js/components/TaskCreateDialog.vue` using PrimeVue `Dialog`,
+- `frontend/src/components/TaskCreateDialog.vue` using PrimeVue `Dialog`,
   `InputText`, `DatePicker` and `Button`.
 - Posts to `POST /api/tasks`.
 - Shows the 422 validation messages inline with PrimeVue `Message`.

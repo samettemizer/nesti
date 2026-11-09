@@ -66,6 +66,7 @@ class IssueState(TypedDict, total=False):
     base_sha: str                      # target-branch commit the clone started from
     layout: dict                       # {"backend": str|None, "frontend": str|None}; "." = clone root
     domain: dict | None  # domain-split backend: issue_domain.selection(); "name" "" = not chosen; None = no domain architecture
+    app_facts: str                     # Laravel Boost app info + schema summary at HEAD; prompts only, never a gate
     branch_name: str                   # git branch
     workspace: str                     # tempdir path
 
@@ -113,13 +114,6 @@ class IssueState(TypedDict, total=False):
     vitest_output: str
     playwright_passed: bool
     playwright_output: str
-
-    # ── Fixture dependencies ───────────────────────────────────────────────
-    # A verified missing-seeder report from the E2E sandbox (endpoint/model/
-    # seeder/table) and what node_pause_dependency made of it.  Both are
-    # cleared by node_code so no attempt inherits a previous block.
-    fixture_request: dict | None       # set only by node_playwright_test
-    dependency_status: str             # "" | "paused" | "ineligible" | "error"
 
     # ── Hierarchical vector memory ───────────────────────────────
     # How much memory reached the prompts — reported in the MR body so a

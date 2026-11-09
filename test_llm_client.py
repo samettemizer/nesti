@@ -233,6 +233,7 @@ class ProviderBoundaryTests(unittest.TestCase):
 
                 class Provider:
                     available = True
+                    caches_user_prefix = False
                     label = name = "offline test provider"
 
                     def __init__(self, fail):
@@ -262,6 +263,34 @@ class ProviderBoundaryTests(unittest.TestCase):
                     self.assertEqual((system, user), (_SYSTEM, "unused"))
                     self.assertIs(messages, _MESSAGES)
                     self.assertEqual(snapshot, original)
+
+    def test_cache_break_splits_claude_user_prompt_and_is_stripped_for_others(self):
+        bodies = []
+        stream = b"data: " + json.dumps({"type": "response.output_text.delta", "delta": "ok"}).encode() + b"\n\n"
+
+        def send(adapter, request, **kwargs):
+            bodies.append(json.loads(request.body))
+            if "anthropic" in request.url:
+                return _response(request, {"error": "overloaded"}, status=529)
+            return _response(request, stream, stream=True)
+
+        chain = llm.LLMClient.__new__(llm.LLMClient)
+        chain._planners = chain._coders = [llm.ClaudeConsumerClient(), llm.ChatGPTConsumerClient()]
+        chain._min_coder_tier = 0
+        chain._api_failed_coders = set()
+        prompt = "STABLE" + llm.CACHE_BREAK + "VOLATILE"
+        with patch.object(llm._ConsumerLLMBase, "_credentials",
+                          return_value={"access_token": "t", "account_id": "a"}), \
+                patch.object(llm, "_token_store"), \
+                patch.object(llm, "telegram_notify"), \
+                patch("requests.adapters.HTTPAdapter.send", autospec=True, side_effect=send):
+            self.assertEqual(chain.generate_code(_SYSTEM, prompt), "ok")
+        self.assertEqual(bodies[0]["messages"], [{"role": "user", "content": [
+            {"type": "text", "text": "STABLE", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "VOLATILE"},
+        ]}])
+        self.assertEqual(bodies[1]["input"][0]["content"][0]["text"], "STABLEVOLATILE")
+        self.assertNotIn(llm.CACHE_BREAK, json.dumps(bodies[1]))
 
 
 if __name__ == "__main__":

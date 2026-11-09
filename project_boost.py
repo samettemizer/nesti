@@ -374,7 +374,7 @@ def _ensure_boost(backend: Path) -> tuple[Path, str]:
 def _backend_orientation(tools: _ReadOnlyTools, layout: dict) -> str:
     backend = tools.root
     facts = "This is the Laravel API."
-    if layout["frontend"] not in (None, "."):
+    if layout["frontend"]:
         facts += (f" The SPA in `{layout['frontend']}/` is analysed separately; "
                   "do not look for Vue code here.")
     parts = [f"## Layout\n{facts}", f"## composer.json\n{_text(backend / 'composer.json', 8000)}"]
@@ -684,8 +684,6 @@ def _architecture_rule(record: dict) -> str:
                f"laravel/framework {backend.get('laravel') or 'unknown'})."]
     if layout["frontend"] is None:
         bullets.append("Frontend: no frontend SPA.")
-    elif layout["frontend"] == ".":
-        bullets.append("Frontend: Vue, integrated in the Laravel app (resources/js).")
     else:
         frontend = architecture.get("frontend") or {}
         packages = frontend.get("packages") or {}
@@ -852,7 +850,7 @@ def _boost(root: Path, record: dict, llm: _RecordingLLM, progress: Callable[[str
     recorded = _record_backend(backend, back["patterns"])
 
     front: dict = {"patterns": [], "conflicts": [], "rejected": [], "incomplete": []}
-    if layout["frontend"] not in (None, "."):
+    if layout["frontend"]:
         spa_tools = _ReadOnlyTools(root / layout["frontend"])
         spa_skill = _strip_frontmatter(_text(SPA_SKILL_DIR / "SKILL.md"))
         front = _sweep(llm, "frontend", f"{spa_skill}\n\n{_PROTOCOL}", _spa_orientation(spa_tools, layout),

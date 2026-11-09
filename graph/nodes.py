@@ -52,14 +52,6 @@ node_plan decides whether the issue is backend, frontend or fullstack work
 (issue text first, then the planner's ``SCOPE:`` line) and logs it as the run's
 one ``SCOPE:`` line.  The scope narrows the prompts, the reference docs and the
 retrieved chunks; it never gates a test layer.
-
-Fixture dependencies
-────────────────────
-When the E2E sandbox verifies that a declared fixture's seeder genuinely does
-not exist, node_playwright_test logs BLOCKED and node_pause_dependency pauses
-the issue durably in GitLab and opens one backend dependency issue — with no
-planner, coder or escalation call, independently of the scope.  The issue is
-resumed by TaskEngine's reconciliation only after that child's MR is merged.
 """
 
 import logging
@@ -83,8 +75,8 @@ from graph.tools import (
     tool_skill_catalog_select, tool_skill_catalog_status, tool_quota_check,
     tool_memory_search_docs, tool_memory_find_similar, tool_memory_remember_solution,
     tool_memory_remember_failure, tool_memory_recall_failures,
-    tool_memory_forget_episodes, tool_issue_pause_for_fixture,
-    tool_issue_domain_answer, tool_issue_ask_domain,
+    tool_memory_forget_episodes,
+    tool_issue_domain_answer, tool_issue_ask_domain, tool_app_facts,
     _STACK_SCAN_PRUNE,
 )
 from gitlab_issues_client import failed_run_marker
@@ -92,10 +84,9 @@ from issue_domain import classify as classify_domain, detect as detect_domain, d
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
 from project_layout import SCAFFOLD_BACKEND_DIR, LayoutError, clone_layout, spa_dir_for
-from serena_client import research as serena_research
 from conversation_store import ConversationStore
 from prompt_builder import (
-    build_plan_prompt, build_code_prompt, drop_injected_chunks, format_catalog_for_prompt, is_separated,
+    build_plan_prompt, build_code_prompt, drop_injected_chunks, format_catalog_for_prompt,
 )
 from layer_output import condense
 from telegram_notifier import notify as telegram_notify
@@ -166,9 +157,7 @@ def _cleared_layer_outputs() -> dict:
     (``_last_failure_output`` picks the newest red layer with any output),
     widen the scope on the wrong side, and reach the MR body as a layer that
     never ran on the merged code.  Clearing them in node_code's *return* keeps
-    its own episodic-recall query on the failure that led to it.  The fixture
-    fields are cleared for the same reason: no attempt inherits an earlier
-    attempt's block.
+    its own episodic-recall query on the failure that led to it.
     """
     return {
         "test_output": "",
@@ -176,8 +165,6 @@ def _cleared_layer_outputs() -> dict:
         "openapi_paths": [],
         "vitest_output": "",
         "playwright_output": "",
-        "fixture_request": None,
-        "dependency_status": "",
     }
 
 
@@ -409,10 +396,8 @@ _INVENTORY_DIRS = (
     ("app/Http/Resources", 40),
     ("app/Http/Requests", 40),
     ("app/Services", 40),
-    ("resources/js/components", 40),
     ("resources/views", 40),
     ("tests/Feature", 40),
-    ("e2e", 40),
 )
 
 # Route files are quoted rather than listed: the coder must see which URIs are
@@ -425,25 +410,8 @@ _MAX_ROUTE_SUBDIR_CHARS = 8000
 
 # Every scope quotes the default seeder so backend removals can preserve
 # unrelated registrations, and bootstrap/app.php, whose withRouting() decides
-# the URL prefix of routes/api.php. Frontend/fullstack also quote the served
-# entry chain, fixture manifest and configs. Only COMPLETE bodies are quoted; an
+# the URL prefix of routes/api.php. Only COMPLETE bodies are quoted; an
 # oversized or unreadable body is named as omitted, never safe to rewrite.
-_INVENTORY_QUOTED_FILES = (
-    ("resources/js/app.js", "js"),
-    ("resources/js/app.ts", "ts"),
-    ("resources/views/app.blade.php", "blade"),
-    ("resources/js/App.vue", "vue"),
-    ("database/seeders/DatabaseSeeder.php", "php"),
-    ("bootstrap/app.php", "php"),
-    ("e2e/nesti-fixtures.json", "json"),
-    ("vite.config.js", "js"),
-    ("vite.config.ts", "ts"),
-    ("playwright.config.js", "js"),
-    ("playwright.config.ts", "ts"),
-    ("vitest.config.js", "js"),
-    ("vitest.config.ts", "ts"),
-    ("package.json", "json"),
-)
 _BACKEND_QUOTED_FILES = (("database/seeders/DatabaseSeeder.php", "php"), ("bootstrap/app.php", "php"))
 _MAX_QUOTED_FILE_CHARS = 24000
 _MAX_QUOTED_TOTAL_CHARS = 48000
@@ -462,8 +430,8 @@ def _inventory_listing(directory: Path) -> list[str]:
 
 
 def _quoted_entry_files(
-    root: Path, referenced_files: list[tuple[str, str]] | None = None,
-    prefix: str = "", quoted: tuple[tuple[str, str], ...] = _INVENTORY_QUOTED_FILES,
+    root: Path, referenced_files: list[tuple[str, str]], prefix: str,
+    quoted: tuple[tuple[str, str], ...],
 ) -> list[str]:
     """Quote complete task targets and entry bodies within one budget, never fragments."""
     files = dict((referenced_files or []) + list(quoted))
@@ -580,18 +548,38 @@ def _scramble_filter_provider(root: Path) -> tuple[tuple[str, str], ...]:
     return ()
 
 
-_BACKEND_INVENTORY_DIRS = tuple(
-    entry for entry in _INVENTORY_DIRS if entry[0] not in ("resources/js/components", "e2e")
-)
 _SPA_INVENTORY_DIRS = (("src", 80), ("e2e", 40))
 _SPA_QUOTED_FILES = tuple(
     (name, name.rsplit(".", 1)[-1]) for name in (
         "src/main.ts", "src/main.js", "src/App.vue", "index.html", "vite.config.ts",
-        "vite.config.js", "vitest.config.js", "vitest.config.ts", "playwright.config.js",
+        "vite.config.js", "vitest.config.js", "vitest.config.ts", "vitest.setup.js", "playwright.config.js",
         "playwright.config.ts", "package.json", "src/router/index.js", "src/router/index.ts",
-        "src/layout/AppMenu.vue", "src/service/api.js", "e2e/support/session.js",
+        "src/layout/AppMenu.vue", "src/service/api.js", "e2e/support/session.js", "e2e/support/session.ts",
     )
 )
+
+_SESSION_MARKERS = ("localStorage.", "sessionStorage.", "createRouter(")
+
+
+def _spa_session_sources(spa_root: Path) -> tuple[tuple[str, str], ...]:
+    """Without e2e/support/session.*, the first 4 src/ files holding the SPA's session storage or router."""
+    if any((spa_root / "e2e/support" / name).exists() for name in ("session.js", "session.ts")):
+        return ()
+    found: list[tuple[str, str]] = []
+    for rel in _inventory_listing(spa_root / "src"):
+        if len(found) == 4:
+            break
+        if not rel.endswith((".js", ".ts", ".vue")):
+            continue
+        try:
+            with (spa_root / "src" / rel).open(encoding="utf-8") as handle:
+                body = handle.read(_MAX_QUOTED_FILE_CHARS + 1)
+        except (OSError, UnicodeDecodeError):
+            continue
+        if any(marker in body for marker in _SESSION_MARKERS):
+            found.append((f"src/{rel}", rel.rsplit(".", 1)[-1]))
+    return tuple(found)
+
 
 
 def _domain_quotes(backend: Path, domain: dict | None) -> tuple[tuple[str, str], ...]:
@@ -605,9 +593,8 @@ def _domain_quotes(backend: Path, domain: dict | None) -> tuple[tuple[str, str],
 
 
 def _repo_inventory(
-    repo_path: str, scope: str = "fullstack", task_text: str = "",
-    previous_files: list[str] | None = None, layout: dict | None = None,
-    domain: dict | None = None,
+    repo_path: str, layout: dict, scope: str = "fullstack", task_text: str = "",
+    previous_files: list[str] | None = None, domain: dict | None = None,
 ) -> str:
     """
     Describe what the cloned repository already contains, for the prompts.
@@ -627,8 +614,10 @@ def _repo_inventory(
     Files named by the issue or plan get complete bodies before fixed entry
     files, so modifying an existing component does not require guessing its
     implementation. Tests importing a named SFC bring their existing mount
-    setup even when the issue names no test. Frontend/fullstack also get the served entry chain,
-    fixture manifest and configs within the same bounded quote section. API
+    setup even when the issue names no test. Frontend/fullstack also get the SPA entry files
+    and configs within the same bounded quote section; an SPA without e2e/support/session.*
+    also gets the files that hold its session storage and router, so the coder can write the
+    shared sign-in helper. API
     class references also supply validation, serialization and pagination
     contracts; a response field alone does not establish a writable field.
 
@@ -641,31 +630,25 @@ def _repo_inventory(
         if not root.is_dir():
             return ""
 
-        if not is_separated(layout):
-            lines = _inventory_lines(
-                root, "", scope, task_text, previous_files,
-                _INVENTORY_DIRS, _INVENTORY_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
-                extra_quoted=_domain_quotes(root, domain) if scope != "frontend" else (),
+        backend = root / layout["backend"]
+        app = backend / "app"
+        custom = tuple(
+            (f"app/{d.name}", 40) for d in sorted(app.iterdir()) if d.is_dir()
+            and d.name != "Http" and f"app/{d.name}" not in dict(_INVENTORY_DIRS)
+        ) if app.is_dir() else ()
+        lines = _inventory_lines(
+            backend, "" if layout["backend"] == "." else layout["backend"] + "/",
+            scope, task_text, previous_files,
+            _INVENTORY_DIRS + custom,
+            _BACKEND_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
+            extra_quoted=_domain_quotes(backend, domain) if scope != "frontend" else (),
+        )
+        if scope != "backend" and layout.get("frontend"):
+            lines += _inventory_lines(
+                root / layout["frontend"], layout["frontend"] + "/", scope, task_text,
+                previous_files, _SPA_INVENTORY_DIRS, _SPA_QUOTED_FILES, (),
+                extra_quoted=_spa_session_sources(root / layout["frontend"]),
             )
-        else:
-            backend = root / layout["backend"]
-            app = backend / "app"
-            custom = tuple(
-                (f"app/{d.name}", 40) for d in sorted(app.iterdir()) if d.is_dir()
-                and d.name != "Http" and f"app/{d.name}" not in dict(_BACKEND_INVENTORY_DIRS)
-            ) if app.is_dir() else ()
-            lines = _inventory_lines(
-                backend, "" if layout["backend"] == "." else layout["backend"] + "/",
-                scope, task_text, previous_files,
-                _BACKEND_INVENTORY_DIRS + custom,
-                _BACKEND_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
-                extra_quoted=_domain_quotes(backend, domain) if scope != "frontend" else (),
-            )
-            if scope != "backend" and layout.get("frontend"):
-                lines += _inventory_lines(
-                    root / layout["frontend"], layout["frontend"] + "/", scope, task_text,
-                    previous_files, _SPA_INVENTORY_DIRS, _SPA_QUOTED_FILES, (),
-                )
 
         if not lines:
             return (
@@ -806,8 +789,6 @@ def _inventory_lines(
         lines.append(quote)
         remaining -= len(quote)
 
-    if scope == "backend":
-        quoted = tuple(entry for entry in quoted if entry in _BACKEND_QUOTED_FILES)
     if scope != "frontend" and route_files:
         quoted += ((("tests/TestCase.php", "php"),) + _convention_test(root, task_text)
                    + _scramble_filter_provider(root))
@@ -877,21 +858,17 @@ def _test_report(state: IssueState) -> str:
     )
 
 
-_INTEGRATED_LAYOUT = {"backend": ".", "frontend": "."}
 _SPA_VERSION_PACKAGES = ("vue", "primevue", "@primeuix/themes", "vue-router", "pinia", "typescript", "axios")
 
 
 def _layer_path(state: IssueState, side: str) -> str:
     """Absolute folder of the layout's *side* ("backend"/"frontend") inside the clone."""
-    layout = state.get("layout") or _INTEGRATED_LAYOUT
-    return os.path.normpath(os.path.join(state["repo_path"], layout[side]))
+    return os.path.normpath(os.path.join(state["repo_path"], state["layout"][side]))
 
 
-def _prompt_layout(state: IssueState) -> dict | None:
-    """The layout for the prompts, with the SPA's installed versions for a separated one."""
-    layout = state.get("layout")
-    if not is_separated(layout):
-        return layout
+def _prompt_layout(state: IssueState) -> dict:
+    """The layout for the prompts, with the SPA's installed versions."""
+    layout = state["layout"]
     versions: dict[str, str] = {}
     if layout.get("frontend"):
         try:
@@ -917,8 +894,8 @@ def node_setup(state: IssueState) -> dict:
     loop process, and one issue's escalations must not start the next one.
 
     Only a verified claim continues: the lock refuses an issue that stopped
-    being pending since it was listed (paused, held by a dependency record,
-    taken by another worker), and then nothing is cloned and no LLM is called
+    being pending since it was listed (paused, taken by another worker), and
+    then nothing is cloned and no LLM is called
     — ``failure_reason`` routes straight to cleanup.
     """
     logger.debug("→ node_setup")
@@ -1047,8 +1024,7 @@ def node_bootstrap(state: IssueState) -> dict:
     else:
         result = tool_laravel_bootstrap(
             _layer_path(state, "backend"),
-            spa_path=_layer_path(state, "frontend")
-            if layout["frontend"] not in (None, ".") else "",
+            spa_path=_layer_path(state, "frontend") if layout["frontend"] else "",
         )
     if not result["success"]:
         shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
@@ -1067,9 +1043,7 @@ def node_bootstrap(state: IssueState) -> dict:
         )
 
     reasons = [detail["reason"]]
-    if layout["frontend"] == ".":
-        verdict, basis = "skipped", "integrated Vue app"
-    elif layout["frontend"]:
+    if layout["frontend"]:
         verdict, basis = "skipped", f"existing SPA {layout['frontend']}/"
     else:
         decision = classify_issue(state.get("subject", ""), state["issue"].get("description", "") or "")
@@ -1148,6 +1122,22 @@ def _log_scope(issue_id: int, scope: str, decision: ScopeDecision, planner: str)
     )
 
 
+def _app_facts(state: IssueState, scope: str) -> str:
+    """Boost facts of the backend at the cloned HEAD for the prompts; logs the run's one ``APP FACTS:`` line."""
+    facts, backend = "", state["layout"].get("backend")
+    if scope == "frontend" or backend is None:
+        verdict, basis = "skipped", "frontend scope" if scope == "frontend" else "no backend"
+    else:
+        result = tool_app_facts(_layer_path(state, "backend"))
+        if result["success"]:
+            facts = result["result"]["facts"]
+            verdict, basis = ("exported" if facts else "skipped"), result["result"]["reason"]
+        else:
+            verdict, basis = "failed", (result["error"].splitlines() or [""])[0]
+    logger.info("APP FACTS: %s · GitLab issue #%s · %s", verdict, state["issue_id"], basis)
+    return facts
+
+
 def node_plan(state: IssueState) -> dict:
     """
     Generate implementation plan via LLM planner chain.
@@ -1175,9 +1165,10 @@ def node_plan(state: IssueState) -> dict:
         max_practice_docs=1,
     )
     repo_context = _repo_inventory(
-        state.get("repo_path", ""), decision.scope, issue_text, layout=state.get("layout"),
+        state.get("repo_path", ""), state["layout"], decision.scope, issue_text,
         domain=state.get("domain"),
     )
+    app_facts = _app_facts(state, decision.scope)
 
     # memory: how similar issues were solved before (Redis solution
     # cache) and the corpus passages the keyword catalog missed (Qdrant).
@@ -1195,7 +1186,6 @@ def node_plan(state: IssueState) -> dict:
             len(past_solutions),
             len(retrieved),
         )
-    serena_findings = serena_research(_llm, issue_text)
     memory_counts = {
         "retrieved_chunks": len(retrieved),
         "past_solutions": len(past_solutions),
@@ -1212,7 +1202,7 @@ def node_plan(state: IssueState) -> dict:
         scope=decision.scope,
         layout=_prompt_layout(state),
         domain=state.get("domain"),
-        serena_findings=serena_findings,
+        app_facts=app_facts,
         scope_evidence=decision.evidence(),
         metrics=metrics,
     )
@@ -1229,7 +1219,7 @@ def node_plan(state: IssueState) -> dict:
         logger.debug("← node_plan (failed)")
         return {
             "plan": "", "scope": decision.scope, "error": str(exc),
-            "messages": messages, **memory_counts,
+            "messages": messages, "app_facts": app_facts, **memory_counts,
         }
 
     logger.debug("Plan:\n%s", plan)
@@ -1238,7 +1228,7 @@ def node_plan(state: IssueState) -> dict:
     _log_scope(issue_id, scope, decision, declared or "no declaration")
     messages = _store.append(issue_id, "assistant", plan)
     logger.debug("← node_plan")
-    return {"plan": plan, "scope": scope, "messages": messages, **memory_counts}
+    return {"plan": plan, "scope": scope, "messages": messages, "app_facts": app_facts, **memory_counts}
 
 
 def node_code(state: IssueState) -> dict:
@@ -1286,7 +1276,7 @@ def node_code(state: IssueState) -> dict:
         failure = _store.format_test_failure(last_output, layer)
     inventory_text = haystack + "\n" + failure
     repo_context = _repo_inventory(
-        state.get("repo_path", ""), scope, inventory_text, previous_files, state.get("layout"),
+        state.get("repo_path", ""), state["layout"], scope, inventory_text, previous_files,
         domain=state.get("domain"),
     )
 
@@ -1336,6 +1326,7 @@ def node_code(state: IssueState) -> dict:
         scope=scope,
         layout=_prompt_layout(state),
         domain=state.get("domain"),
+        app_facts=state.get("app_facts", ""),
         metrics=metrics,
     )
     base_user_chars = len(user_prompt)
@@ -1444,7 +1435,7 @@ def node_detect_stack(state: IssueState) -> dict:
 
     # route_after_code admits only responses with accepted file operations.
 
-    layout = state.get("layout") or _INTEGRATED_LAYOUT
+    layout = state["layout"]
     written = state.get("written_files")
     # The bootstrap commit is part of the change: its files gate the layers too.
     result = tool_detect_stack(
@@ -1493,22 +1484,13 @@ def node_detect_stack(state: IssueState) -> dict:
     }
 
 
-def _log_layer_verdict(
-    layer: str,
-    passed: bool,
-    state: IssueState,
-    reason: str = "",
-    *,
-    blocked: bool = False,
-) -> None:
+def _log_layer_verdict(layer: str, passed: bool, state: IssueState, reason: str = "") -> None:
     """Emit the one-line verdict for a test layer.
 
     Exactly one line per layer run, green or red, always carrying the GitLab
     issue number and the provider/model/billing that produced the code — this
     is the line an operator greps for in `docker-compose logs`. Green goes to
     INFO, red to ERROR so a failure stays visible at any sane log level.
-    ``blocked`` (INFO) says the suite never started because fixture
-    preparation stopped first — neither a pass nor a failed browser run.
 
     The attribution comes from IssueState, written by node_code from the coder
     that actually answered: the chain head moves under escalation and would
@@ -1519,7 +1501,7 @@ def _log_layer_verdict(
         "model: %s · %s" + (" · reason: %s" if reason else "")
     )
     args = [
-        "BLOCKED" if blocked else ("PASSED" if passed else "FAILED"),
+        "PASSED" if passed else "FAILED",
         state.get("issue_id", "?"),
         state.get("attempt", 0),
         state.get("max_attempts", _ENV_MAX_ATTEMPTS),
@@ -1529,7 +1511,7 @@ def _log_layer_verdict(
     ]
     if reason:
         args.append(reason)
-    (logger.info if passed or blocked else logger.error)(message, *args)
+    (logger.info if passed else logger.error)(message, *args)
 
 
 def node_test(state: IssueState) -> dict:
@@ -1617,117 +1599,22 @@ def node_vitest_test(state: IssueState) -> dict:
 
 
 def node_playwright_test(state: IssueState) -> dict:
-    """
-    Run Playwright E2E tests in the browser sandbox.
-
-    ``fixture_request`` is set only when the sandbox verified that a declared
-    fixture's seeder class and file are both absent and stopped before the
-    browser started; that run logs BLOCKED rather than FAILED, and
-    route_after_playwright hands it to node_pause_dependency.
-    """
+    """Run Playwright E2E tests in the browser sandbox."""
     logger.debug("→ node_playwright_test")
     logger.info("Running Playwright E2E tests (attempt %d) …", state.get("attempt", 0))
 
     result = tool_playwright_run_tests(_layer_path(state, "frontend"))
-    detail = result.get("result", {}) if result["success"] else {}
-    passed = bool(detail.get("passed", False))
-    output = detail.get("output", "") if result["success"] else result.get("error", "")
-    fixture_request = None if passed else detail.get("fixture_request")
+    passed = result.get("result", {}).get("passed", False) if result["success"] else False
+    output = (
+        result.get("result", {}).get("output", "")
+        if result["success"]
+        else result.get("error", "")
+    )
 
-    if fixture_request:
-        _log_layer_verdict(
-            "Playwright", False, state,
-            reason=(
-                f"fixture GET {fixture_request['endpoint']} needs "
-                f"{fixture_request['seeder']}, whose class and file are absent; "
-                "the browser suite did not start"
-            ),
-            blocked=True,
-        )
-    else:
-        _log_layer_verdict("Playwright", passed, state)
+    _log_layer_verdict("Playwright", passed, state)
 
     logger.debug("← node_playwright_test (passed=%s)", passed)
-    return {
-        "playwright_passed": passed,
-        "playwright_output": output,
-        "fixture_request": fixture_request,
-    }
-
-
-def node_pause_dependency(state: IssueState) -> dict:
-    """
-    Turn a verified missing-seeder fixture into a durable dependency.
-
-    No planner, coder, escalation, quota check, commit or reopen happens here:
-
-    • paused     – GitLab holds the durable record, the issue carries the
-                   pause label and the backend child exists (or its creation
-                   is held for an operator).  The conversation and episodes are
-                   dropped only now, after the intent is durable, so the
-                   resumed run starts fresh.  → cleanup
-    • ineligible – the prerequisite belongs to this change's own backend work;
-                   the explanation is appended to the Playwright output and the
-                   shared retry budget decides (on_layer_failure / failure).
-    • error      – a transport or transition failure: alert, try a plain
-                   pause, and stop (→ cleanup) without node_failure, whose
-                   reopen would undo the hold.
-    """
-    logger.debug("→ node_pause_dependency")
-    issue_id = state["issue_id"]
-    subject = state.get("subject", f"issue-{issue_id}")
-    requirement = state.get("fixture_request") or {}
-
-    result = tool_issue_pause_for_fixture(
-        issue_id, state["repo_path"], requirement, list(state.get("written_files") or [])
-    )
-    detail = result["result"] if result["success"] else {}
-    status = detail.get("status")
-
-    if status == "paused":
-        _store.delete(issue_id)
-        forgot = tool_memory_forget_episodes(issue_id, state["run_id"])
-        if not forgot["success"]:
-            logger.warning("Failed to drop the episodes of issue #%s: %s", issue_id, forgot["error"])
-        logger.info("Issue #%s paused: %s", issue_id, detail.get("reason", ""))
-        logger.debug("← node_pause_dependency (paused)")
-        return {"dependency_status": "paused", "failure_reason": detail.get("reason", "")}
-
-    if status == "ineligible":
-        reason = detail.get("reason", "")
-        logger.info("Issue #%s: fixture dependency ineligible – %s", issue_id, reason)
-        logger.debug("← node_pause_dependency (ineligible)")
-        return {
-            "dependency_status": "ineligible",
-            "fixture_request": None,
-            "playwright_output": f"{state.get('playwright_output', '')}\n\n{reason}".strip(),
-        }
-
-    error = detail.get("reason") if result["success"] else result["error"]
-    error = error or f"unexpected dependency status {status!r}"
-    held = tool_issue_set_status(
-        issue_id, "paused",
-        note=f"Nesti: handling this issue's fixture dependency failed ({error}); "
-             "holding it for an operator.",
-    )
-    if held["success"]:
-        message = f"Fixture dependency handling failed and the issue is held (paused): {error}"
-    else:
-        message = (
-            f"Fixture dependency handling failed ({error}) and the pause could not be "
-            f"applied ({held['error']}): the issue may keep its stale in-progress lock. "
-            "Operator recovery: stop the poller, confirm no dependency issue was created, "
-            "then resume the issue and clear its conversation and episodes (README, "
-            "'Fixture dependencies'). Reconciliation cannot recreate a record that was "
-            "never saved."
-        )
-    logger.error("Issue #%s: %s", issue_id, message)
-    telegram_notify(
-        f"⚠️ Fixture dependency handling failed for issue <b>#{issue_id}</b> – "
-        f"<i>{subject}</i>\n<code>{message}</code>"
-    )
-    logger.debug("← node_pause_dependency (error)")
-    return {"dependency_status": "error", "failure_reason": message}
+    return {"playwright_passed": passed, "playwright_output": output}
 
 
 def node_on_layer_failure(state: IssueState) -> dict:

@@ -36,6 +36,7 @@ Notes
   a SPA-less Laravel API gains a Sakai PrimeVue SPA, inside a single run.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -47,12 +48,11 @@ from urllib.parse import urlsplit
 
 import git
 
-from docker_runner import _PG_IDENTIFIER, DockerRunner, _pgsql_settings
+from docker_runner import _PG_IDENTIFIER, APP_FACTS_MARK, DockerRunner, _pgsql_settings
 from frontend_runner import FrontendRunner
 from gitlab_client import GitLabClient
 from gitlab_issues_client import GitLabIssuesClient
 import gitlab_project
-from issue_dependencies import FixtureDependencies
 from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
 import issue_domain
@@ -96,24 +96,6 @@ _API_TOUCH_RE = re.compile(
     r"^(?:routes/api\.php$|routes/.+/[^/]+\.php$|app/(?:[^/]+/)*Http/(?:Controllers|Resources|Requests)/)"
 )
 
-# Written paths that change what the browser loads: the Vitest and Playwright
-# layers apply to them (in a repository that has Vue).  A pure PHP change in a
-# repository that merely contains .vue files must not pay for two Node
-# containers, and a pure .vue change cannot alter what PHPUnit executes.
-_FRONTEND_SUFFIXES = (
-    ".vue", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx",
-    ".css", ".scss", ".sass", ".less", ".html", ".svg",
-)
-_FRONTEND_PREFIXES = ("resources/js/", "resources/css/", "e2e/")
-_FRONTEND_FILES = frozenset({
-    "package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
-})
-# Blade views and web routes are PHP that serves pages: they count for both sides.
-_SHARED_SUFFIXES = (".blade.php",)
-_SHARED_FILES = frozenset({"routes/web.php"})
-# Besides .php sources, what PHPUnit's run depends on.
-_BACKEND_FILES = frozenset({"composer.json", "composer.lock", "artisan", "phpunit.xml", ".env.example"})
-
 # Written by the openapi recipe; storage/app is git-ignored by Laravel, so the
 # route dump never lands in the Merge Request.
 _ROUTE_DUMP_REL = "storage/app/nesti-routes.json"
@@ -123,7 +105,7 @@ _IMPLICIT_METHODS = frozenset({"HEAD", "OPTIONS"})
 
 # Bootstrap templates shipped with Nesti, keyed by their repo-relative
 # destination.  Scaffold mode writes all of them over the skeleton Nesti just
-# created; top-up mode writes only _TOPUP_TEMPLATES, and only when absent.
+# created; top-up mode writes only the OpenAPI test, and only when absent.
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "laravel"
 _SPA_TEMPLATES_DIR = _TEMPLATES_DIR.parent / "spa"
 
@@ -135,17 +117,15 @@ _SCAFFOLD_TEMPLATES = (
     "database/seeders/DatabaseSeeder.php",
 )
 
-_TOPUP_TEMPLATES = (
-    "vitest.config.js",
-    "playwright.config.js",
-    "tests/Feature/OpenApiDocumentationTest.php",
-)
+_SPA_TOPUP_TEMPLATES = ("vitest.config.js", "vitest.setup.js", "playwright.config.js")
+# sha256 of SPA vitest.config.js versions Nesti shipped earlier; an unmodified copy is upgraded in place.
+_SUPERSEDED_SPA_VITEST_CONFIGS = frozenset({"f4c1fb28348a6682d655e8ed89421e76fd55c50624ae735b49625fc9e1e29f54"})
 
 _PACKAGE_DEPENDENCIES = {
     "vue": "^3.5.0",
     "primevue": "^5.0.0",
     # @primevue/themes is deprecated; @primeuix/themes is the PrimeVue 5 home
-    # of the Aura preset referenced by resources/js/app.js.
+    # of the Aura preset an SPA's src/main.* registers.
     "@primeuix/themes": "^3.0.0",
     "primeicons": "^8.0.0",
 }
@@ -211,9 +191,8 @@ def tool_issue_list_pending() -> dict:
     List pending issues for the configured project, oldest first.
     result: list of issue dicts (possibly empty).
 
-    Pending means: open, carrying the opt-in GITLAB_ISSUE_LABEL, carrying
-    neither the ``<label>::in-progress`` lock nor the ``<label>::pause`` hold,
-    and not held by an unresolved (or malformed) fixture-dependency record.
+    Pending means: open, carrying the opt-in GITLAB_ISSUE_LABEL and carrying
+    neither the ``<label>::in-progress`` lock nor the ``<label>::pause`` hold.
     """
     try:
         return _ok(GitLabIssuesClient().list_pending(limit=_ISSUE_LIST_LIMIT))
@@ -234,8 +213,7 @@ def tool_issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
       closed      → remove <label>::in-progress, close, comment
       new         → remove <label>::in-progress, reopen, comment (back to the
                     pending pool, which is what makes a failed issue retryable);
-                    refused for a paused issue or one an unresolved dependency
-                    record holds, so a crash handler cannot undo the hold
+                    refused for a paused issue, so a crash handler cannot undo the hold
       paused      → add    <label>::pause, remove <label>::in-progress (manual
                     hold; refused for a closed or opted-out issue)
     """
@@ -343,48 +321,6 @@ def tool_issue_notes(issue_id: int) -> dict:
         return _ok(GitLabIssuesClient().list_notes(issue_id))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_notes(%s) failed: %s", issue_id, exc)
-        return _err(exc)
-
-
-def _fixture_dependencies() -> FixtureDependencies:
-    """The dependency manager over the configured project and MR target branch."""
-    return FixtureDependencies(GitLabIssuesClient(), GitLabClient().default_branch)
-
-
-def tool_issue_pause_for_fixture(
-    issue_id: int, repo_path: str, requirement: dict, written_files: list[str]
-) -> dict:
-    """
-    Pause *issue_id* on a verified missing-seeder fixture and open its backend
-    dependency issue once.  Graph-internal: deliberately not exposed over MCP,
-    where a second process would become a second dependency writer and could
-    hand in caller-invented evidence.
-
-    result: {"status": "paused", "child_iid": int | None, "reason": str}
-          | {"status": "ineligible" | "error", "reason": str}
-    """
-    try:
-        return _ok(_fixture_dependencies().pause_for_fixture(
-            issue_id, repo_path, requirement, written_files
-        ))
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("tool_issue_pause_for_fixture(%s) failed: %s", issue_id, exc)
-        return _err(exc)
-
-
-def tool_issue_reconcile_dependencies() -> dict:
-    """
-    Advance every open opted-in issue's fixture dependency record: link or
-    create children, observe merged MRs, resume released parents.  Runs before
-    every pending-issue selection; graph-internal like the pause tool.
-
-    result: {"resumed": [iid], "waiting": [iid], "errors": [{"issue_id", "error"}]}
-    success=False only when the issues could not be listed at all.
-    """
-    try:
-        return _ok(_fixture_dependencies().reconcile())
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("tool_issue_reconcile_dependencies() failed: %s", exc)
         return _err(exc)
 
 
@@ -567,31 +503,6 @@ def _touches_api(written_files: "list[str] | None") -> bool:
     return False
 
 
-def _change_sides(written_files: "list[str] | None") -> tuple[bool, bool]:
-    """
-    ``(touches_backend, touches_frontend)`` for the paths the last attempt wrote.
-
-    ``None`` means "caller does not know" and touches both — the conservative
-    answer, as in ``_touches_api``.  A path on neither side (README.md,
-    .gitignore, openapi.json) touches neither: the PHPUnit fallback in
-    ``tool_detect_stack`` then keeps the change from reaching commit untested.
-    """
-    if written_files is None:
-        return True, True
-    backend = frontend = False
-    for raw in written_files:
-        path = raw.replace("\\", "/").removeprefix("./")
-        name = path.rsplit("/", 1)[-1]
-        if path.endswith(_SHARED_SUFFIXES) or path in _SHARED_FILES:
-            backend = frontend = True
-        elif path.endswith(".php") or name in _BACKEND_FILES:
-            backend = True
-        elif (path.endswith(_FRONTEND_SUFFIXES) or path.startswith(_FRONTEND_PREFIXES)
-              or name in _FRONTEND_FILES):
-            frontend = True
-    return backend, frontend
-
-
 def _under(files: "list[str] | None", folder: str) -> "list[str] | None":
     """*files* inside *folder*, relative to it; ``None`` stays ``None``."""
     if files is None or folder == ".":
@@ -603,63 +514,11 @@ def _under(files: "list[str] | None", folder: str) -> "list[str] | None":
     ]
 
 
-def _detect_separated(
-    workspace_path: str, written_files: "list[str] | None", backend_dir: str, frontend_dir: str
-) -> dict:
-    """``tool_detect_stack`` for a separated layout: each side gated on its own folder."""
-    root = Path(workspace_path)
-    backend = root / backend_dir
-    is_laravel = (backend / _LARAVEL_MARKER).is_file()
-    has_api_routes = (backend / _API_ROUTES_FILE).is_file()
-    backend_files = _under(written_files, backend_dir)
-    if backend_dir == "." and frontend_dir and backend_files is not None:
-        # A root backend's SPA (.frontend/) is the frontend side, never a backend change.
-        backend_files = [f for f in backend_files
-                         if not f.replace("\\", "/").removeprefix("./").startswith(frontend_dir + "/")]
-    frontend_files = _under(written_files, frontend_dir) if frontend_dir else []
-    run_openapi = is_laravel and has_api_routes and _touches_api(backend_files)
-
-    override = os.environ.get("NESTI_STACK", "auto").strip().lower()
-    if override in _VALID_STACKS:
-        stack, source, vue_files = override, "override", []
-        has_vue = stack in ("vue", "fullstack")
-        has_php = stack in ("php", "fullstack")
-    elif override not in ("", "auto"):
-        return _err(
-            f"Invalid NESTI_STACK={override!r} – expected 'auto' or one of {_VALID_STACKS}."
-        )
-    else:
-        _, has_php = _scan_workspace(str(backend))
-        vue_files = [
-            f"{frontend_dir}/{f}" for f in _scan_workspace(str(root / frontend_dir))[0]
-        ] if frontend_dir else []
-        has_vue = bool(vue_files)
-        stack = ("fullstack" if has_php else "vue") if has_vue else ("php" if has_php else "unknown")
-        source = "auto"
-
-    touches_backend = written_files is None or bool(backend_files)
-    touches_frontend = bool(frontend_dir) and (written_files is None or bool(frontend_files))
-    run_frontend = has_vue and touches_frontend
-    run_phpunit = touches_backend or not run_frontend
-    return _ok({
-        "stack": stack,
-        "has_vue": has_vue,
-        "has_php": has_php,
-        "run_phpunit": run_phpunit,
-        "run_frontend": run_frontend,
-        "vue_files": vue_files,
-        "source": source,
-        "is_laravel": is_laravel,
-        "has_api_routes": has_api_routes,
-        "run_openapi": run_openapi,
-    })
-
-
 def tool_detect_stack(
     workspace_path: str,
     written_files: "list[str] | None" = None,
     backend_dir: str = ".",
-    frontend_dir: str = ".",
+    frontend_dir: str = "",
 ) -> dict:
     """
     Determine which test layers apply to the code in workspace_path.
@@ -671,28 +530,20 @@ def tool_detect_stack(
 
     ``stack`` is one of:
       "php"       – PHP sources or a Composer project, no .vue files
-      "vue"       – .vue files and no PHP whatsoever (frontend-only repository)
+      "vue"       – .vue files in the SPA and no PHP in the backend folder
       "fullstack" – both layers present
       "unknown"   – neither detected (empty or non-code change)
 
     ``stack`` describes the repository; the three ``run_*`` gates describe
     *this change* (*written_files*, the paths the last attempt wrote):
 
-    ``run_frontend`` gates Vitest → Playwright.  It needs Vue in the
-    repository and a change that touched the frontend (.vue, JavaScript, CSS,
-    Blade views, routes/web.php, package.json, e2e/); a "vue" stack always
-    runs it, since it is that stack's only gate.  A backend change in a
-    repository that merely contains .vue files no longer starts two Node
-    containers.
+    ``run_frontend`` gates Vitest → Playwright: the SPA has Vue and the change
+    touched the SPA folder.  A backend change in a repository that merely
+    contains .vue files never starts two Node containers.
 
-    ``run_phpunit`` gates the PHP layer.  It is False for the "vue" stack — a
-    frontend-only workspace has no composer.json and no phpunit binary, so
-    running the PHP layer there would fail on every attempt and drive the
-    issue to permanent failure — and for a change that touched only frontend
-    files while the frontend layers run: a .vue, CSS or JavaScript change
-    cannot alter what PHPUnit executes.  Whenever the frontend layers do not
-    run, PHPUnit does, so no change — "unknown" stack, README-only, a JS
-    change in a repository without Vue — ever reaches commit untested.
+    ``run_phpunit`` gates the PHP layer: the change touched the backend folder,
+    or the frontend layers do not run — so no change (README-only, a change in
+    a repository without Vue) ever reaches commit untested.
 
     ``run_openapi`` is the same kind of gate for the Scramble layer and needs
     all three of: a Laravel app (``artisan``), a registered API surface
@@ -703,8 +554,8 @@ def tool_detect_stack(
     Omitting *written_files* (MCP callers) yields the conservative answer for
     all three gates: every layer the repository supports runs.
 
-    *backend_dir*/*frontend_dir* name the layout's folders ("." = root,
-    frontend "" = no SPA); anything but "."/"." gates each side on its folder.
+    *backend_dir* is the Laravel folder ("." = root); *frontend_dir* the SPA
+    folder ("" = no SPA). A frontend inside the Laravel app is refused.
 
     Detection is automatic; set NESTI_STACK to php / vue / fullstack to pin the
     *stack* when a repository's layout misleads the scan.  NESTI_STACK never
@@ -712,41 +563,42 @@ def tool_detect_stack(
     be misled.
     """
     try:
-        if (backend_dir, frontend_dir) != (".", "."):
-            return _detect_separated(workspace_path, written_files, backend_dir, frontend_dir)
+        if frontend_dir in (".", "./"):
+            return _err("frontend_dir '.' (a frontend inside the Laravel app) is not supported")
         root = Path(workspace_path)
-        is_laravel = (root / _LARAVEL_MARKER).is_file()
-        has_api_routes = (root / _API_ROUTES_FILE).is_file()
-        run_openapi = is_laravel and has_api_routes and _touches_api(written_files)
+        backend = root / backend_dir
+        is_laravel = (backend / _LARAVEL_MARKER).is_file()
+        has_api_routes = (backend / _API_ROUTES_FILE).is_file()
+        backend_files = _under(written_files, backend_dir)
+        if backend_dir == "." and frontend_dir and backend_files is not None:
+            # A root backend's SPA (.frontend/) is the frontend side, never a backend change.
+            backend_files = [f for f in backend_files
+                             if not f.replace("\\", "/").removeprefix("./").startswith(frontend_dir + "/")]
+        frontend_files = _under(written_files, frontend_dir) if frontend_dir else []
+        run_openapi = is_laravel and has_api_routes and _touches_api(backend_files)
 
         override = os.environ.get("NESTI_STACK", "auto").strip().lower()
         if override in _VALID_STACKS:
-            stack = override
-            source = "override"
+            stack, source, vue_files = override, "override", []
             has_vue = stack in ("vue", "fullstack")
             has_php = stack in ("php", "fullstack")
-            vue_files = []
         elif override not in ("", "auto"):
             return _err(
                 f"Invalid NESTI_STACK={override!r} – expected 'auto' or one of {_VALID_STACKS}."
             )
         else:
-            vue_files, has_php = _scan_workspace(workspace_path)
+            _, has_php = _scan_workspace(str(backend))
+            vue_files = [
+                f"{frontend_dir}/{f}" for f in _scan_workspace(str(root / frontend_dir))[0]
+            ] if frontend_dir else []
             has_vue = bool(vue_files)
-            if has_vue and has_php:
-                stack = "fullstack"
-            elif has_vue:
-                stack = "vue"
-            elif has_php:
-                stack = "php"
-            else:
-                stack = "unknown"
+            stack = ("fullstack" if has_php else "vue") if has_vue else ("php" if has_php else "unknown")
             source = "auto"
 
-        touches_backend, touches_frontend = _change_sides(written_files)
-        run_frontend = stack == "vue" or (has_vue and touches_frontend)
-        run_phpunit = stack != "vue" and (touches_backend or not run_frontend)
-
+        touches_backend = written_files is None or bool(backend_files)
+        touches_frontend = bool(frontend_dir) and (written_files is None or bool(frontend_files))
+        run_frontend = has_vue and touches_frontend
+        run_phpunit = touches_backend or not run_frontend
         return _ok({
             "stack": stack,
             "has_vue": has_vue,
@@ -821,11 +673,11 @@ def _merge_package_json(repo_path: str) -> list[str]:
             indent = len(match.group(1))
 
     if data.get("type") != "module":
-        # Adding "type": "module" to a foreign repository would reinterpret
-        # every existing .js file, so top-up mode only warns.
+        # Adding "type": "module" to a foreign SPA would reinterpret every
+        # existing .js file, so the SPA top-up only warns.
         logger.warning(
             'package.json has no "type": "module" – the ESM vitest/playwright '
-            "configs added by top-up mode may fail to load."
+            "configs added by the SPA top-up may fail to load."
         )
 
     changed: list[str] = []
@@ -943,19 +795,18 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
 
     • existing Laravel app (artisan present) → mode "top-up".  Never overwrites
       a file the repository already has: installs Scramble only when absent and
-      writes the Scramble wiring test when absent.  An integrated Vue app
-      (vite.config.js with @vitejs/plugin-vue) also gets the missing
-      test-runner configs and package.json keys.  vite.config.js,
-      resources/js/app.js, resources/views/** and routes/** are never touched.
+      writes the Scramble wiring test when absent.  routes/** is never touched.
       A pgsql app's phpunit.xml is pointed at a separate test database.
 
     • non-Laravel PHP project (composer.json without artisan) → success=False.
       Scaffolding a Laravel skeleton over a foreign application would destroy
       it, so this is reported as the configuration error it is.
 
-    *spa_path* (separated layout: *repo_path* is the Laravel API folder) tops
-    up the SPA folder instead with the absent vitest/playwright configs plus
-    missing package.json keys.
+    *spa_path* (*repo_path* is the Laravel API folder) also tops up the SPA
+    folder with the absent vitest.config.js, vitest.setup.js (jsdom polyfills
+    for matchMedia/ResizeObserver) and playwright.config.js plus missing
+    package.json keys; an unmodified vitest.config.js an earlier Nesti wrote
+    is upgraded in place so it loads the setup file.
     """
     try:
         root = Path(repo_path)
@@ -995,7 +846,6 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
             })
 
         # ── top-up: an existing Laravel application ──────────────────────────
-        integrated = not spa_path and project_layout._has_plugin_vue(root)
         notes: list[str] = []
         output = ""
         if not _has_scramble(root):
@@ -1005,21 +855,21 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
             notes.append("installed dedoc/scramble")
 
         package: list[str] = []
-        if integrated:
-            applied = _apply_templates(repo_path, _TOPUP_TEMPLATES, overwrite=False)
-            package = _merge_package_json(repo_path)
-        else:
-            applied = _apply_templates(
-                repo_path, ("tests/Feature/OpenApiDocumentationTest.php",), overwrite=False
-            )
-            if spa_path:
-                applied += [
-                    f"{Path(spa_path).name}/{rel}" for rel in _apply_templates(
-                        spa_path, ("vitest.config.js", "playwright.config.js"),
-                        overwrite=False, source_dir=_SPA_TEMPLATES_DIR,
-                    )
-                ]
-                package = _merge_package_json(spa_path)
+        applied = _apply_templates(
+            repo_path, ("tests/Feature/OpenApiDocumentationTest.php",), overwrite=False
+        )
+        if spa_path:
+            vitest_config = Path(spa_path, "vitest.config.js")
+            if (vitest_config.is_file() and hashlib.sha256(vitest_config.read_bytes()).hexdigest()
+                    in _SUPERSEDED_SPA_VITEST_CONFIGS):
+                shutil.copyfile(_SPA_TEMPLATES_DIR / "vitest.config.js", vitest_config)
+                applied.append(f"{Path(spa_path).name}/vitest.config.js")
+            applied += [
+                f"{Path(spa_path).name}/{rel}" for rel in _apply_templates(
+                    spa_path, _SPA_TOPUP_TEMPLATES, overwrite=False, source_dir=_SPA_TEMPLATES_DIR,
+                )
+            ]
+            package = _merge_package_json(spa_path)
         ignored = _append_gitignore(repo_path)
         database = _align_phpunit_database(root)
         if applied:
@@ -1050,6 +900,101 @@ def _composer_requires(app: Path, package: str) -> bool:
         logger.debug("Unreadable composer.json in %s: %s", app, exc)
         return False
     return any(package in (composer.get(key) or {}) for key in ("require", "require-dev"))
+
+
+_MAX_APP_FACTS_CHARS = 12000
+# Laravel's own tables: noise in a schema summary meant for feature work.
+_FRAMEWORK_TABLES = frozenset({
+    "migrations", "cache", "cache_locks", "jobs", "job_batches", "failed_jobs", "sessions",
+    "password_reset_tokens", "personal_access_tokens",
+})
+
+
+def _boost_payload(segment: str) -> dict:
+    """The payload of one ``boost:execute-tool`` result printed in *segment*; ValueError when unusable."""
+    start, end = segment.find("{"), segment.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("no JSON result")
+    result = json.loads(segment[start:end + 1])
+    if not isinstance(result, dict):
+        raise ValueError("the result is not a JSON object")
+    content = result.get("content") or []
+    first = content[0] if content and isinstance(content[0], dict) else None
+    if result.get("isError"):
+        raise ValueError((first or {}).get("text") or "Boost reported an error")
+    if first is None:
+        raise ValueError("the result has no content")
+    if not isinstance(first.get("text"), str):
+        return first
+    payload = json.loads(first["text"])
+    if not isinstance(payload, dict):
+        raise ValueError("the result text is not a JSON object")
+    return payload
+
+
+def _render_app_facts(info: dict, schema: dict) -> tuple[str, int]:
+    """Versions, packages and the application tables, within _MAX_APP_FACTS_CHARS; returns (text, tables rendered)."""
+    engine = info.get("database_engine") or schema.get("engine") or "unknown"
+    lines = [f"PHP {info.get('php_version', '?')} · Laravel {info.get('laravel_version', '?')} · database {engine}"]
+    packages = ", ".join(
+        f"{p.get('package_name') or p.get('roster_name')} {p.get('version', '')}".strip()
+        for p in info.get("packages") or [] if isinstance(p, dict)
+    )
+    if packages:
+        lines.append(f"Packages: {packages}")
+    lines.append("Tables (column type):")
+    text = "\n".join(lines)
+    raw_tables = schema.get("tables")
+    tables = {
+        name: columns for name, columns in (raw_tables.items() if isinstance(raw_tables, dict) else ())
+        if name not in _FRAMEWORK_TABLES and isinstance(columns, dict) and "error" not in columns
+    }
+    names = sorted(tables)
+    for index, name in enumerate(names):
+        line = f"- {name}: " + ", ".join(f"{column} {kind}" for column, kind in tables[name].items())
+        omitted = f"\n- … {len(names) - index} more table(s) omitted"
+        rest = omitted if index < len(names) - 1 else ""
+        if len(text) + 1 + len(line) + len(rest) > _MAX_APP_FACTS_CHARS:
+            return text + omitted, index
+        text += "\n" + line
+    return text, len(names)
+
+
+def tool_app_facts(backend_path: str) -> dict:
+    """
+    Laravel Boost ApplicationInfo + DatabaseSchema summary of *backend_path* at
+    its current checkout, for the prompts.
+    result: {"facts": str, "tables": int, "reason": str}.
+
+    Skips (success, empty facts) without artisan or without laravel/boost in
+    composer.json; never installs Boost. Packages are limited to the ones
+    composer.json requires directly (Boost lists every installed package).
+    """
+    try:
+        app = Path(backend_path)
+        if not (app / _LARAVEL_MARKER).is_file():
+            return _ok({"facts": "", "tables": 0, "reason": "no Laravel app"})
+        if not _composer_requires(app, "laravel/boost"):
+            return _ok({"facts": "", "tables": 0, "reason": "laravel/boost is not a dependency"})
+        passed, output = DockerRunner().run_app_facts(backend_path)
+        if not passed:
+            return _err(f"app facts export failed:\n{condense(output, 2000)}")
+        parts = output.split(APP_FACTS_MARK)
+        if len(parts) < 4:
+            return _err("app facts output carries no Boost results")
+        try:
+            info = _boost_payload(parts[1])
+            composer = json.loads((app / "composer.json").read_text(encoding="utf-8"))
+            direct = {name for key in ("require", "require-dev") for name in composer.get(key) or {}}
+            info["packages"] = [p for p in info.get("packages") or []
+                                if isinstance(p, dict) and p.get("package_name") in direct]
+            text, count = _render_app_facts(info, _boost_payload(parts[2]))
+        except ValueError as exc:
+            return _err(f"Boost result unreadable: {exc}")
+        return _ok({"facts": text, "tables": count, "reason": f"{count} table(s)"})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_app_facts(%s) failed: %s", backend_path, exc)
+        return _err(exc)
 
 
 def tool_starter_kit(repo_path: str, backend_dir: str, spa_dir: str) -> dict:
@@ -1453,17 +1398,15 @@ def tool_vitest_run_tests(workspace_path: str) -> dict:
 def tool_playwright_run_tests(workspace_path: str) -> dict:
     """
     Run Playwright E2E tests in the browser sandbox.
-    result: {"passed": bool, "output": str, "fixture_request": dict | None}.
+    result: {"passed": bool, "output": str}.
 
-    The sandbox prepares a Laravel app's database and the fixtures declared in
-    e2e/nesti-fixtures.json, builds the app, and Playwright's webServer config
-    serves it; no server needs to be running beforehand.  ``fixture_request``
-    is the declared requirement (endpoint, model, seeder, table) whose seeder
-    class and file are both absent — set only when the helper verified that
-    and stopped before the browser started; None for every other outcome.
+    The sandbox builds the SPA and Playwright's webServer config serves it;
+    no server needs to be running beforehand.  Same semantics as
+    tool_vitest_run_tests.
     """
     try:
-        return _ok(FrontendRunner().run_playwright(workspace_path))
+        passed, output = FrontendRunner().run_playwright(workspace_path)
+        return _ok({"passed": passed, "output": output})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_playwright_run_tests(%s) failed: %s", workspace_path, exc)
         return _err(exc)

@@ -28,11 +28,9 @@ prompt_builder.py            plan + code prompts composed per task scope, FILE-b
 issue_scope.py               backend/frontend/fullstack task scope + documentation-request check
 issue_domain.py              domain-split backend: owning domain from stated name/route, LLM classify via the
                              passed client, GitLab domain question/answer + reconcile; never imports graph.*
-e2e_fixtures.py              manifest/report and trusted dependency metadata contracts
-issue_dependencies.py        durable pause/child/merge/release workflow; no LLM
 conversation_store.py        Redis per-issue history (ai-dev:issue:{id}:messages)
 docker_runner.py             PHP sandbox (+ postgres:15 sidecar when phpunit.xml declares pgsql),
-                             OpenAPI export, bootstrap, FILE-block writer
+                             OpenAPI export, bootstrap, Boost application facts, FILE-block writer
 frontend_runner.py           Vitest + Playwright sandboxes
 gitlab_issues_client.py      issue intake + label lock; gitlab_client.py: repo + MR
 gitlab_project.py            acted-on GitLab project: .env (orchestrator) or the MCP client's git remote;
@@ -41,8 +39,6 @@ skill_catalog.py             offline corpus selection; skill_loader.py: issue UR
 embedding.py, vector_store.py, semantic_cache.py   vector memory
 reranker.py                  opt-in CPU rerank of retrieved docs (NESTI_RERANKER_ENABLED);
                              deps in requirements-reranker.txt (orchestrator image only)
-serena_client.py             MCP client of nesti-serena: planner's read-only research loop before each plan
-                             (NESTI_SERENA_ENABLE) → plan prompt's Code Intelligence section; never raises
 layer_output.py              condenses sandbox output to its meaningful tail
 telegram_notifier.py         fire-and-forget alerts
 project_layout.py            NESTI_PROJECT_PATH backend/SPA layout → state/layout.json; clone_layout for the pipeline
@@ -51,7 +47,7 @@ architecture_view.py         `nesti /arch`: offline Plotly page state/architectu
 stats/                       usage events (LLM attempts + tool runs) → Redis nesti:stats:events; view.py: page render + `nesti /stats` (prints the URL);
                              server.py: `nesti-stats` live page on 127.0.0.1:8790; report.py: JSON summary behind the `stats_summary` MCP tool
 scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetch_skills.py, index_skills.py,
-                             preflight.py, seed_live_issues.py, e2e_fixtures.php,
+                             preflight.py, seed_live_issues.py,
                              prepare_reranker.py (build-time model artifact),
                              evaluate_reranker.py + reranker_evaluation.py (offline quality gate)
 skills/, templates/          vendored doc corpus (primevue/laravel/practices),
@@ -112,9 +108,9 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     `ai-dev-redis`, and `hello-world-sandbox` must never be reintroduced (the
     `ai-dev:issue:` Redis key prefix is the one deliberate exception).
 17. **Never force PHPUnit on a stack that cannot run it.** `run_phpunit` is the
-    single gate and is change-aware: False for a `"vue"` stack and for a
-    frontend-only change while the frontend layers run; True whenever the
-    frontend layers do not run. Hard-wiring `detect_stack → phpunit_test`
+    single gate and is change-aware: `run_phpunit` is False for a change that
+    touched only the SPA folder while the frontend layers run, and True
+    whenever the frontend layers do not run. Hard-wiring `detect_stack → phpunit_test`
     sends every frontend-only issue to permanent failure.
 18. **Never scan the workspace without pruning** `node_modules` and `vendor`
     (see `rule://frontend-testing`) — a bare `rglob("*.vue")` misdetects installed
@@ -137,9 +133,7 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     too old), and `Dockerfile.sandbox.e2e` is
     `mcr.microsoft.com/playwright:v1.50.0-noble` **plus** an explicit Node 22
     install — the image itself ships Node 20, which `vite`/`vitest` refuse.
-    Noble rather than jammy because Ubuntu 24.04 carries `php8.3-cli`; that PHP
-    serves only integrated layouts (separated SPAs run E2E without PHP), so an
-    integrated `^8.4` app may fail its Playwright PHP prep (untested).
+    Noble is the Playwright 1.50 base tag; the E2E image runs no PHP.
 23. **The API surface must stay fully documented.** `tool_openapi_export`
     compares `php artisan scramble:export` output against
     `php artisan route:list --json`. A project with routes under `/api` fails
@@ -154,13 +148,13 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     it would strand every issue. Never loosen the comparison to make a run
     pass; tighten the coding prompt instead.
 24. **`templates/laravel/**` is only applied wholesale to a repository Nesti
-    scaffolded itself.** `tool_laravel_bootstrap` writes all nine templates in
-    `scaffold` mode (greenfield: no `artisan`, no `composer.json`); in `top-up`
-    mode it writes only the absent `vitest.config.js`,
-    `playwright.config.js` and `tests/Feature/OpenApiDocumentationTest.php`
-    and never touches `vite.config.js`, `resources/js/app.js`,
-    `resources/views/**` or `routes/**`. A `composer.json` without `artisan` is
-    refused outright — scaffolding over a foreign PHP app would destroy it.
+    scaffolded itself:** scaffold mode (no `artisan`, no `composer.json`) writes
+    `_SCAFFOLD_TEMPLATES`, the spatie seed data and an absent README.md; top-up
+    writes only an absent `tests/Feature/OpenApiDocumentationTest.php` into the
+    backend and absent `vitest.config.js`, `vitest.setup.js`,
+    `playwright.config.js` into the SPA (an unmodified earlier Nesti
+    `vitest.config.js` is upgraded in place), never `routes/**`. A
+    `composer.json` without `artisan` is refused outright.
 25. **`skills/primevue/`, `skills/laravel/` and `skills/registry.json` are
     generated only by `scripts/fetch_skills.py`** and are committed. Never
     hand-edit a vendored document and never fetch documentation at run time:
@@ -197,16 +191,26 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     `issue_scope.documentation_request` finds the issue asking for them.
     `_prune_stale_files` restores committed files (`git checkout HEAD --`),
     never deletes them, and the scaffold never copies the skeleton README.
-31. **A missing fixture needs exit 78 plus a valid declared sandbox report.**
-    Never infer it from timeout text, locators, mocks or an empty response.
-    Broken seeders and API/contract errors remain ordinary failures.
-32. **Dependency truth lives in trusted GitLab notes, not Redis history.**
-    Keep intent → verified pause → submitted → one child POST ordering.
-    No parent LLM/retry while held; release only after a qualifying related MR
-    actually merges on the recorded project/target.
-33. **Wire a feature into the existing served entry chain.** Preserve
-    PrimeVue/Aura/plugins and the root architecture; register before mount.
-    In-DOM Blade custom tags are kebab-case and never self-closing.
+31. **Nesti works only on a separated SPA and an API-only Laravel backend.** A
+    Laravel app that serves its own frontend — a backend `vite.config.*` using
+    `@vitejs/plugin-vue`, `@vitejs/plugin-react` or `@sveltejs/vite-plugin-svelte`,
+    or a backend `composer.json` requiring `inertiajs/inertia-laravel` or
+    `livewire/livewire` — is refused by `project_layout` (`LayoutError`; polling
+    stays disabled at startup), and the greenfield scaffold never produces one.
+    Never reintroduce integrated-layout paths: Blade/in-DOM prompt rules, Vue
+    test wiring in the Laravel root, PHP in the E2E image.
+32. **Application facts shape prompts only.** Before planning a
+    backend/fullstack issue, `tool_app_facts` runs Laravel Boost's
+    `ApplicationInfo` and `DatabaseSchema` (summary) through
+    `boost:execute-tool` in the PHP sandbox against a throwaway migrated
+    database, only when the backend already requires `laravel/boost`. Never
+    composer-require Boost into the clone, never spend an LLM call on it, never
+    gate on it; a failed export leaves the section out. `node_plan` logs
+    exactly one `APP FACTS:` line per run.
+33. **Wire a feature into the existing SPA.** Register a new page in the SPA's
+    existing router (and its layout menu when it has one), call the API through
+    its existing HTTP client, and keep every plugin, theme and component
+    registration in `src/main.*`.
 34. **A rejected claim stops before clone/bootstrap/LLM.** Cleanup is the
     terminal path; never log an unapplied lock and continue.
 35. **Usage recording never changes behaviour.** The `stats` hooks never
@@ -223,7 +227,7 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     goes to cleanup before bootstrap and coding. Reconcile lifts a pause only
     when Nesti's latest note is that question and a human reply names exactly
     one option; each unmatched reply gets the question again (one re-ask per
-    reply); manual and fixture pauses are never lifted. Greenfield backends,
+    reply); manual pauses are never lifted. Greenfield backends,
     backends without a domain root (`domain_catalog()` is `None`) and
     frontend-scope issues are never asked.
     The domain shapes prompts only (architecture block + its files quoted),
@@ -244,10 +248,11 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `graph/nodes.py` | `conversation_store.py` | `append()` → updated `list[dict]` |
 | `graph/nodes.py` | `docker_runner.py` | `write_files()` → `(bool, list[str])` |
 | `graph/nodes.py` | `docker_runner.py` | `run_tests()` → `(bool, str)` |
+| `graph/nodes.py` | `graph/tools.py` | `tool_app_facts(backend_path)` → `{"success", "result": {"facts": str, "tables": int, "reason": str}}`; empty facts when skipped |
+| `graph/tools.py` | `docker_runner.py` | `run_app_facts()` → `(bool, str)` |
 | `graph/tools.py` | `docker_runner.py` | `run_openapi_export()` / `run_bootstrap()` / `run_scramble_install()` → `(bool, str)` |
-| `graph/tools.py` | `frontend_runner.py` | `run_vitest()` → `(bool, str)`; `run_playwright()` → `{"passed": bool, "output": str, "fixture_request": dict\|None}` |
+| `graph/tools.py` | `frontend_runner.py` | `run_vitest()` / `run_playwright()` → `(bool, str)` |
 | `graph/tools.py` | `gitlab_issues_client.py` | `lock/close/reopen/pause/resume_issue()` → `bool`, verified by independent GET; `post_note()` (via `issue_domain`) → note id, read back by GET, raises on failure |
-| `graph/tools.py` | `issue_dependencies.py` | `pause_for_fixture(...)` → paused/ineligible/error; `reconcile()` → resumed/waiting/errors; no LLM |
 | `graph/tools.py` | `issue_domain.py` | `answer()` → `str\|None`; `ask()` posts the question + pauses, raises `RuntimeError` when the pause is unverified; `reconcile()` → `{resumed, asked, waiting, errors}` |
 | `task_engine.py` | `graph/tools.py` | `tool_issue_reconcile_domain_questions()` before `tool_issue_list_pending()`; failure logged, never aborts the poll |
 | `graph/tools.py` | `skill_catalog.py` | `select_skills()` never raises, returns `list[Skill]` |

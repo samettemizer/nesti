@@ -82,10 +82,12 @@ class LayoutTests(_StateCase):
         self.assertEqual(record["mode"], "backend-only")
         self.assertTrue(record["resolved_by"].startswith("deterministic:"))
 
-    def test_root_artisan_with_plugin_vue_is_integrated(self):
+    def test_laravel_app_serving_its_frontend_is_refused(self):
         _touch(self.root / "artisan")
         _touch(self.root / "vite.config.js", "import vue from '@vitejs/plugin-vue';")
-        self.assertEqual(project_layout.resolve_layout(self.root, StubLLM())["mode"], "integrated")
+        with self.assertRaisesRegex(LayoutError, "not supported"):
+            project_layout.resolve_layout(self.root, StubLLM())
+        self.assertFalse(project_layout.LAYOUT_FILE.exists())
 
     def test_empty_dir_is_greenfield(self):
         (self.root / ".git").mkdir()
