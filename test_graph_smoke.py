@@ -3976,4 +3976,20 @@ token_config = subprocess.run(
 check(json.loads(token_config.stdout) == 16000,
       "configured output tokens are a JSON number, not a rejected API string")
 
+print("\n── Ponytail level ──")
+_ponytail_probe = ("import prompt_builder as p; print(all(f'Use {p._PONYTAIL_LEVEL.upper()} for both' in f('fullstack', '')"
+                   " for f in (p._planning_system_prompt, p._coding_system_prompt)), p._PONYTAIL_LEVEL)")
+for _value, _level in ((None, "ultra"), ("", "ultra"), ("lite", "lite"), (" FULL ", "full"), ("ultra", "ultra")):
+    _env = {k: v for k, v in os.environ.items() if k != "NESTI_PONYTAIL_LEVEL"}
+    if _value is not None:
+        _env["NESTI_PONYTAIL_LEVEL"] = _value
+    _run = subprocess.run([sys.executable, "-c", _ponytail_probe], env=_env,
+                          capture_output=True, text=True)
+    check(_run.stdout.split() == ["True", _level],
+          f"NESTI_PONYTAIL_LEVEL={_value!r} puts {_level.upper()} into the plan and code prompts")
+_run = subprocess.run([sys.executable, "-c", "import prompt_builder"],
+                      env={**os.environ, "NESTI_PONYTAIL_LEVEL": "bogus"}, capture_output=True, text=True)
+check(_run.returncode != 0 and "Invalid NESTI_PONYTAIL_LEVEL" in _run.stderr,
+      "invalid NESTI_PONYTAIL_LEVEL fails the prompt_builder import")
+
 print(f"\nALL {passed_checks} CHECKS PASSED ✅")

@@ -85,9 +85,14 @@ _PRIMEVUE_MAJOR: str = "5"
 # ── Project context (read once at import; stable across the process lifetime) ──
 _GITLAB_PROJECT: str = os.environ.get("GITLAB_PROJECT_PATH", "the project")
 _DEFAULT_BRANCH: str = os.environ.get("GITLAB_DEFAULT_BRANCH", "main")
-_PONYTAIL_FULL = (Path(__file__).parent / "skills" / "ponytail" / "SKILL.md").read_text(
-    encoding="utf-8"
-).strip()
+_PONYTAIL_LEVEL: str = (os.environ.get("NESTI_PONYTAIL_LEVEL") or "ultra").strip().lower()
+if _PONYTAIL_LEVEL not in ("lite", "full", "ultra"):
+    raise ValueError(
+        f"Invalid NESTI_PONYTAIL_LEVEL={_PONYTAIL_LEVEL!r} – expected 'lite', 'full' or 'ultra'."
+    )
+_PONYTAIL = (
+    Path(__file__).parent / "skills" / "ponytail" / f"SKILL_{_PONYTAIL_LEVEL.upper()}.md"
+).read_text(encoding="utf-8").strip()
 
 # ── Prompt blocks ──────────────────────────────────────────────────────────────
 # Every system prompt is composed from these blocks for the issue's scope
@@ -674,7 +679,7 @@ def _planning_system_prompt(
         sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
     if domain and scope != "frontend":
         sections.append(_architecture_block(domain))
-    sections.append(_PONYTAIL_FULL)
+    sections.append(_PONYTAIL)
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
     sections.append("PLANNING STANDARDS:\n" + "\n".join(standards))
@@ -702,7 +707,7 @@ def _coding_system_prompt(
         sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
     if domain and scope != "frontend":
         sections.append(_architecture_block(domain))
-    sections.append(_PONYTAIL_FULL)
+    sections.append(_PONYTAIL)
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
     sections.append(_CODING_STANDARDS)
