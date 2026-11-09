@@ -70,6 +70,27 @@ pre.err{white-space:pre-wrap;word-break:break-word;margin:0}
 .dgrid{display:grid;grid-template-columns:minmax(260px,1fr) minmax(0,2fr);gap:24px}
 .facts{display:grid;grid-template-columns:1fr 1fr;gap:10px 20px}
 .cnt{margin-bottom:8px}
+.timeline{margin-bottom:22px;min-width:540px;--input:#98989f;--model:#5ad8e6;--tool:#f5a623;--agent:#e94fbd;--error:#f87171}
+.timeline .legend{margin:0}
+.tl-toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px;font-family:system-ui,sans-serif}
+.tl-toolbar label{font-size:12px;color:var(--mu)}
+.tl-nav{position:relative;height:46px;border:1px solid var(--bd);border-radius:5px;overflow:hidden;cursor:grab;touch-action:none}
+.tl-nav:active{cursor:grabbing}
+.tl-nav:focus-visible{outline:2px solid var(--model);outline-offset:3px}
+.tl-mini{position:absolute;height:6px;min-width:2px;opacity:.65}
+.tl-window{position:absolute;inset:0 auto 0 0;width:100%;border:2px solid var(--model);background:#5ad8e615;pointer-events:none}
+.tl-axis{position:relative;height:38px;margin-left:100px;overflow:hidden;color:var(--mu);font-size:10px}
+.tl-tick{position:absolute;top:7px;white-space:nowrap;transform:translateX(-50%)}
+.tl-tick:first-child{transform:none}.tl-tick:last-child{transform:translateX(-100%)}
+.tl-tick small{display:block;font-size:10px;opacity:.7}
+.tl-row{display:grid;grid-template-columns:100px minmax(0,1fr)}
+.tl-label{padding:7px 0;color:var(--mu);font:12px system-ui,sans-serif}
+.tl-clip{position:relative;overflow:hidden;border-left:1px solid var(--bd);background:repeating-linear-gradient(to right,transparent 0,transparent calc(25% - 1px),var(--bd) 25%)}
+.tl-track{position:relative;height:100%;width:var(--tl-width,100%);left:var(--tl-left,0%)}
+.tl-span{position:absolute;top:5px;height:20px;min-width:2px;max-width:100%;border-radius:3px;padding:2px 0;text-indent:5px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font:11px ui-monospace,monospace;color:#101014}
+.tl-span.tl-input{background:#98989f26;color:var(--input)}
+.tl-error{width:2px;padding:0;border-radius:0}
+.tl-note{margin:9px 0 0;font:11px system-ui,sans-serif;color:var(--mu)}
 </style><script>/*PLOTLY*/</script></head><body>
 <header><b>Nesti stats</b><nav id="tabs"></nav><span class="grow"></span>
 <select id="project" data-sel="project"></select><div id="ranges" class="seg"></div></header>
@@ -234,6 +255,93 @@ function plot(id, traces, layout = {}) {
     }, {displayModeBar: false, responsive: true});
   });
   return `<div id="${id}"></div>`;
+}
+
+function traceTimeline(s) {
+  const duration = Math.max(s.dur, .001), preview = String(s.title || "No issue title");
+  const input = preview.length > 100 ? preview.slice(0, 100) + "…" : preview;
+  const rows = [
+    ["Input", "input", [{start:0, dur:duration, name:input, tip:"Issue title preview: " + input}]],
+    ["Model", "model", []], ["Tool", "tool", []], ["Agent (role)", "agent", []], ["Error", "error", []],
+  ];
+  for (const e of s.l) {
+    const llm = e.kind === "llm", name = llm ? e.model : e.tool;
+    const span = {start:e.t - s.start, dur:Math.max(0, e.dur || 0), name,
+      tip:`${name} · ${llm ? e.role + " · " + e.provider + " · " : ""}${fmtDur(e.dur)} · ${e.ok ? "OK" : "Failed"}`
+        + (llm ? ` · ${fmtInt(e.tokens)} tokens · ${e.priced ? fmtUSD(e.cost) : "Unpriced"}` : "")};
+    rows[llm ? 1 : 2][2].push(span);
+    if (llm) rows[3][2].push({...span, name:e.role, tip:"Recorded model role · " + span.tip});
+    if (!e.ok) rows[4][2].push({start:span.start + span.dur, dur:0, name:"Failed", tip:`${name} · Failed: ${e.error || "Unknown error"}`});
+  }
+  let mini = "";
+  const lanes = rows.map(([label, kind, spans], row) => {
+    const ends = [];
+    const bars = spans.map(span => {
+      let lane = ends.findIndex(end => end <= span.start);
+      if (lane < 0) lane = ends.length;
+      ends[lane] = span.start + Math.max(span.dur, .001);
+      const left = Math.min(100, span.start / duration * 100), width = span.dur / duration * 100;
+      const position = `left:min(${left}%,calc(100% - 2px));width:${width}%;background:var(--${kind})`;
+      mini += `<i class="tl-mini" style="${position};top:${row * 8 + 3}px"></i>`;
+      return `<span class="tl-span tl-${kind}" title="${esc(span.tip)}" style="${kind === "input" ? "" : `background:var(--${kind});`}left:min(${left}%,calc(100% - 2px));width:${width}%;top:${lane * 25 + 5}px">${kind === "error" ? "" : esc(span.name)}</span>`;
+    }).join("");
+    return `<div class="tl-row"><div class="tl-label">${label}</div><div class="tl-clip" style="height:${Math.max(1, ends.length) * 25 + 10}px"><div class="tl-track">${bars}</div></div></div>`;
+  }).join("");
+  return `<section class="timeline" data-start="${s.start}" data-duration="${duration}" aria-label="Trace timeline">
+    <div class="tl-toolbar"><b>Timeline</b>${legend(rows.map(([label, kind]) => [label, `var(--${kind})`]))}
+      <label>Zoom <select class="tl-zoom" aria-label="Timeline zoom"><option value="1">Fit</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select></label></div>
+    <div class="tl-nav" role="slider" tabindex="0" aria-label="Timeline window" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">${mini}<div class="tl-window"></div></div>
+    <div class="tl-axis"></div>${lanes}
+    <p class="tl-note">Input: issue title only; prompts are not stored. Agent: recorded model role, not a separate agent span. Times are local (HH:MM:SS); + is elapsed time. Zoom, then drag the top window or use arrow keys.</p>
+  </section>`;
+}
+
+function mountTimeline() {
+  const root = document.querySelector(".timeline");
+  if (!root) return;
+  const nav = root.querySelector(".tl-nav"), windowEl = root.querySelector(".tl-window"), axis = root.querySelector(".tl-axis");
+  const duration = Number(root.dataset.duration), start = Number(root.dataset.start);
+  let zoom = 1, offset = 0, drag = null;
+  const clock = seconds => {
+    const n = Math.max(0, Math.floor(seconds));
+    return `${pad(Math.floor(n / 3600))}:${pad(Math.floor(n % 3600 / 60))}:${pad(n % 60)}`;
+  };
+  const update = () => {
+    offset = Math.max(0, Math.min(1 - 1 / zoom, offset));
+    root.style.setProperty("--tl-width", `${zoom * 100}%`);
+    root.style.setProperty("--tl-left", `${-offset * zoom * 100}%`);
+    windowEl.style.left = `${offset * 100}%`;
+    windowEl.style.width = `${100 / zoom}%`;
+    nav.setAttribute("aria-valuemax", (duration * (1 - 1 / zoom)).toFixed(3));
+    nav.setAttribute("aria-valuenow", (offset * duration).toFixed(3));
+    nav.setAttribute("aria-valuetext", `+${clock(offset * duration)} to +${clock((offset + 1 / zoom) * duration)}`);
+    axis.innerHTML = Array.from({length:5}, (_, i) => {
+      const elapsed = (offset + i / 4 / zoom) * duration, d = new Date((start + elapsed) * 1000);
+      return `<span class="tl-tick" style="left:${i * 25}%">${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}<small>+${clock(elapsed)}</small></span>`;
+    }).join("");
+  };
+  root.querySelector(".tl-zoom").onchange = ev => { zoom = Number(ev.target.value); update(); };
+  nav.onpointerdown = ev => {
+    if (ev.button !== 0) return;
+    const rect = nav.getBoundingClientRect(), x = (ev.clientX - rect.left) / rect.width;
+    if (x < offset || x > offset + 1 / zoom) { offset = x - .5 / zoom; update(); }
+    drag = {x:ev.clientX, offset, width:rect.width};
+    nav.setPointerCapture(ev.pointerId);
+    nav.focus();
+  };
+  nav.onpointermove = ev => {
+    if (!drag) return;
+    offset = drag.offset + (ev.clientX - drag.x) / drag.width;
+    update();
+  };
+  nav.onpointerup = nav.onpointercancel = nav.onlostpointercapture = () => { drag = null; };
+  nav.onkeydown = ev => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(ev.key)) return;
+    ev.preventDefault();
+    offset = ev.key === "Home" ? 0 : ev.key === "End" ? 1 : offset + (ev.key === "ArrowRight" ? 1 : -1) / zoom / 10;
+    update();
+  };
+  update();
 }
 function stacked(list, keyOf, order, colors, val, name = k => k) {
   const top = order.slice(0, 6), rest = new Set(order.slice(6)), g = group(list, keyOf), x = X();
@@ -505,7 +613,7 @@ const LOGS = {
     const byRun = new Map(runs.map(s => [s.run, s])), maxC = Math.max(0, ...runs.map(s => s.cost)) || 1;
     const detail = run => {
       const s = byRun.get(run);
-      return table([["Offset"], ["Kind"], ["Name"], ["Duration", "n"], ["Tokens", "n"], ["Cost", "n"], ["Status", "n"]],
+      return traceTimeline(s) + table([["Offset"], ["Kind"], ["Name"], ["Duration", "n"], ["Tokens", "n"], ["Cost", "n"], ["Status", "n"]],
         s.l.map(e => {
           const o = Math.round(e.t - s.start), llm = e.kind === "llm";
           return {id: e.i, title: e.error, cells: [`+${pad(Math.floor(o / 60))}:${pad(o % 60)}`, llm ? esc(e.role) : "tool",
@@ -522,7 +630,7 @@ const LOGS = {
 };
 
 function render() {
-  const h = location.hash.slice(1);
+  const h = location.hash.slice(1) === "tracers" ? "traces" : location.hash.slice(1);
   ui.tab = Object.hasOwn(TABS, h) ? h : "overview";
   const from = now - RANGES[ui.range];
   F = D.events.filter(e => e.t * 1000 >= from && (ui.project === "" || e.project === ui.project));
@@ -536,6 +644,7 @@ function render() {
   post = [];
   main.innerHTML = VIEWS[ui.tab]();
   post.forEach(f => f());
+  mountTimeline();
 }
 
 // range and project survive a refresh (the page is rendered live on every load)
@@ -569,6 +678,7 @@ document.addEventListener("input", ev => {
   if (!k) return;
   ui.q[k] = ev.target.value;
   document.getElementById(k + "-log").innerHTML = LOGS[k]();
+  if (k === "traces") mountTimeline();
 });
 window.addEventListener("hashchange", render);
 render();
