@@ -135,6 +135,24 @@ class PromptBuilderTests(unittest.TestCase):
                 self.assertEqual(metrics["rag_selected"], 3)
                 self.assertEqual(metrics["rag_rendered"], 2)
 
+    def test_issue_specific_parts_follow_the_cacheable_prefix(self) -> None:
+        domain = {"root": "Domains", "name": "Members", "names": ["Announcements", "Members"],
+                  "layers": ["Http", "Models"], "route_files": ["routes/domains/Members.php"]}
+        for build in (prompts._planning_system_prompt, prompts._coding_system_prompt):
+            for scope in prompts.SCOPES:
+                with self.subTest(build=build.__name__, scope=scope):
+                    plain, specific = build(scope, ""), build(scope, "README", None, domain)
+                    cut = plain.index("TASK SCOPE:")
+                    self.assertEqual(plain[:cut], specific[:cut])
+                    self.assertTrue(plain.startswith(prompts._PONYTAIL))
+        first = prompts.build_code_prompt(ISSUE, "Add the column.", repo_context="app/A.php")[1]
+        retry = prompts.build_code_prompt(
+            ISSUE, "Add the column.", repo_context="app/A.php\napp/B.php",
+            recalled_failures=[{"attempt": 1, "layer": "phpunit", "summary": "red"}])[1]
+        cut = first.index("\n## Existing Repository State")
+        self.assertEqual(first[:cut], retry[:cut])
+        self.assertIn("## Approved Implementation Plan", first[:cut])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,9 @@ Task scope
   instructions; fullstack carries both — what every issue received before
   scopes existed, and still the answer whenever the scope is uncertain.
 
-  Each system prompt carries a TASK SCOPE block right after its role: the side
+  Each system prompt carries a TASK SCOPE block near its end, with the BACKEND
+  ARCHITECTURE block (the issue-specific parts) right before the output format,
+  so the issue-independent head is one prefix the providers can cache: the side
   of the application the change stays on, and documentation files (README.md,
   CHANGELOG.md, docs/) out of the change unless the issue asks for them
   (issue_scope.documentation_request).  The planner declares the scope of its
@@ -567,7 +569,7 @@ def _normalise_scope(scope: str) -> str:
 
 
 def _task_scope_block(scope: str, documentation: str) -> str:
-    """The TASK SCOPE block both system prompts carry right after their role."""
+    """The TASK SCOPE block both system prompts carry before their output format."""
     lines = [
         f"TASK SCOPE: {_SCOPE_SUMMARY[scope]}",
     ]
@@ -670,19 +672,20 @@ def _planning_system_prompt(
         else _PLAN_TEST_STANDARDS[scope]
     )
 
-    sections = [
+    sections = [_PONYTAIL]
+    if scope != "frontend":
+        sections.append(_DATABASE_POLICY)
+    sections += [
         _PLANNING_ROLE[scope],
         "Your task in this phase is a concise IMPLEMENTATION PLAN — no code yet.",
-        _task_scope_block(scope, documentation),
     ]
     if separated:
         sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
+    sections.append("PLANNING STANDARDS:\n" + "\n".join(standards))
+    # Issue-specific blocks last: everything above is one prefix shared across calls and issues (prompt cache).
+    sections.append(_task_scope_block(scope, documentation))
     if domain and scope != "frontend":
         sections.append(_architecture_block(domain))
-    sections.append(_PONYTAIL)
-    if scope != "frontend":
-        sections.append(_DATABASE_POLICY)
-    sections.append("PLANNING STANDARDS:\n" + "\n".join(standards))
     sections.append(_PLANNING_OUTPUT_FORMAT)
     return "\n\n".join(sections)
 
@@ -702,14 +705,12 @@ def _coding_system_prompt(
         testing += [_TEST_SPA_LAYERS, _TEST_LOCATORS]
     testing.append(_TEST_SCOPE_NOTE[scope])
 
-    sections = [_CODING_ROLE[scope], _task_scope_block(scope, documentation)]
-    if separated:
-        sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
-    if domain and scope != "frontend":
-        sections.append(_architecture_block(domain))
-    sections.append(_PONYTAIL)
+    sections = [_PONYTAIL]
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
+    sections.append(_CODING_ROLE[scope])
+    if separated:
+        sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
     sections.append(_CODING_STANDARDS)
     if scope != "frontend":
         sections += [_BACKEND_STANDARDS, _SEEDER_REMOVAL_STANDARDS]
@@ -718,6 +719,10 @@ def _coding_system_prompt(
     elif scope != "backend" and spa:
         sections.append(_SPA_STANDARDS)
     sections.append("\n".join(testing))
+    # Issue-specific blocks last: everything above is one prefix shared across calls and issues (prompt cache).
+    sections.append(_task_scope_block(scope, documentation))
+    if domain and scope != "frontend":
+        sections.append(_architecture_block(domain))
     sections.append(_CODE_OUTPUT_FORMAT)
     return "\n\n".join(sections)
 
@@ -1093,6 +1098,7 @@ def build_code_prompt(
         if formatted:
             skills_section = f"\n## Skill Documentation\n{formatted}\n"
 
+    # Attempt-stable sections first: repo (re-read with the previous attempt's files) and episodes change on every retry.
     sections = {
         "task": f"""\
 ## Task
@@ -1101,12 +1107,12 @@ GitLab Issue #{issue_id}: {subject}
 ### Description
 {description or "(no description provided)"}
 """,
-        "repo": repo_section,
         "plan": f"\n## Approved Implementation Plan\n{plan.strip()}\n",
         "catalog": catalog_section,
         "rag": retrieved_section,
-        "episodes": episodes_section,
         "skills": skills_section,
+        "repo": repo_section,
+        "episodes": episodes_section,
         "instructions": f"""
 ## Instructions
 Implement the approved plan above:

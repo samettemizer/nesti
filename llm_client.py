@@ -511,7 +511,7 @@ class AnthropicLLMClient(BaseLLMClient):
         payload = {
             "model": self.model,
             "max_tokens": _DEFAULT_MAX_TOKENS,
-            "system": system_prompt,
+            "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
             "messages": msg_list,
         }
         client = anthropic.Anthropic(
@@ -699,7 +699,9 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
             json={
                 "model": self.model,
                 "max_tokens": _DEFAULT_MAX_TOKENS,
-                "system": f"{self._SYSTEM_PREFIX}\n\n{system_prompt}",
+                # One breakpoint, on the system prompt: the user prompt differs on every request, so a breakpoint there only buys the cache-write premium.
+                "system": [{"type": "text", "text": f"{self._SYSTEM_PREFIX}\n\n{system_prompt}",
+                            "cache_control": {"type": "ephemeral"}}],
                 "messages": msg_list,
             },
             timeout=self.timeout,
@@ -724,7 +726,9 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
     login, which is why a session stored before this tier existed must log in
     again), `store: false`, and `stream: true` — it only answers as an SSE
     stream, so the text is reassembled from `response.output_text.delta`
-    events here.
+    events here. `session-id` (the Codex backend's cache-affinity key) and
+    `prompt_cache_key` carry one UUID per client instance, so consecutive
+    requests and runs reuse the cached prompt prefix.
     """
 
     name = "ChatGPT Plus (consumer)"
@@ -735,6 +739,8 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
     def __init__(self) -> None:
         super().__init__()
         self.model: str = os.environ.get("NESTI_CHATGPT_MODEL", "gpt-6.1-sol")
+        # one cache affinity per process: runs follow each other within minutes, so they share the cached prompt prefix
+        self._session_id = str(uuid.uuid4())
 
     def _call(
         self,
@@ -781,6 +787,7 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
             "store": False,
             "stream": True,
             "include": [],
+            "prompt_cache_key": self._session_id,
         }
         headers = {
             "Content-Type": "application/json",
@@ -789,7 +796,7 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
             "chatgpt-account-id": account_id,
             "OpenAI-Beta": "responses=experimental",
             "originator": self._ORIGINATOR,
-            "session-id": str(uuid.uuid4()),
+            "session-id": self._session_id,
         }
         with _post_json(
             self.name, self._API_URL, headers=headers, json=payload, timeout=self.timeout, stream=True

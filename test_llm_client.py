@@ -107,6 +107,8 @@ class ProviderBoundaryTests(unittest.TestCase):
                     self.assertEqual(sent["request"]["contents"][0]["parts"][0]["text"], _MESSAGES[0]["content"])
                 else:
                     self.assertEqual([msg for msg in sent["messages"] if msg["role"] != "system"], _MESSAGES)
+                if isinstance(client, llm.ClaudeConsumerClient):
+                    self.assertEqual(sent["system"], [{"type": "text", "text": expected_system, "cache_control": {"type": "ephemeral"}}])
                 text = "\n".join(logs.output)
                 self.assertIn(f"system_chars={len(expected_system)} content_chars={len(_MESSAGES[0]['content'])} "
                               f"http_body_bytes={len(body)}", text)
@@ -136,10 +138,33 @@ class ProviderBoundaryTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         body = captured[0].content
         self.assertEqual(json.loads(body)["messages"], _MESSAGES)
+        self.assertEqual(json.loads(body)["system"], [{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}])
         text = "\n".join(logs.output)
         self.assertIn(f"http_body_bytes={len(body)}", text)
         self.assertIn("'input_tokens': 17", text)
         self.assertNotIn("secret-key", text)
+
+    def test_codex_cache_affinity_is_stable_across_calls(self):
+        """One client sends one session-id, equal to prompt_cache_key, on every request."""
+        captured = []
+        stream = b"data: " + json.dumps({"type": "response.output_text.delta", "delta": "ok"}).encode() + b"\n\n"
+
+        def send(adapter, request, **kwargs):
+            captured.append(request)
+            return _response(request, stream, stream=True)
+
+        client = llm.ChatGPTConsumerClient()
+        with patch.object(llm._ConsumerLLMBase, "_credentials",
+                          return_value={"access_token": "t", "account_id": "a"}), \
+                patch.object(llm, "_token_store"), \
+                patch("requests.adapters.HTTPAdapter.send", autospec=True, side_effect=send):
+            client.generate_plan(_SYSTEM, "plan request")
+            client.generate_code(_SYSTEM, "code request")
+        keys = {(r.headers["session-id"], json.loads(r.body)["prompt_cache_key"]) for r in captured}
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(len(keys), 1)
+        session_id, cache_key = keys.pop()
+        self.assertEqual(session_id, cache_key)
 
     def test_missing_usage_is_unavailable_and_never_inferred(self):
         payload = {"choices": [{"message": {"content": _OUTPUT}}]}
