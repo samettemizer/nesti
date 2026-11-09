@@ -254,6 +254,22 @@ afterwards. Dependencies and image versions live in
 
 ## Installation
 
+### install.sh
+
+The setup wizard checks the prerequisites (docker, git, curl, Python 3, Docker
+Compose), writes `.env` from prompts, verifies GitLab access, creates the
+opt-in label if missing, clones the project checkout when absent, builds and starts the
+containers, waits for readiness, offers consumer provider logins, installs the
+`nesti` launcher to `~/.local/bin` and optionally runs the preflight:
+```bash
+./install.sh            # interactive
+GITLAB_TOKEN=... GITLAB_PROJECT_PATH=group/project ./install.sh --yes
+```
+`--yes` takes every default (environment, then `.env`, then `.env.example`);
+`--help` lists the options. Windows: Git Bash with Docker Desktop's WSL 2 engine.
+
+### Manual Installation
+
 Configure `.env`, then start:
 ```bash
 cp .env.example .env
