@@ -263,10 +263,8 @@ containers, waits for readiness, offers consumer provider logins, installs the
 `nesti` launcher to `~/.local/bin` and optionally runs the preflight:
 ```bash
 ./install.sh            # interactive
-GITLAB_TOKEN=... GITLAB_PROJECT_PATH=group/project ./install.sh --yes
 ```
-`--yes` takes every default (environment, then `.env`, then `.env.example`);
-`--help` lists the options. Windows: Git Bash with Docker Desktop's WSL 2 engine.
+`--help` lists the options.
 
 ### Manual Installation
 
@@ -333,6 +331,26 @@ Available commands (prefix each with `nesti` inside the container):
 
 OpenRouter needs an explicit model via `OPENROUTER_MODEL` or
 `nesti /provider model openrouter <model-id>`.
+
+## Usage statistics
+
+`nesti /stats` prints the local page URL; the `nesti-stats` service serves it.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/stats-providers.png" width="100%" alt="Nesti Providers page with All selected, showing recorded provider and model usage and API-equivalent cost estimates" />
+      <br /><sub><b>Providers</b> — recorded provider and model usage, all retained activity</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/stats-traces.png" width="100%" alt="Nesti Traces page with a real issue run expanded to show its model and tool timeline, duration and estimated cost" />
+      <br /><sub><b>Traces</b> — issue-run timeline, duration and estimated cost</sub>
+    </td>
+  </tr>
+</table>
+
+*Illustrative live snapshot; totals vary. Costs are API-equivalent estimates, not
+subscription bills, and an unpriced model is not proof of zero cost.*
 
 ## Consumer Subscriptions & Quota
 
