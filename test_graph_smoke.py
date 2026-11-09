@@ -1450,7 +1450,8 @@ with patch.dict(os.environ, {
     _deep_http.return_value.json.return_value = {
         "choices": [{"message": {"content": "deepseek answer"}}],
     }
-    _anthropic_sdk.return_value.messages.create.return_value.content[0].text = "anthropic answer"
+    _anthropic_sdk.return_value.messages.create.return_value.model_dump.return_value = {
+        "content": [{"type": "text", "text": "anthropic answer"}]}
     _gated = LLMClient()
     _consumer = _gated._coders[0]
     check(_gated.generate_plan("s", "u") == "plan from Consumer"

@@ -62,7 +62,7 @@ class ProviderBoundaryTests(unittest.TestCase):
                 expected_usage = "'prompt_tokens': 17"
                 if isinstance(client, llm.ClaudeConsumerClient):
                     expected_system = client._SYSTEM_PREFIX + _SYSTEM
-                    data = {"content": [{"text": _OUTPUT}],
+                    data = {"content": [{"type": "text", "text": _OUTPUT}],
                             "usage": {"input_tokens": 17, "output_tokens": 29}}
                     expected_usage = "'input_tokens': 17"
                 elif isinstance(client, llm.ChatGPTConsumerClient):
@@ -132,7 +132,8 @@ class ProviderBoundaryTests(unittest.TestCase):
             captured.append(request)
             return httpx.Response(200, json={
                 "id": "msg_test", "type": "message", "role": "assistant", "model": "test",
-                "content": [{"type": "text", "text": _OUTPUT}], "stop_reason": "end_turn",
+                "content": [{"type": "thinking", "thinking": "private", "signature": "sig"},
+                            {"type": "text", "text": _OUTPUT}], "stop_reason": "end_turn",
                 "usage": {"input_tokens": 17, "output_tokens": 29},
             })
 
@@ -151,6 +152,25 @@ class ProviderBoundaryTests(unittest.TestCase):
         self.assertIn(f"http_body_bytes={len(body)}", text)
         self.assertIn("'input_tokens': 17", text)
         self.assertNotIn("secret-key", text)
+
+    def test_claude_consumer_joins_text_blocks_and_reports_textless_reply(self):
+        thinking = {"type": "thinking", "thinking": "private", "signature": "sig"}
+        client = llm.ClaudeConsumerClient()
+
+        def call(data):
+            with patch.object(llm._ConsumerLLMBase, "_credentials", return_value={"access_token": "t"}), \
+                    patch.object(llm, "_token_store"), \
+                    patch.object(llm, "configured_model", return_value="test-model"), \
+                    patch("requests.adapters.HTTPAdapter.send", autospec=True,
+                          side_effect=lambda adapter, request, **kwargs: _response(request, data)):
+                return client._call(_SYSTEM, "prompt")
+
+        self.assertEqual(call({"content": [thinking, {"type": "text", "text": "A"},
+                                           {"type": "text", "text": "B"}]}), "AB")
+        with self.assertRaises(RuntimeError) as raised:
+            call({"content": [thinking], "stop_reason": "max_tokens"})
+        self.assertIn("max_tokens", str(raised.exception))
+        self.assertIn("thinking", str(raised.exception))
 
     def test_codex_cache_affinity_is_stable_across_calls(self):
         """One client sends one session-id, equal to prompt_cache_key, on every request."""

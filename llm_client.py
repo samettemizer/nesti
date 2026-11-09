@@ -95,6 +95,18 @@ def _log_usage(provider: str, usage: dict | None) -> None:
     stats.usage(usage)
 
 
+def _anthropic_text(provider: str, data: dict) -> str:
+    """Join the text blocks of a Messages API response; thinking/tool blocks carry no answer."""
+    blocks = data.get("content") or []
+    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    if not text:
+        raise RuntimeError(
+            f"{provider} returned no text (stop_reason={data.get('stop_reason')!r}, "
+            f"blocks={[b.get('type') for b in blocks]})"
+        )
+    return text
+
+
 def _post_json(provider: str, url: str, **kwargs) -> requests.Response:
     """Keep Requests' serialization and report its prepared body, without content."""
     request = None
@@ -527,7 +539,7 @@ class AnthropicLLMClient(BaseLLMClient):
             raise
         usage = getattr(message, "usage", None)
         _log_usage(self.name, usage.model_dump() if usage is not None else None)
-        return message.content[0].text
+        return _anthropic_text(self.name, message.model_dump())
 
     def generate_plan(
         self,
@@ -716,7 +728,7 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
             )
         data = resp.json()
         _log_usage(self.name, data.get("usage"))
-        return data["content"][0]["text"]
+        return _anthropic_text(self.name, data)
 
 
 class ChatGPTConsumerClient(_ConsumerLLMBase):
