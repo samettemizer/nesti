@@ -26,6 +26,9 @@ labels:
     paused       = opened, has <label>::pause or an active dependency record
     done         = closed
 
+A pending issue whose latest trusted failed-run marker matches its current
+title, description and target-branch HEAD is skipped: nothing changed since.
+
 ``<label>`` comes from GITLAB_ISSUE_LABEL (default "nesti"), so Nesti never
 touches an issue a human opened for discussion: intake is opt-in.
 
@@ -43,8 +46,11 @@ workflow rule dropped the change; a lock or unlock that did not apply must be
 loud.
 """
 
+import hashlib
+import json
 import logging
 import os
+import re
 from urllib.parse import quote
 from collections.abc import Iterator
 
@@ -69,10 +75,17 @@ _POLL_HEARTBEAT_VARIABLE = "NESTI_POLL_HEARTBEAT"
 _PER_PAGE = 100
 _MAX_PAGES = 1000
 _ISSUE_STATES = ("opened", "closed", "all")
+_FAILED_RUN_RE = re.compile(r"^<!-- NESTI_FAILED_RUN_V1 [0-9a-f]{64} -->$", re.M)
 
 
 def _normalise_text(text: str | None) -> str:
     return (text or "").replace("\r\n", "\n").strip()
+
+
+def failed_run_marker(subject: str, description: str, head_sha: str) -> str:
+    """The hidden note line fingerprinting a failed run's title, description and target HEAD."""
+    digest = hashlib.sha256(json.dumps([subject, description, head_sha]).encode()).hexdigest()
+    return f"<!-- NESTI_FAILED_RUN_V1 {digest} -->"
 
 
 class GitLabIssuesClient:
@@ -90,6 +103,7 @@ class GitLabIssuesClient:
         self.pause_label = f"{self.issue_label}{_PAUSE_SUFFIX}"
         self._user_id: int | None = None
         self._fixture_snapshots: dict[int, str | None] = {}
+        self._failed_runs: dict[int, str | None] = {}
 
         self.session = requests.Session()
         self.session.headers.update(
@@ -210,6 +224,17 @@ class GitLabIssuesClient:
             return f"it carries {self.pause_label!r}"
         return self._record_hold_reason(issue["iid"])
 
+    def _target_head(self) -> str | None:
+        """The target branch's HEAD sha, or None when the branch does not exist (404)."""
+        branch = quote(gitlab_project.default_branch(), safe="")
+        response = self.session.get(
+            f"{self._project_api}/repository/branches/{branch}", timeout=_REQUEST_TIMEOUT
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()["commit"]["id"]
+
     def _record_hold_reason(self, iid: int) -> str | None:
         """Why the dependency record holds *iid*, or None when it does not."""
         try:
@@ -253,7 +278,9 @@ class GitLabIssuesClient:
         and the dependency record per remaining candidate. Pages are followed
         until enough issues are found, so a page of locked or paused issues
         never starves eligible work. A metadata error excludes only that
-        issue; a failed issue-list call raises.
+        issue; a failed issue-list or target-HEAD call raises. An issue whose
+        last failed run saw the same title, description and target HEAD is
+        skipped (see ``failed_run_marker``) and does not count toward *limit*.
         """
         url = f"{self._project_api}/issues"
         query = {
@@ -263,6 +290,8 @@ class GitLabIssuesClient:
             "sort": "asc",
         }
         pending: list[dict] = []
+        head: str | None = None
+        head_read = False
         if limit <= 0:
             return pending
         for page in self._pages(url, query):
@@ -276,7 +305,19 @@ class GitLabIssuesClient:
                 if reason:
                     logger.info("Issue #%s is not pending: %s.", issue["iid"], reason)
                     continue
-                pending.append(self._normalise(issue))
+                normalised = self._normalise(issue)
+                marker = self._failed_runs.get(issue["iid"])
+                if marker:
+                    if not head_read:
+                        head, head_read = self._target_head(), True
+                    if head is not None and marker == failed_run_marker(
+                            normalised["subject"], normalised["description"], head):
+                        logger.info(
+                            "Issue #%s is not pending: its last failed run saw the same "
+                            "title, description and target-branch HEAD.", issue["iid"],
+                        )
+                        continue
+                pending.append(normalised)
                 if len(pending) >= limit:
                     return pending
         return pending
@@ -541,8 +582,14 @@ class GitLabIssuesClient:
         """
         user_id = self.current_user_id()
         latest: dict | None = None
+        failed_run: tuple[int, str] | None = None
         for note in self._paginate(f"{self._project_api}/issues/{iid}/notes"):
-            if note.get("system") or not is_dependency_note(note.get("body") or ""):
+            body = note.get("body") or ""
+            if (not note.get("system") and (note.get("author") or {}).get("id") == user_id
+                    and (match := _FAILED_RUN_RE.search(body))
+                    and (failed_run is None or note.get("id", 0) > failed_run[0])):
+                failed_run = (note.get("id", 0), match.group(0))
+            if note.get("system") or not is_dependency_note(body):
                 continue
             if (note.get("author") or {}).get("id") != user_id:
                 logger.warning(
@@ -553,6 +600,7 @@ class GitLabIssuesClient:
                 continue
             if latest is None or note.get("id", 0) > latest.get("id", 0):
                 latest = note
+        self._failed_runs[iid] = failed_run[1] if failed_run else None
         state = parse_dependency_note(latest["body"], parent_iid=iid) if latest is not None else None
         self._fixture_snapshots[iid] = format_dependency_note(state) if state is not None else None
         return state

@@ -446,10 +446,10 @@ def tool_issue_swap_poll_heartbeat(value: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tool_gitlab_clone(target_path: str) -> dict:
-    """Clone the configured repository into target_path.  result: {"repo_path": str}."""
+    """Clone the configured repository into target_path.  result: {"repo_path": str, "head_sha": str}."""
     try:
-        GitLabClient().clone(target_path)
-        return _ok({"repo_path": target_path})
+        repo = GitLabClient().clone(target_path)
+        return _ok({"repo_path": target_path, "head_sha": repo.head.commit.hexsha})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_gitlab_clone(%s) failed: %s", target_path, exc)
         return _err(exc)

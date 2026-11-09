@@ -160,6 +160,7 @@ class TaskEngine:
             "scope":          "fullstack",
             "code_response":  "",
             "repo_path":      "",
+            "base_sha":       "",
             "branch_name":    "",
             "workspace":      "",
             "domain":         None,

@@ -87,6 +87,7 @@ from graph.tools import (
     tool_issue_domain_answer, tool_issue_ask_domain,
     _STACK_SCAN_PRUNE,
 )
+from gitlab_issues_client import failed_run_marker
 from issue_domain import classify as classify_domain, detect as detect_domain, domain_catalog, selection
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
@@ -956,6 +957,7 @@ def node_setup(state: IssueState) -> dict:
     return {
         "workspace": workspace,
         "repo_path": repo_path,
+        "base_sha": cloned["result"]["head_sha"],
         "branch_name": branch_name,
         "layout": layout,
     }
@@ -1926,6 +1928,12 @@ def node_failure(state: IssueState) -> dict:
             f"❌ Issue <b>#{issue_id}</b> – <i>{subject}</i>\n"
             f"All code generation attempts exhausted. Reopening."
         )
+        # Exhausted coder providers are transient quota, like a failed plan: no marker, retry next poll.
+        if state.get("base_sha") and (state.get("code_response") or not state.get("error")):
+            issue = state.get("issue") or {}
+            note += "\n\n" + failed_run_marker(
+                issue.get("subject", "") or "", issue.get("description", "") or "", state["base_sha"]
+            )
         logger.error("%s failed after %d attempt(s). Reopening issue #%s.", layer, attempts, issue_id)
 
     tool_issue_set_status(issue_id, "new", note=note)

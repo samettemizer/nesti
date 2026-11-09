@@ -63,6 +63,7 @@ class IssueState(TypedDict, total=False):
     scope: str                         # "backend" | "frontend" | "fullstack" — prompts only
     code_response: str                 # latest coder output
     repo_path: str                     # local clone path
+    base_sha: str                      # target-branch commit the clone started from
     layout: dict                       # {"backend": str|None, "frontend": str|None}; "." = clone root
     domain: dict | None  # domain-split backend: issue_domain.selection(); "name" "" = not chosen; None = no domain architecture
     branch_name: str                   # git branch

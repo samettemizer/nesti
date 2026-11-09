@@ -58,9 +58,11 @@ unlabelled issue is treated as human discussion and never touched.
    automatically.
 5. **Failure.** After all retries are exhausted (or after an unexpected crash),
    Nesti removes the lock label and posts a failure comment with the last test
-   output. The issue returns to the pending pool and will be picked up again on
-   the next poll. Fix the issue text (or the acceptance criteria) before it is
-   retried.
+   output. The issue returns to the pending pool. After failed coding
+   attempts it is picked up again only once its title, its description or the
+   target branch (a new commit) changes, so fix the issue text (or the
+   acceptance criteria) first. A planning failure, exhausted coder providers
+   or a crash are retried on the next poll.
 
 ### Issue numbers
 
@@ -533,7 +535,7 @@ enough; these headings are optional.
 | Title too generic (`"bug fix"`, `"feature"`) | The model cannot determine what to do | Use verb + object format |
 | Ambiguous requested change | The model must guess the intended behaviour | State the exact change; headings are optional |
 | Missing the `nesti` label | Nesti will never see the issue | Add the opt-in label before or after creating the issue |
-| Editing an issue after `nesti::in-progress` appears | The run captured the text at pickup; later edits are invisible to it | Wait for the result, fix the issue text, and let the next poll retry it |
+| Editing an issue after `nesti::in-progress` appears | The run captured the text at pickup; later edits are invisible to it | Wait for the result, then fix the issue text; the edit makes a failed issue eligible again |
 | Adding/removing `nesti::in-progress` by hand | Breaks the lock protocol | Let Nesti manage the lock label |
 | Skill URL unreachable or behind auth | Fetch fails, Telegram warning fires | Verify the URL is publicly accessible before submitting |
 | Skill document too large (>12,000 chars) | Content is truncated at 12,000 chars | Link only the relevant component page |
@@ -563,8 +565,8 @@ Understanding the retry loop helps you write better issues:
    **shared across all four layers** — not per layer. All layers funnel into
    one escalation step. `attempt` increments once per code-generation run.
 5. After all retries are exhausted, the lock label is removed and a failure
-   comment is posted. The issue returns to the pending pool and will be
-   retried on the next poll.
+   comment is posted. The issue returns to the pending pool but is retried
+   only after its title, its description or the target-branch HEAD changes.
 
 **Stale files are pruned on retry.** Each retry must re-emit the complete set
 of files. A file the previous attempt wrote and the new attempt does not

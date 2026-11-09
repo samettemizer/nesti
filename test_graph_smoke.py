@@ -115,7 +115,7 @@ def initial(issue_id: int, subject: str = "", description: str = "Implement the 
     return {
         "issue": {"id": issue_id, "subject": subject, "description": description},
         "issue_id": issue_id, "subject": subject,
-        "skills": [], "plan": "", "scope": "fullstack", "code_response": "", "repo_path": "",
+        "skills": [], "plan": "", "scope": "fullstack", "code_response": "", "repo_path": "", "base_sha": "",
         "branch_name": "", "workspace": "", "messages": [],
         "attempt": 0, "max_attempts": 3,
         "files_written": False, "written_files": [],
@@ -185,7 +185,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             os.makedirs(os.path.join(target_path, "resources", "js", "components"))
             open(os.path.join(target_path, "resources", "js", "components",
                               "Existing.vue"), "w").close()
-        return {"success": True, "result": {"repo_path": target_path}}
+        return {"success": True, "result": {"repo_path": target_path, "head_sha": "b" * 40}}
     nodes.tool_gitlab_clone = fake_clone
 
     def fake_bootstrap(repo_path, spa_path=""):
@@ -385,6 +385,9 @@ check("3 attempt(s)" in f["failure_reason"], "failure_reason set")
 reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
 check(len(reopen) == 1 and "failed to produce passing tests" in reopen[0][1]
       and "PHPUnit FAILURES!" in reopen[0][1], "issue reopened with failure note + test output")
+check(reopen[0][1].endswith(
+    "\n\n" + nodes.failed_run_marker("Test issue 102", "Implement the thing.", "b" * 40)),
+    "exhausted coding failure note carries the title/description/cloned-HEAD marker")
 check(nodes._store.load(102) == [], "history deleted after exhausted failure")
 check(all(messages == [{"role": "user", "content": prompt}]
           for messages, prompt in zip(calls["code_messages"], calls["code_prompts"])),
@@ -405,6 +408,7 @@ check(f["attempt"] == 0 and calls["docker"] == 0, "no code/test attempts made")
 reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
 check(len(reopen) == 1 and "planning providers failed" in reopen[0][1],
       "reopened with planning note")
+check("NESTI_FAILED_RUN_V1" not in reopen[0][1], "planning failure leaves no failed-run marker")
 check("All planning providers exhausted." in f["error"], "error field populated")
 check(not os.path.exists(calls["workspaces"][0]), "cleanup ran after plan failure")
 check(nodes._store.load(103) == [], "failed planning clears history before reopening")
@@ -424,6 +428,8 @@ check(calls["docker"] == 0, "no sandbox run for exhausted providers")
 reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
 check("All coding providers exhausted." in reopen[0][1],
       "reopen note carries provider-exhaustion reason")
+check("NESTI_FAILED_RUN_V1" not in reopen[0][1],
+      "exhausted coder providers (transient quota) leave no failed-run marker")
 check(not os.path.exists(calls["workspaces"][0]), "cleanup ran")
 
 # ═════ Scenario 5: PHP-only issue skips both frontend layers ═════
@@ -1964,6 +1970,7 @@ class _IssueHTTP:
         self.failed_get = set()
         self.note_id = 0
         self.child_posts = 0
+        self.head = "h1"
 
     def add_issue(self, iid, labels=None, state="opened", description=""):
         self.issues[iid] = {
@@ -1993,6 +2000,12 @@ class _IssueHTTP:
             return _FakeResponse({"error": "read unavailable"}, 503)
         if path.endswith("/user"):
             return _FakeResponse({"id": 15})
+        if "/repository/branches/" in path:
+            if self.head is None:
+                return _FakeResponse({"message": "404 Branch Not Found"}, 404)
+            if self.head == "error":
+                return _FakeResponse({"error": "down"}, 500)
+            return _FakeResponse({"commit": {"id": self.head}})
         suffix = path.split("/issues", 1)
         if len(suffix) == 2:
             parts = suffix[1].strip("/").split("/") if suffix[1].strip("/") else []
@@ -2092,6 +2105,55 @@ http.issues[9]["state"] = "opened"
 http.issues[9]["labels"] = ["human"]
 check(not client.pause_issue(9) and not client.resume_issue(9) and not client.reopen_issue(9),
       "manual opt-out is never reversed")
+
+print("\n── Scenario 12d-rerun: an unchanged failed issue is not re-run ──")
+rerun = _IssueHTTP()
+rerun.add_issue(30, description="Do it.")
+rerun.add_issue(31)
+rerun.add_issue(32)
+rerun.issues[32]["description"] = None
+
+
+def _mark_failed(iid, author=15, head="h1"):
+    issue = rerun.issues[iid]
+    rerun.add_note(iid, "AI Developer failed to produce passing tests (PHPUnit).\n\n"
+                   + gic.failed_run_marker(issue["title"], issue["description"] or "", head),
+                   author=author)
+
+
+def _rerun_pending():
+    return [i["id"] for i in rerun.client().list_pending()]
+
+
+_mark_failed(30)
+_mark_failed(32)
+check([i["id"] for i in rerun.client().list_pending(1)] == [31],
+      "a stale-failed oldest issue is skipped and does not count toward the limit")
+rerun.requests.clear()
+check(_rerun_pending() == [31] and sum("/repository/branches/" in r[1] for r in rerun.requests) == 1,
+      "unchanged title/description/HEAD excludes failed issues; HEAD read once per poll")
+rerun.issues[30]["title"] = "Issue 30, clarified"
+check(_rerun_pending() == [30, 31], "an edited title makes the failed issue pending again")
+rerun.issues[30]["title"] = "Issue 30"
+rerun.issues[30]["description"] = "Do it properly."
+check(_rerun_pending() == [30, 31], "an edited description makes the failed issue pending again")
+rerun.issues[30]["description"] = "Do it."
+rerun.head = "h2"
+check(_rerun_pending() == [30, 31, 32], "a new target-branch commit makes failed issues pending again")
+rerun.head = None
+check(_rerun_pending() == [30, 31, 32], "a missing target branch (404) matches no marker")
+rerun.head = "error"
+try:
+    rerun.client().list_pending()
+    _head_raised = False
+except RuntimeError:
+    _head_raised = True
+check(_head_raised, "any other target-HEAD lookup error aborts the poll")
+rerun.head = "h1"
+_mark_failed(31, author=99)
+check(_rerun_pending() == [31], "a failed-run marker by a foreign author is ignored")
+_mark_failed(30, head="h0")
+check(_rerun_pending() == [30, 31], "the latest trusted marker decides, older markers do not")
 
 print("\n── Scenario 12d-omp: OMP escalation issue tools ──")
 import graph.tools as _issue_tools  # noqa: E402
@@ -3108,7 +3170,7 @@ try:
         os.makedirs(target_path, exist_ok=True)
         calls["workspaces"].append(os.path.dirname(target_path))
         _monorepo(target_path)
-        return {"success": True, "result": {"repo_path": target_path}}
+        return {"success": True, "result": {"repo_path": target_path, "head_sha": "b" * 40}}
     nodes.tool_gitlab_clone = mono_clone
     f = compiled.invoke(initial(133), config={"recursion_limit": 60})
     _clone = os.path.join(calls["workspaces"][0], "repo")
@@ -3159,7 +3221,7 @@ def domain_clone(target_path):
     os.makedirs(target_path, exist_ok=True)
     calls["workspaces"].append(os.path.dirname(target_path))
     _domain_tree(target_path)
-    return {"success": True, "result": {"repo_path": target_path}}
+    return {"success": True, "result": {"repo_path": target_path, "head_sha": "b" * 40}}
 
 
 _domain_probe = tempfile.mkdtemp(prefix="nesti-domain-")
@@ -3616,8 +3678,8 @@ def _git_clone(setup):
         setup(target_path)
         with _git.Repo.init(target_path) as repo:
             repo.git.add(A=True)
-            repo.index.commit("Initial commit")
-        return {"success": True, "result": {"repo_path": target_path}}
+            head = repo.index.commit("Initial commit").hexsha
+        return {"success": True, "result": {"repo_path": target_path, "head_sha": head}}
     return clone
 
 
