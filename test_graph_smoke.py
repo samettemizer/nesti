@@ -36,6 +36,7 @@ os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"   # unreachable → memory fal
 os.environ["MAX_CODE_RETRIES"] = "2"                 # → max_attempts = 3
 os.environ["NESTI_STACK"] = "auto"                   # exercise real detection
 os.environ["NESTI_RERANKER_ENABLED"] = "false"
+os.environ["NESTI_SERENA_ENABLE"] = "false"
 os.environ["GITLAB_URL"] = "https://gitlab.test"       # scopes Redis keys (gitlab_project.identity)
 os.environ["GITLAB_PROJECT_PATH"] = "ai/hello-world"
 os.environ.pop("TELEGRAM_BOT_TOKEN", None)

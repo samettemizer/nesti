@@ -92,6 +92,7 @@ from issue_domain import classify as classify_domain, detect as detect_domain, d
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
 from project_layout import SCAFFOLD_BACKEND_DIR, LayoutError, clone_layout, spa_dir_for
+from serena_client import research as serena_research
 from conversation_store import ConversationStore
 from prompt_builder import (
     build_plan_prompt, build_code_prompt, drop_injected_chunks, format_catalog_for_prompt, is_separated,
@@ -1194,6 +1195,7 @@ def node_plan(state: IssueState) -> dict:
             len(past_solutions),
             len(retrieved),
         )
+    serena_findings = serena_research(_llm, issue_text)
     memory_counts = {
         "retrieved_chunks": len(retrieved),
         "past_solutions": len(past_solutions),
@@ -1210,6 +1212,7 @@ def node_plan(state: IssueState) -> dict:
         scope=decision.scope,
         layout=_prompt_layout(state),
         domain=state.get("domain"),
+        serena_findings=serena_findings,
         scope_evidence=decision.evidence(),
         metrics=metrics,
     )

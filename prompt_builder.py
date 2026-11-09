@@ -925,6 +925,7 @@ def build_plan_prompt(
     metrics: dict | None = None,
     layout: dict | None = None,
     domain: dict | None = None,
+    serena_findings: str = "",
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the planning phase.
@@ -963,6 +964,9 @@ def build_plan_prompt(
         the planner, which confirms or corrects the scope on line 1 of its plan.
     metrics:
         Optional output dict of section character counts and selected/rendered RAG counts.
+    serena_findings:
+        serena_client.research() output, read-only Serena query results about the local
+        checkout; rendered as Code Intelligence after the repository state.
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
@@ -974,6 +978,16 @@ def build_plan_prompt(
         repo_section = (
             f"\n## Existing Repository State\n"
             f"{repo_context.strip()}\n"
+        )
+
+    serena_section = ""
+    if serena_findings:
+        serena_section = (
+            "\n## Code Intelligence (Serena)\n"
+            "Read-only query results from the project's semantic code index. It indexes the local "
+            "checkout, which may differ from the cloned branch: Existing Repository State wins on "
+            "any conflict.\n"
+            f"{serena_findings.strip()}\n"
         )
 
     catalog_section = format_catalog_for_prompt(catalog_skills, "plan", scope)
@@ -1002,6 +1016,7 @@ GitLab Issue #{issue_id}: {subject}
 {description or "(no description provided)"}
 """,
         "repo": repo_section,
+        "serena": serena_section,
         "solutions": solutions_section,
         "catalog": catalog_section,
         "rag": retrieved_section,

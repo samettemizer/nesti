@@ -41,6 +41,8 @@ skill_catalog.py             offline corpus selection; skill_loader.py: issue UR
 embedding.py, vector_store.py, semantic_cache.py   vector memory
 reranker.py                  opt-in CPU rerank of retrieved docs (NESTI_RERANKER_ENABLED);
                              deps in requirements-reranker.txt (orchestrator image only)
+serena_client.py             MCP client of nesti-serena: planner's read-only research loop before each plan
+                             (NESTI_SERENA_ENABLE) → plan prompt's Code Intelligence section; never raises
 layer_output.py              condenses sandbox output to its meaningful tail
 telegram_notifier.py         fire-and-forget alerts
 project_layout.py            NESTI_PROJECT_PATH backend/SPA layout → state/layout.json; clone_layout for the pipeline

@@ -12,7 +12,7 @@ langchain-core>=0.3.0
 # Pinned below 2.0: the MCP SDK renamed FastMCP → MCPServer in 2.x and changed
 # the decorator API. mcp_server/server.py builds on FastMCP, and its import
 # order plus the __main__ delegation guard are load-bearing invariants, so the boring fix is to stay on the 1.x line.
-mcp>=1.0.0,<2
+mcp>=1.30,<2
 # vector memory. The Qdrant client and the nesti-qdrant image
 # (docker-compose.yml, qdrant/qdrant:v1.19.1) are one coupled setting: the
 # client warns on every connection when its minor version drifts more than one
