@@ -1,4 +1,14 @@
-# Nesti
+<p align="center">
+  <img src="./assets/logo.svg" alt="Nesti — a confident cow with a tiny carton of milk" width="760" />
+</p>
+
+<p align="center">
+  <em>For those who keep a cow in the next room for just one carton of milk.</em>
+</p>
+
+---
+
+
 
 Nesti turns opted-in GitLab issues into Laravel 13 + PrimeVue 5 Merge Requests.
 It plans and generates code through an LLM cascade, then runs the applicable
@@ -256,19 +266,29 @@ Available commands (prefix each with `nesti` inside the container):
 OpenRouter needs an explicit model via `OPENROUTER_MODEL` or
 `nesti /provider model openrouter <model-id>`.
 
-## Usage statistics
+## Statistics
 
 `nesti /stats` prints the local page URL; the `nesti-stats` service serves it.
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="assets/stats-providers.png" width="100%" alt="Nesti Providers page with All selected, showing recorded provider and model usage and API-equivalent cost estimates" />
+      <img src="assets/stats-providers.webp" width="100%" alt="Nesti Providers page with All selected, showing recorded provider and model usage and API-equivalent cost estimates" />
       <br /><sub><b>Providers</b> — recorded provider and model usage, all retained activity</sub>
     </td>
     <td width="50%" valign="top">
-      <img src="assets/stats-traces.png" width="100%" alt="Nesti Traces page with a real issue run expanded to show its model and tool timeline, duration and estimated cost" />
+      <img src="assets/stats-traces.webp" width="100%" alt="Nesti Traces page with a real issue run expanded to show its model and tool timeline, duration and estimated cost" />
       <br /><sub><b>Traces</b> — issue-run timeline, duration and estimated cost</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/stats-models.webp" width="100%" alt="Nesti Models page showing per-model requests, token usage and response speed" />
+      <br /><sub><b>Models</b> — which models did the work and how fast they answered.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/stats-costs.webp" width="100%" alt="Nesti Costs page showing API-equivalent cost estimates per model and provider" />
+      <br /><sub><b>Costs</b> — usage priced at public API rates.</sub>
     </td>
   </tr>
 </table>
