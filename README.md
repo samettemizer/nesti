@@ -1,4 +1,14 @@
-# Nesti
+<p align="center">
+  <img src="./assets/logo.svg" alt="Nesti — a confident cow with a tiny carton of milk" width="760" />
+</p>
+
+<p align="center">
+  <em>For those who keep a cow in the next room for just one carton of milk.</em>
+</p>
+
+---
+
+
 
 Nesti turns opted-in GitLab issues into Laravel 13 + PrimeVue 5 Merge Requests.
 It plans and generates code through an LLM cascade, then runs the applicable
