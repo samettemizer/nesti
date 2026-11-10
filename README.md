@@ -266,7 +266,7 @@ Available commands (prefix each with `nesti` inside the container):
 OpenRouter needs an explicit model via `OPENROUTER_MODEL` or
 `nesti /provider model openrouter <model-id>`.
 
-## Usage statistics
+## Statistics
 
 `nesti /stats` prints the local page URL; the `nesti-stats` service serves it.
 
@@ -288,7 +288,7 @@ OpenRouter needs an explicit model via `OPENROUTER_MODEL` or
     </td>
     <td width="50%" valign="top">
       <img src="assets/stats-costs.webp" width="100%" alt="Nesti Costs page showing API-equivalent cost estimates per model and provider" />
-      <br /><sub><b>Costs</b> — usage priced at public API rates; models without a public price count as unpriced, not free.</sub>
+      <br /><sub><b>Costs</b> — usage priced at public API rates.</sub>
     </td>
   </tr>
 </table>

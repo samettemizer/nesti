@@ -883,7 +883,7 @@ def cli_boost(args: list[str]) -> int:
 
         root = project_layout.project_root()
         record = project_layout.ensure_layout(root)
-        report = run_boost(root, record, LLMClient(), progress=print)
+        report = run_boost(root, record, LLMClient(), progress=lambda line: print(line, flush=True))
     except (LayoutError, BoostError, RuntimeError) as exc:
         print(f"Boost failed: {exc}", file=sys.stderr)
         return 1
