@@ -82,7 +82,7 @@ class IssueState(TypedDict, total=False):
     # ── Laravel detection / bootstrap ────────────────────────────
     is_laravel: bool                   # repository contains artisan
     bootstrapped: bool                 # True when this run scaffolded the skeleton
-    bootstrap_files: list[str]         # paths the bootstrap/starter changed, committed locally before coding
+    bootstrap_files: list[str]         # committed paths of a scaffold/starter-kit bootstrap (gate the layers); [] for a top-up
     has_api_routes: bool               # routes/api.php exists
     run_openapi: bool                  # OpenAPI layer applies to this attempt
 

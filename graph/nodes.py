@@ -1007,7 +1007,9 @@ def node_bootstrap(state: IssueState) -> dict:
     A layout without a frontend gets the Sakai starter kit (``frontend/``, or
     ``.frontend/`` beside a root app) when the issue asks for a user interface;
     exactly one ``STARTER:`` line records that decision.  Whatever bootstrap
-    and starter changed is committed locally before coding.
+    and starter changed is committed locally before coding; only a scaffold's
+    or starter kit's files are returned to gate the test layers — top-up
+    wiring of an existing app never decides a layer.
 
     A non-Laravel PHP project, or a starter kit that cannot apply, is a
     configuration error no model can fix by rewriting its code, so this node
@@ -1042,7 +1044,7 @@ def node_bootstrap(state: IssueState) -> dict:
             detail["reason"],
         )
 
-    reasons = [detail["reason"]]
+    reasons, gates = [detail["reason"]], detail["created"]
     if layout["frontend"]:
         verdict, basis = "skipped", f"existing SPA {layout['frontend']}/"
     else:
@@ -1053,7 +1055,7 @@ def node_bootstrap(state: IssueState) -> dict:
             if not starter["success"]:
                 shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
                 raise RuntimeError(f"Starter kit failed: {starter['error']}")
-            layout = {**layout, "frontend": spa_dir}
+            layout, gates = {**layout, "frontend": spa_dir}, True
             reasons.append(starter["result"]["reason"])
             verdict = f"added {spa_dir}/ (roles: {starter['result']['variant']})"
             basis = f"issue asks for a user interface ({decision.evidence()})"
@@ -1064,7 +1066,7 @@ def node_bootstrap(state: IssueState) -> dict:
     files = _commit_bootstrap(repo, "Nesti bootstrap\n\n" + "\n".join(reasons))
     logger.debug("← node_bootstrap (created=%s)", detail["created"])
     return {"is_laravel": True, "bootstrapped": detail["created"], "layout": layout,
-            "bootstrap_files": files}
+            "bootstrap_files": files if gates else []}
 
 
 def node_load_skills(state: IssueState) -> dict:
@@ -1437,7 +1439,8 @@ def node_detect_stack(state: IssueState) -> dict:
 
     layout = state["layout"]
     written = state.get("written_files")
-    # The bootstrap commit is part of the change: its files gate the layers too.
+    # A scaffold/starter-kit bootstrap is part of the change: its files gate the
+    # layers too (top-up wiring never does — node_bootstrap returns [] for it).
     result = tool_detect_stack(
         state["repo_path"],
         None if written is None else [*written, *state.get("bootstrap_files", [])],

@@ -3342,12 +3342,12 @@ def _scaffold_bootstrap(repo_path, spa_path=""):
                                         "output": ""}}
 
 
-def _starter_run(n, description, setup, code, **kw):
+def _starter_run(n, description, setup, code, bootstrap=_scaffold_bootstrap, **kw):
     """A graph run on a git-initialised clone; returns (final, clone, commits seen at push)."""
     reset_calls(n)
     patch_tools(docker_outcomes=[True], code_responses=[code], layout=None, **kw)
     nodes.tool_gitlab_clone = _git_clone(setup)
-    nodes.tool_laravel_bootstrap = _scaffold_bootstrap
+    nodes.tool_laravel_bootstrap = bootstrap
     commits, push = [], nodes.tool_gitlab_commit_and_push
 
     def counting_push(repo_path, branch_name, message):
@@ -3393,6 +3393,29 @@ f, _clone, _commits = _starter_run(
     3504, "Scope: backend\n\nAdd GET /api/health.", _root_laravel,
     "### FILE: app/Http/Controllers/HealthController.php\n```php\n<?php\n```\n")
 check(f["bootstrap_files"] == [] and _commits == [1], "a top-up that changes nothing makes no bootstrap commit")
+
+
+def _topup_bootstrap(repo_path, spa_path=""):
+    """Top-up of an existing app + SPA: wires test harness files into both sides."""
+    _put(spa_path, "vitest.config.js", "// nesti\n")
+    _put(repo_path, "tests/Feature/OpenApiDocumentationTest.php", "<?php\n")
+    return {"success": True, "result": {"created": False, "mode": "top-up",
+                                        "reason": "topped up", "output": ""}}
+
+
+_app_and_spa = lambda root: (_root_laravel(root), _put(root, ".frontend/package.json",  # noqa: E731
+                                                       json.dumps({"dependencies": {"vue": "^3.5.0"}})))
+f, _clone, _commits = _starter_run(
+    3506, "Scope: backend\n\nAdd GET /api/health.", _app_and_spa,
+    "### FILE: app/Http/Controllers/HealthController.php\n```php\n<?php\n```\n", bootstrap=_topup_bootstrap)
+check(_commits == [2] and f["bootstrap_files"] == [] and f["run_phpunit"] is True
+      and f["run_frontend"] is False and calls["vitest"] == calls["playwright"] == 0 and f["mr_url"],
+      "top-up SPA test config is committed but a backend-only change runs no Vitest/Playwright")
+f, _clone, _commits = _starter_run(3507, "Scope: frontend\n\nShow an About page.", _app_and_spa,
+                                   _ABOUT.format(spa=".frontend"), bootstrap=_topup_bootstrap)
+check(_commits == [2] and f["run_phpunit"] is False and f["run_frontend"] is True
+      and calls["docker"] == 0 and calls["vitest"] == calls["playwright"] == 1 and f["mr_url"],
+      "top-up backend test file is committed but a frontend-only change runs no PHPUnit")
 
 # Rule 31: a Laravel app that serves its own frontend is refused, never processed.
 with tempfile.TemporaryDirectory(prefix="nesti-website-") as _web:
