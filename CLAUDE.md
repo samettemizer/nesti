@@ -40,7 +40,7 @@ embedding.py, vector_store.py, semantic_cache.py   vector memory
 reranker.py                  opt-in CPU rerank of retrieved docs (NESTI_RERANKER_ENABLED);
                              deps in requirements-reranker.txt (orchestrator image only)
 layer_output.py              condenses sandbox output to its meaningful tail
-code_skeleton.py             tree-sitter PHP skeletons of unnamed reference files for the coding prompt (NESTI_TREE_SITTER_ENABLED)
+code_skeleton.py             tree-sitter PHP skeleton of the unnamed example Feature test for the coding prompt (NESTI_TREE_SITTER_ENABLED)
 telegram_notifier.py         fire-and-forget alerts
 project_layout.py            NESTI_PROJECT_PATH backend/SPA layout → state/layout.json; clone_layout for the pipeline
 project_boost.py             `nesti /boost`: Laravel Boost infer-conventions → <project>/.omp rules + skills

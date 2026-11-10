@@ -2737,16 +2737,24 @@ try:
               "without skeletons (plan prompt) reference files stay complete")
         _skel: list[str] = []
         _ctx = nodes._repo_inventory(sk, _sk_layout, "backend", _task, skeletons=_skel)
-        check("ELIDED_MARKER" not in _ctx and "SEED_MARKER" not in _ctx,
-              "skeletons elide long reference method bodies")
-        check("RULES_MARKER" in _ctx and "HTTP_MARKER" in _ctx and "(skeleton: long method bodies elided" in _ctx,
-              "skeletons keep rules() and the first HTTP test body, labelled as skeleton")
-        check(sorted(_skel) == [_sk_controller, "backend/tests/Feature/OrderTest.php"],
-              f"skeleton paths are reported with their prefix (got {_skel})")
+        check("ELIDED_MARKER" in _ctx and "RULES_MARKER" in _ctx,
+              "an API contract file stays complete with skeletons on")
+        check("SEED_MARKER" not in _ctx and "HTTP_MARKER" in _ctx and "(skeleton: long method bodies elided" in _ctx,
+              "the example Feature test is a skeleton: long helper elided, first HTTP test kept, labelled")
+        check(sorted(_skel) == ["backend/tests/Feature/OrderTest.php"],
+              f"only the example Feature test is reported, with its prefix (got {_skel})")
         _named: list[str] = []
-        _ctx = nodes._repo_inventory(sk, _sk_layout, "backend", "Fix OrderController.php", skeletons=_named)
-        check("ELIDED_MARKER" in _ctx and _sk_controller not in _named,
-              "a file the task names stays complete")
+        _ctx = nodes._repo_inventory(sk, _sk_layout, "backend", "Fix OrderTest.php", skeletons=_named)
+        check("SEED_MARKER" in _ctx and _named == [],
+              "a Feature test the task names stays complete")
+        _put(sk, "backend/app/Domains/Orders/OrderModel.php",
+             "<?php\nclass OrderModel\n{\n    public function total(): int\n    {\n"
+             + _sk_body + "        return 'DOMAIN_MARKER';\n    }\n}\n")
+        _dom: list[str] = []
+        _ctx = nodes._repo_inventory(sk, _sk_layout, "backend", _task, skeletons=_dom,
+                                     domain={"name": "Orders", "root": "Domains", "route_files": []})
+        check("DOMAIN_MARKER" in _ctx and not any("Domains" in p for p in _dom),
+              "a domain file stays complete with skeletons on")
     else:
         print("  (skipped: php grammar not downloaded)")
 finally:

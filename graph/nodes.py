@@ -635,10 +635,9 @@ def _repo_inventory(
     shared sign-in helper. API
     class references also supply validation, serialization and pagination
     contracts; a response field alone does not establish a writable field.
-    With *skeletons* (a list; coding prompt only) the reference quotes nobody
-    named — the example Feature test, API contract classes and the chosen
-    domain's files — become tree-sitter PHP skeletons, and their prefixed paths
-    are appended to it.
+    With *skeletons* (a list; coding prompt only) the example Feature test,
+    when nobody named it, becomes a tree-sitter PHP skeleton, and its prefixed
+    path is appended to it.
 
     Never raises: an unreadable workspace yields an empty string and the
     prompts are built without the section, exactly as before; one unreadable
@@ -660,7 +659,7 @@ def _repo_inventory(
             scope, task_text, previous_files,
             _INVENTORY_DIRS + custom,
             _BACKEND_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
-            reference_quoted=_domain_quotes(backend, domain) if scope != "frontend" else (),
+            extra_quoted=_domain_quotes(backend, domain) if scope != "frontend" else (),
             skeletons=skeletons,
         )
         if scope != "backend" and layout.get("frontend"):
@@ -690,7 +689,7 @@ def _inventory_lines(
     root: Path, prefix: str, scope: str, task_text: str, previous_files: list[str] | None,
     dirs: tuple[tuple[str, int], ...], quoted: tuple[tuple[str, str], ...],
     route_files: tuple[str, ...], extra_quoted: tuple[tuple[str, str], ...] = (),
-    reference_quoted: tuple[tuple[str, str], ...] = (), skeletons: list[str] | None = None,
+    skeletons: list[str] | None = None,
 ) -> list[str]:
     """Inventory lines for one application folder; every emitted path is *prefix* + relative."""
     if not root.is_dir():
@@ -815,9 +814,9 @@ def _inventory_lines(
         convention = _convention_test(root, task_text)
         quoted += (("tests/TestCase.php", "php"),) + convention + _scramble_filter_provider(root)
     named = {path for path, _ in referenced_files}
-    skeleton_paths = frozenset({p for p, _ in [*api_files, *convention, *reference_quoted]} - named)
+    skeleton_paths = frozenset({p for p, _ in convention} - named)
     lines += _quoted_entry_files(root, referenced_files + api_files, prefix,
-                                 quoted + extra_quoted + reference_quoted, skeleton_paths, skeletons)
+                                 quoted + extra_quoted, skeleton_paths, skeletons)
     return lines
 
 
