@@ -2752,7 +2752,8 @@ try:
              + _sk_body + "        return 'DOMAIN_MARKER';\n    }\n}\n")
         _dom: list[str] = []
         _ctx = nodes._repo_inventory(sk, _sk_layout, "backend", _task, skeletons=_dom,
-                                     domain={"name": "Orders", "root": "Domains", "route_files": []})
+                                     domain={"selected": ["Orders"], "names": ["Orders"], "root": "Domains",
+                                             "route_files": [], "foreign_route_files": []})
         check("DOMAIN_MARKER" in _ctx and not any("Domains" in p for p in _dom),
               "a domain file stays complete with skeletons on")
     else:
@@ -2936,24 +2937,84 @@ try:
           and _cat["domains"][0]["route_files"] == ["routes/domains/Announcements.php"],
           "domain catalog lists the domains and their route files")
     _dec = issue_domain.detect("Add GET /announcements/active", "", _cat)
-    check(_dec.domain == "Announcements" and not _dec.ask, "a route under a domain prefix decides it")
-    check(issue_domain.detect("Add POST /api/members/{id}/notes", "", _cat).domain == "Members",
+    check(_dec.domains == ("Announcements",) and not _dec.ask, "a route under a domain prefix decides it")
+    check(issue_domain.detect("Add POST /api/members/{id}/notes", "", _cat).domains == ("Members",),
           "a leading api/ segment is ignored")
     _dec = issue_domain.detect("Add a GET /test endpoint", "", _cat)
-    check(_dec.domain is None and _dec.ask and "/test" in _dec.basis,
+    check(_dec.domains == () and _dec.ask and "/test" in _dec.basis,
           "a route outside every domain asks")
     _dec = issue_domain.detect("Domain: Members", "", _cat)
-    check(_dec.domain == "Members" and _dec.basis == "stated in the issue", "a stated domain decides it")
-    check(issue_domain.detect("Add GET /announcements/x and GET /members/y", "", _cat).ask,
-          "routes spanning two domains ask")
+    check(_dec.domains == ("Members",) and _dec.basis == "stated in the issue", "a stated domain decides it")
+    _dec = issue_domain.detect("Domain: Members, also the Announcements domain", "", _cat)
+    check(_dec.domains == ("Announcements", "Members") and not _dec.ask,
+          "two stated domains are both decided without a question")
+    _dec = issue_domain.detect("Domain: Members", "Also add GET /announcements/pinned", _cat)
+    check(_dec.domains == ("Announcements", "Members") and not _dec.ask
+          and _dec.basis == "stated in the issue; route /announcements/pinned",
+          "a stated domain plus a route owned by a second domain decides both")
+    check(issue_domain.detect("Domain: Members", "Add GET /test", _cat).ask,
+          "a stated domain does not hide a route outside every domain")
+    _dec = issue_domain.detect("Add GET /announcements/x and GET /members/y", "", _cat)
+    check(_dec.domains == ("Announcements", "Members") and not _dec.ask,
+          "routes owned by two distinct domains decide both")
     _dec = issue_domain.detect("Show the active announcements", "", _cat)
-    check(_dec.domain is None and not _dec.ask, "no route or domain leaves it to the classifier")
+    check(_dec.domains == () and not _dec.ask, "no route or domain leaves it to the classifier")
+    _put(_domain_probe, "routes/domains/Shared.php",
+         "<?php\nuse App\\Domains\\Announcements\\Http\\Controllers\\AnnouncementsController;\n"
+         "use App\\Domains\\Members\\Http\\Controllers\\MembersController;\n"
+         "Route::get('/board', fn () => null);\n")
+    _dec = issue_domain.detect("Add GET /board/pinned", "", issue_domain.domain_catalog(Path(_domain_probe)))
+    check(_dec.domains == () and _dec.ask and "several domains" in _dec.basis,
+          "one route path owned by two domains asks")
     _opts = ["Announcements", "Members"]
-    check(issue_domain.parse_answer("2", _opts) == "Members"
-          and issue_domain.parse_answer("`Announcements` please", _opts) == "Announcements"
-          and issue_domain.parse_answer("Members or Announcements", _opts) is None
-          and issue_domain.parse_answer("> 1. `Announcements`\n\nMembers", _opts) == "Members",
-          "answers parse by number or single name, ignoring the quoted question")
+    check(issue_domain.parse_answer("2", _opts) == ["Members"]
+          and issue_domain.parse_answer("`Announcements` please", _opts) == ["Announcements"]
+          and issue_domain.parse_answer("> 1. `Announcements`\n\nMembers", _opts) == ["Members"],
+          "answers parse by number or name, ignoring the quoted question")
+    check(issue_domain.parse_answer("Members and Announcements", _opts) == _opts
+          and issue_domain.parse_answer("1, 2", _opts) == _opts
+          and issue_domain.parse_answer("2 and 1", _opts) == _opts,
+          "a reply naming two domains, by name or number, selects both")
+    check(issue_domain.parse_answer("3", _opts) == [] and issue_domain.parse_answer("1, 3", _opts) == []
+          and issue_domain.parse_answer("0", _opts) == [] and issue_domain.parse_answer("no idea", _opts) == [],
+          "an out-of-range number or no match is unmatched")
+    check(issue_domain.parse_answer("1,2,", _opts) == _opts and issue_domain.parse_answer("2.", _opts) == ["Members"],
+          "a trailing comma or period after the numbers still selects")
+    check(issue_domain.parse_answer("I tried 2 times, use Members", _opts) == ["Members"]
+          and issue_domain.parse_answer("tried 2 times", _opts) == [],
+          "prose with a stray digit never selects by number")
+    import time as _time  # noqa: E402
+    _t0 = _time.perf_counter()
+    _slow = issue_domain.parse_answer("".join(f"{i}{' ' * 3000}" for i in range(1, 9)) + "x", _opts)
+    check(_slow == [] and _time.perf_counter() - _t0 < 1,
+          "a reply with long whitespace gaps parses quickly and stays unmatched")
+    _put(_domain_probe, "app/Http/Controllers/TestController.php", "<?php\n// SHARED_API\n")
+    _put(_domain_probe, "app/Domains/Billing/Http/Controllers/BillingController.php",
+         "<?php\nnamespace App\\Domains\\Billing\\Http\\Controllers;\n// SENTINEL_Billing\n")
+    _put(_domain_probe, "routes/domains/Billing.php",
+         "<?php\nuse App\\Domains\\Billing\\Http\\Controllers\\BillingController;\n"
+         "Route::get('/billing', [BillingController::class, 'index']); // BILLING_ROUTES\n")
+    _put(_domain_probe, "routes/api.php",
+         "<?php\nuse App\\Http\\Controllers\\TestController;\n"
+         "use App\\Domains\\Billing\\Http\\Controllers\\BillingController;\n"
+         "Route::get('/test', [TestController::class, '__invoke']);\n"
+         "Route::get('/invoices', [BillingController::class, 'index']);\n")
+    os.remove(os.path.join(_domain_probe, "routes/domains/Shared.php"))
+    _cat3 = issue_domain.domain_catalog(Path(_domain_probe))
+    _two = issue_domain.selection(_cat3, ["Members", "Announcements"])
+    check(_two["selected"] == ["Announcements", "Members"]
+          and _two["foreign_route_files"] == ["routes/domains/Billing.php"],
+          "a two-domain selection keeps catalog order and marks the third domain's route file foreign")
+    _inv = nodes._repo_inventory(_domain_probe, {"backend": ".", "frontend": None}, "backend",
+                                 "Add notes", domain=_two)
+    check("SENTINEL_Announcements" in _inv and "SENTINEL_Members" in _inv and "SHARED_API" in _inv
+          and "SENTINEL_Billing" not in _inv and "Domains/Billing/" not in _inv and "BILLING_ROUTES" not in _inv,
+          "a two-domain selection quotes both domains and shared API files, never the third domain")
+    _all = nodes._repo_inventory(_domain_probe, {"backend": ".", "frontend": None}, "backend", "Add notes")
+    check("SENTINEL_Billing" in _all and "BILLING_ROUTES" in _all
+          and nodes._repo_inventory(_domain_probe, {"backend": ".", "frontend": None}, "backend",
+                                    "Add notes", domain=issue_domain.selection(_cat3, [])) == _all,
+          "an empty selection filters nothing: the inventory equals the one without a domain")
 finally:
     shutil.rmtree(_domain_probe, ignore_errors=True)
 
@@ -2993,7 +3054,7 @@ check(calls["asks"] == [["Announcements", "Members"]]
       and not any(os.path.exists(w) for w in calls["workspaces"]),
       "an unowned route asks once, pauses and cleans up before bootstrap or planning")
 f = _domain_run(3402, "Add GET /announcements/active")
-check(not calls["asks"] and f["domain"]["name"] == "Announcements", "a domain route decides without asking")
+check(not calls["asks"] and f["domain"]["selected"] == ["Announcements"], "a domain route decides without asking")
 check(all("This issue belongs to the Announcements domain" in s and "routes/domains/Announcements.php" in s
           for s in (calls["plan_systems"][0], calls["code_systems"][0])),
       "plan and code prompts carry the architecture block for the chosen domain")
@@ -3002,16 +3063,22 @@ check("Current app/Domains/Announcements/Http/Controllers/AnnouncementsControlle
       "the plan prompt quotes the chosen domain's files only")
 _one = '```json\n{"domains": ["Announcements"], "reason": "announcements"}\n```'
 f = _domain_run(3403, "Show only active announcements", classify_reply=_one)
-check(not calls["asks"] and f["domain"]["name"] == "Announcements", "a single classified domain is accepted")
+check(not calls["asks"] and f["domain"]["selected"] == ["Announcements"], "a single classified domain is accepted")
 f = _domain_run(3404, "Show only active announcements",
                 classify_reply='{"domains": ["Announcements", "Members"], "reason": "both"}')
 check(calls["asks"] and "2 plausible domains" in f["failure_reason"],
       "two plausible classified domains ask")
-f = _domain_run(3405, "Add a GET /test endpoint", answer="Members")
+f = _domain_run(3405, "Add a GET /test endpoint", answer=["Members"])
 check(not calls["asks"] and "belongs to the Members domain" in calls["plan_systems"][0],
       "an earlier human answer decides the domain")
 f = _domain_run(3406, "Change the login button colour to red", answer_raises=True)
-check(f["domain"]["name"] == "" and not calls["asks"], "a frontend issue skips the domain decision")
+check(f["domain"]["selected"] == [] and not calls["asks"], "a frontend issue skips the domain decision")
+f = _domain_run(3407, "Add GET /announcements/x and GET /members/y")
+check(not calls["asks"] and f["domain"]["selected"] == ["Announcements", "Members"]
+      and "This issue belongs to the Announcements, Members domains" in calls["code_systems"][0]
+      and "MembersController.php (complete)" in calls["plan_prompts"][0]
+      and "AnnouncementsController.php (complete)" in calls["plan_prompts"][0],
+      "routes in two domains decide both; the prompts carry both domains")
 
 http = _IssueHTTP()
 http.add_issue(40, ["nesti", "nesti::in-progress"])
@@ -3026,7 +3093,7 @@ check(issue_domain.reconcile(http.client())["resumed"] == [40]
       and http.issues[40]["labels"] == ["nesti"] and len(http.notes[40]) == 2,
       "a matching reply resumes the issue without a new note")
 http.add_note(40, "Run failed", author=15)
-check(issue_domain.answer(http.client().list_notes(40), 15, ["Announcements", "Members"]) == "Members",
+check(issue_domain.answer(http.client().list_notes(40), 15, ["Announcements", "Members"]) == ["Members"],
       "the answer survives a later Nesti note")
 http2 = _IssueHTTP()
 http2.add_issue(41, ["nesti", "nesti::pause"])

@@ -26,7 +26,7 @@ mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,s
 llm_client.py                provider cascade — the only module that calls LLMs
 prompt_builder.py            plan + code prompts composed per task scope, FILE-block output format
 issue_scope.py               backend/frontend/fullstack task scope + documentation-request check
-issue_domain.py              domain-split backend: owning domain from stated name/route, LLM classify via the
+issue_domain.py              domain-split backend: owning domains from stated names/routes, LLM classify via the
                              passed client, GitLab domain question/answer + reconcile; never imports graph.*
 conversation_store.py        Redis per-issue history (ai-dev:issue:{id}:messages)
 docker_runner.py             PHP sandbox (+ postgres:15 sidecar when phpunit.xml declares pgsql),
@@ -219,20 +219,25 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     exception. They record only counters, model/provider names, durations and
     error text, never prompts or responses. New code for statistics goes into
     `stats/`; existing modules keep one-line hooks only.
-36. **A domain-split backend gets its owning domain before planning.** When
+36. **A domain-split backend gets its owning domains before planning.** When
     `project_layout._scan_backend` sets `domain_root`, `node_detect_domain`
-    (setup → bootstrap) decides: earlier GitLab answer → stated domain →
-    owning route → planner classification, accepted only when exactly one
-    domain is plausible. Otherwise it posts one `Which domain is this request for?`
+    (setup → bootstrap) decides: earlier GitLab answer → every stated domain
+    plus every domain owning a named route (a route path owned by no domain or
+    by several domains asks, even when domains are stated) → planner
+    classification, accepted only when exactly one domain is plausible.
+    Otherwise it posts one `Which domain is this request for?`
     note (`NESTI_DOMAIN_QUESTION_V1` marker), adds `nesti::pause`, and the run
     goes to cleanup before bootstrap and coding. Reconcile lifts a pause only
-    when Nesti's latest note is that question and a human reply names exactly
-    one option; each unmatched reply gets the question again (one re-ask per
-    reply); manual pauses are never lifted. Greenfield backends,
-    backends without a domain root (`domain_catalog()` is `None`) and
-    frontend-scope issues are never asked.
-    The domain shapes prompts only (architecture block + its files quoted),
-    never a gate; `node_detect_domain` logs exactly one `DOMAIN:` line per run.
+    when Nesti's latest note is that question and a human reply names one or
+    more options (by name, or a bare list of numbers); each unmatched reply gets
+    the question again (one re-ask per reply); manual pauses are never lifted.
+    Greenfield backends, backends without a domain root (`domain_catalog()` is
+    `None`) and frontend-scope issues are never asked.
+    The domains shape prompts only, never a gate: the architecture block names
+    only the chosen domains, their files are quoted, and unchosen domains' files
+    stay out of the inventory listings, API contracts and `routes/<dir>/` quotes
+    (shared files outside every domain stay). `node_detect_domain` logs exactly
+    one `DOMAIN:` line per run, domains comma-joined.
 
 ---
 
@@ -244,7 +249,7 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `graph/nodes.py` | `graph/tools.py` | Returns `{"success": bool, ...}` — always |
 | `graph/nodes.py` | `llm_client.py` | `generate_plan/code(system, user, messages=None)` → `str` |
 | `graph/nodes.py` | `issue_scope.py` | `classify_issue()` / `declared_scope()` never raise; scope ∈ `backend`\|`frontend`\|`fullstack` |
-| `graph/nodes.py` | `issue_domain.py` | `domain_catalog()` → `dict`, `None` without a domain architecture; `detect()` → `DomainDecision`; `classify(..., llm)` → `(list[str], str)`, never raises |
+| `graph/nodes.py` | `issue_domain.py` | `domain_catalog()` → `dict`, `None` without a domain architecture; `detect()` → `DomainDecision(domains: tuple, ask, basis)`; `classify(..., llm)` → `(list[str], str)`, never raises; `selection(catalog, names)` → `{root, layers, names, selected, route_files, foreign_route_files}` |
 | `graph/nodes.py` | `prompt_builder.py` | `build_plan_prompt(..., scope, scope_evidence)` / `build_code_prompt(..., scope)` → `(system, user)` |
 | `graph/nodes.py` | `conversation_store.py` | `append()` → updated `list[dict]` |
 | `graph/nodes.py` | `docker_runner.py` | `write_files()` → `(bool, list[str])` |
@@ -254,7 +259,7 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `graph/tools.py` | `docker_runner.py` | `run_openapi_export()` / `run_bootstrap()` / `run_scramble_install()` → `(bool, str)` |
 | `graph/tools.py` | `frontend_runner.py` | `run_vitest()` / `run_playwright()` → `(bool, str)` |
 | `graph/tools.py` | `gitlab_issues_client.py` | `lock/close/reopen/pause/resume_issue()` → `bool`, verified by independent GET; `post_note()` (via `issue_domain`) → note id, read back by GET, raises on failure |
-| `graph/tools.py` | `issue_domain.py` | `answer()` → `str\|None`; `ask()` posts the question + pauses, raises `RuntimeError` when the pause is unverified; `reconcile()` → `{resumed, asked, waiting, errors}` |
+| `graph/tools.py` | `issue_domain.py` | `answer()` → `list[str]` (`[]` = no answer); `ask()` posts the question + pauses, raises `RuntimeError` when the pause is unverified; `reconcile()` → `{resumed, asked, waiting, errors}` |
 | `task_engine.py` | `graph/tools.py` | `tool_issue_reconcile_domain_questions()` before `tool_issue_list_pending()`; failure logged, never aborts the poll |
 | `graph/tools.py` | `skill_catalog.py` | `select_skills()` never raises, returns `list[Skill]` |
 | `mcp_server/tools/*.py` | `graph/tools.py` | pass-through `{"success": bool, ...}` — no reshaping |

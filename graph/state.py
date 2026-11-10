@@ -65,7 +65,7 @@ class IssueState(TypedDict, total=False):
     repo_path: str                     # local clone path
     base_sha: str                      # target-branch commit the clone started from
     layout: dict                       # {"backend": str|None, "frontend": str|None}; "." = clone root
-    domain: dict | None  # domain-split backend: issue_domain.selection(); "name" "" = not chosen; None = no domain architecture
+    domain: dict | None  # domain-split backend: issue_domain.selection(); "selected" [] = not chosen; None = no domain architecture
     app_facts: str                     # Laravel Boost app info + schema summary at HEAD; prompts only, never a gate
     branch_name: str                   # git branch
     workspace: str                     # tempdir path

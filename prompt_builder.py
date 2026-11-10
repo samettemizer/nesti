@@ -541,26 +541,29 @@ def _layout_block(layout: dict, spa_versions: dict) -> str:
 
 def _architecture_block(domain: dict) -> str:
     """The BACKEND ARCHITECTURE block for a domain-split backend (paths backend-relative)."""
-    root, name = domain["root"], domain.get("name")
+    root, selected = domain["root"], domain["selected"]
+    listed = "" if selected else f" ({', '.join(domain['names'])})"
     text = (
-        f"BACKEND ARCHITECTURE (strict): The backend splits its code into domains under app/{root}/ "
-        f"({', '.join(domain['names'])}); each domain keeps its own layers ({', '.join(domain['layers'])}) "
+        f"BACKEND ARCHITECTURE (strict): The backend splits its code into domains under app/{root}/"
+        f"{listed}; each domain keeps its own layers ({', '.join(domain['layers'])}) "
         f"under the namespace App\\{root}\\<Domain>\\. New feature classes (controllers, requests, "
         "resources, models, repositories, services) go into the owning domain, not into Laravel's "
         "default app/Http/Controllers, app/Http/Requests, app/Http/Resources or app/Models folders "
         "named under LARAVEL BACKEND; existing shared classes stay where they are."
     )
-    if not name:
+    if not selected:
         return text + (" Put the change into the domain that owns the feature and mirror that "
                        "domain's existing files.")
+    names = ", ".join(selected)
     text += (
-        f" This issue belongs to the {name} domain: put every new or changed backend class under "
-        f"app/{root}/{name}/<Layer>/ (namespace App\\{root}\\{name}\\<Layer>)"
+        f" This issue belongs to the {names} domain{'s' if len(selected) > 1 else ''}: put every new or "
+        "changed backend class under " + " or ".join(
+            f"app/{root}/{name}/<Layer>/ (namespace App\\{root}\\{name}\\<Layer>)" for name in selected)
     )
     if domain["route_files"]:
         text += f" and register its routes in {', '.join(domain['route_files'])}"
     return text + (
-        f". Mirror the structure, naming, base classes and wiring of the {name} files quoted under "
+        f". Mirror the structure, naming, base classes and wiring of the {names} files quoted under "
         "Existing Repository State; migrations, factories, seeders and tests stay where the project "
         "keeps them."
     )

@@ -326,8 +326,8 @@ def tool_issue_notes(issue_id: int) -> dict:
 
 def tool_issue_domain_answer(issue_id: int, options: list[str]) -> dict:
     """
-    The domain a human named in reply to Nesti's latest domain question on
-    *issue_id*.  Graph-internal.  result: str | None.
+    The domains a human named in reply to Nesti's latest domain question on
+    *issue_id*.  Graph-internal.  result: list[str], [] = no answer.
     """
     try:
         client = GitLabIssuesClient()

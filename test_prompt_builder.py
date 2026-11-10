@@ -138,8 +138,9 @@ class PromptBuilderTests(unittest.TestCase):
                 self.assertEqual(metrics["rag_rendered"], 2)
 
     def test_issue_specific_parts_follow_the_cacheable_prefix(self) -> None:
-        domain = {"root": "Domains", "name": "Members", "names": ["Announcements", "Members"],
-                  "layers": ["Http", "Models"], "route_files": ["routes/domains/Members.php"]}
+        domain = {"root": "Domains", "selected": ["Members"], "names": ["Announcements", "Members"],
+                  "layers": ["Http", "Models"], "route_files": ["routes/domains/Members.php"],
+                  "foreign_route_files": ["routes/domains/Announcements.php"]}
         for build in (prompts._planning_system_prompt, prompts._coding_system_prompt):
             for scope in prompts.SCOPES:
                 with self.subTest(build=build.__name__, scope=scope):

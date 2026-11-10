@@ -597,13 +597,22 @@ def _spa_session_sources(spa_root: Path) -> tuple[tuple[str, str], ...]:
 
 
 def _domain_quotes(backend: Path, domain: dict | None) -> tuple[tuple[str, str], ...]:
-    """The chosen domain's route files and every PHP file of its folder, as backend-relative quote entries."""
-    if not domain or not domain["name"]:
+    """The chosen domains' route files and every PHP file of their folders, as backend-relative quote entries."""
+    if not domain or not domain["selected"]:
         return ()
-    base = f"app/{domain['root']}/{domain['name']}"
+    bases = [f"app/{domain['root']}/{name}" for name in domain["selected"]]
     return tuple((f, "php") for f in domain["route_files"]) + tuple(
-        (f"{base}/{rel}", "php") for rel in _inventory_listing(backend / base) if rel.endswith(".php")
+        (f"{base}/{rel}", "php") for base in bases
+        for rel in _inventory_listing(backend / base) if rel.endswith(".php")
     )
+
+
+def _foreign_paths(domain: dict | None) -> tuple[str, ...]:
+    """Backend-relative prefixes of the unchosen domains' folders and solely-owned route files."""
+    if not domain or not domain["selected"]:
+        return ()
+    return tuple(f"app/{domain['root']}/{name}/" for name in domain["names"]
+                 if name not in domain["selected"]) + tuple(domain["foreign_route_files"])
 
 
 def _repo_inventory(
@@ -660,6 +669,7 @@ def _repo_inventory(
             _INVENTORY_DIRS + custom,
             _BACKEND_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
             extra_quoted=_domain_quotes(backend, domain) if scope != "frontend" else (),
+            foreign=_foreign_paths(domain) if scope != "frontend" else (),
             skeletons=skeletons,
         )
         if scope != "backend" and layout.get("frontend"):
@@ -689,9 +699,15 @@ def _inventory_lines(
     root: Path, prefix: str, scope: str, task_text: str, previous_files: list[str] | None,
     dirs: tuple[tuple[str, int], ...], quoted: tuple[tuple[str, str], ...],
     route_files: tuple[str, ...], extra_quoted: tuple[tuple[str, str], ...] = (),
-    skeletons: list[str] | None = None,
+    skeletons: list[str] | None = None, foreign: tuple[str, ...] = (),
 ) -> list[str]:
-    """Inventory lines for one application folder; every emitted path is *prefix* + relative."""
+    """
+    Inventory lines for one application folder; every emitted path is *prefix* + relative.
+
+    *extra_quoted* is quoted right after the files the task names, ahead of the API
+    contract files and the fixed entries. Paths starting with a *foreign* prefix
+    (unchosen domains) are left out of the listings, API contracts and route quotes.
+    """
     if not root.is_dir():
         return []
     lines: list[str] = []
@@ -706,7 +722,7 @@ def _inventory_lines(
         directory = root / relative
         if not directory.is_dir():
             continue
-        names = _inventory_listing(directory)
+        names = [n for n in _inventory_listing(directory) if not f"{relative}/{n}".startswith(foreign)]
         if not names:
             continue
         shown = names[:cap]
@@ -785,7 +801,7 @@ def _inventory_lines(
                     if re.search(rf"\b{re.escape(alias)}::", aliases):
                         imports.append(f"use {name};")
                 contract_routes = "\n".join(imports + relevant)
-            api_files = _api_contract_files(root, contract_routes)
+            api_files = [f for f in _api_contract_files(root, contract_routes) if not f[0].startswith(foreign)]
         if len(body) > _MAX_ROUTE_FILE_CHARS:
             body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
         lines.append(f"\nCurrent {prefix}{relative}:\n```php\n{body}\n```")
@@ -793,6 +809,8 @@ def _inventory_lines(
     remaining = _MAX_ROUTE_SUBDIR_CHARS
     for path in sorted((root / "routes").glob("*/**/*.php")) if route_files else []:
         if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+            continue
+        if path.relative_to(root).as_posix().startswith(foreign):
             continue
         relative = prefix + path.relative_to(root).as_posix()
         try:
@@ -815,8 +833,8 @@ def _inventory_lines(
         quoted += (("tests/TestCase.php", "php"),) + convention + _scramble_filter_provider(root)
     named = {path for path, _ in referenced_files}
     skeleton_paths = frozenset({p for p, _ in convention} - named)
-    lines += _quoted_entry_files(root, referenced_files + api_files, prefix,
-                                 quoted + extra_quoted, skeleton_paths, skeletons)
+    lines += _quoted_entry_files(root, referenced_files + list(extra_quoted) + api_files, prefix,
+                                 quoted, skeleton_paths, skeletons)
     return lines
 
 
@@ -971,10 +989,11 @@ def node_detect_domain(state: IssueState) -> dict:
 
     A greenfield clone or a backend without domains gets ``domain: None`` and the
     run continues unchanged.  Otherwise an earlier human answer to Nesti's
-    question wins, then issue_domain.detect, then the planner classification
-    (accepted only when exactly one domain is plausible).  When nothing decides,
-    the issue gets the domain question and is paused; ``failure_reason`` routes
-    to cleanup.  Logs exactly one ``DOMAIN:`` line per invocation.
+    question wins, then issue_domain.detect (every stated domain plus every
+    domain owning a named route), then the planner classification (accepted
+    only when exactly one domain is plausible).  When nothing decides, the issue
+    gets the domain question and is paused; ``failure_reason`` routes to
+    cleanup.  Logs exactly one ``DOMAIN:`` line per invocation.
     """
     logger.debug("→ node_detect_domain")
     issue_id = state["issue_id"]
@@ -994,32 +1013,32 @@ def node_detect_domain(state: IssueState) -> dict:
     description = state["issue"].get("description", "") or ""
     if classify_issue(subject, description).scope == "frontend":
         log("skipped", "frontend scope")
-        return {"domain": selection(catalog, "")}
+        return {"domain": selection(catalog, [])}
 
     answered = tool_issue_domain_answer(issue_id, names)
     if not answered["success"]:
         shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
         raise RuntimeError(f"Domain answer lookup failed: {answered['error']}")
-    domain, basis = answered["result"], "answered in GitLab"
-    if not domain:
+    domains, basis = answered["result"], "answered in GitLab"
+    if not domains:
         decision = detect_domain(subject, description, catalog)
-        domain, basis = decision.domain, decision.basis
-        if not domain and not decision.ask:
+        domains, basis = list(decision.domains), decision.basis
+        if not domains and not decision.ask:
             picked, reason = classify_domain(subject, description, catalog, _llm)
             if len(picked) == 1:
-                domain, basis = picked[0], f"planner: {reason}"
+                domains, basis = picked, f"planner: {reason}"
             else:
                 basis = (reason if not picked and reason.startswith("classification failed")
                          else f"planner found {len(picked)} plausible domains: {', '.join(picked) or 'none'}")
-    if not domain:
+    if not domains:
         asked = tool_issue_ask_domain(issue_id, names)
         if not asked["success"]:
             shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
             raise RuntimeError(f"Domain question failed: {asked['error']}")
         log("asked", basis)
         return {"domain": None, "failure_reason": f"Paused for a domain question: {basis}"}
-    log(domain, basis)
-    return {"domain": selection(catalog, domain)}
+    log(", ".join(domains), basis)
+    return {"domain": selection(catalog, domains)}
 
 
 def node_bootstrap(state: IssueState) -> dict:

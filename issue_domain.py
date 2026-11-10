@@ -1,17 +1,18 @@
 """
-issue_domain.py – which domain of a domain-split Laravel backend an issue changes.
+issue_domain.py – which domains of a domain-split Laravel backend an issue changes.
 
 A backend whose code lives in ``app/<Root>/<Domain>/…`` vertical slices (see
-``project_layout._scan_backend``) must receive each change in the owning
-domain.  ``detect`` decides deterministically: a domain stated in the issue,
-else the domain owning the routes the issue names.  ``classify`` then lets the
-planner LLM (passed in; this module never calls a provider itself) pick, and
-its answer counts only when exactly one domain is plausible.
+``project_layout._scan_backend``) must receive each change in its owning
+domains.  ``detect`` decides deterministically: every domain stated in the
+issue plus every domain owning a route the issue names (each route owned by
+exactly one domain).  ``classify`` then lets the planner LLM (passed in; this
+module never calls a provider itself) pick, and its answer counts only when
+exactly one domain is plausible.
 
 Question protocol: when nothing decides, Nesti posts one note
 "Which domain is this request for?" listing the domains, carrying a hidden
 ``NESTI_DOMAIN_QUESTION_V1`` marker with the options, and pauses the issue.
-``reconcile`` resumes it once a human reply names exactly one option, and asks
+``reconcile`` resumes it once a human reply names one or more options, and asks
 again once per unmatched reply.
 
 Trust rule: only notes authored by Nesti's own GitLab user count as questions,
@@ -45,6 +46,8 @@ _USE_RE = re.compile(r"^\s*use\s+\\?([\w\\]+?)(?:\s+as\s+(\w+))?\s*;", re.M)
 _ACTION_RE = re.compile(r"\\?([A-Za-z_][\w\\]*)::class")
 _ROUTE_PATH_RE = re.compile(r"(?<![\w.:/\\-])/[\w{}:.-]+(?:/[\w{}:.-]+)*")
 _FILE_SUFFIX_RE = re.compile(r"\.(?:php|vue|js|ts|json|md|css|html|xml|ya?ml)$", re.I)
+# Separators are mutually exclusive (comma / "and" / bare whitespace), so a long gap cannot backtrack exponentially.
+_NUMBERS_RE = re.compile(r"\s*\d+[.)]?(?:(?:\s*,\s*|\s+and\s+|\s+)\d+[.)]?)*\s*(?:,\s*)?", re.I)
 _CLASSIFY_SYSTEM = (
     "You decide which backend domain of a Laravel application a GitLab issue changes. The backend "
     "splits its code into the domains the user lists. Answer with ONE JSON object and nothing else: "
@@ -146,7 +149,7 @@ def _name_pattern(name: str) -> str:
 class DomainDecision:
     """The deterministic domain decision for one issue."""
 
-    domain: str | None   # decided domain
+    domains: tuple[str, ...]  # decided domains, () = undecided
     ask: bool            # evidence conflicts or points outside every domain: ask now
     basis: str           # reason, for the DOMAIN: log line
 
@@ -182,8 +185,11 @@ def domain_catalog(backend: Path) -> dict | None:
             "classes": sorted(f.stem for f in project_layout._walk_files(folder)
                               if f.suffix == ".php")[:20],
         })
+    file_owners = {f: sorted({o for _, owners in parsed for o in owners}
+                             | ({""} if any(not owners for _, owners in parsed) else set()))
+                   for f, parsed in files.items()}
     return {"root": root, "layers": scan["common_layers"], "domains": domains,
-            "routes": [[uri, sorted(owners)] for uri, owners in routes]}
+            "routes": [[uri, sorted(owners)] for uri, owners in routes], "file_owners": file_owners}
 
 
 def route_paths(text: str) -> list[str]:
@@ -197,7 +203,7 @@ def route_paths(text: str) -> list[str]:
 
 
 def detect(subject: str, description: str, catalog: dict) -> DomainDecision:
-    """Decide the domain from an explicit mention, else from the routes the issue names."""
+    """Decide the domains: every one stated in the issue plus the owner of each route it names."""
     text = _URL_RE.sub(" ", f"{subject}\n{description}")
     root = re.escape(catalog["root"])
     names = [d["name"] for d in catalog["domains"]]
@@ -207,24 +213,20 @@ def detect(subject: str, description: str, catalog: dict) -> DomainDecision:
         pattern = rf"app/{root}/{n}(?!\w)|App\\{root}\\{n}(?!\w)|\bdomain\s*[:=]\s*{p}|{p}\s+domain\b"
         if re.search(pattern, text, re.I):
             stated.append(name)
-    if len(stated) == 1:
-        return DomainDecision(stated[0], False, "stated in the issue")
-    if stated:
-        return DomainDecision(None, True, f"the issue names several domains: {', '.join(stated)}")
-
     paths = route_paths(text)
-    owners: set[str] = set()
+    owners = set(stated)
     for path in paths:
         found, unowned = _route_owner(path, catalog["routes"])
         if unowned:
-            return DomainDecision(None, True, f"route {path} belongs to no domain")
+            return DomainDecision((), True, f"route {path} belongs to no domain")
+        if len(found) > 1:
+            ordered = [n for n in names if n in found]
+            return DomainDecision((), True, f"route {path} belongs to several domains: {', '.join(ordered)}")
         owners |= found
-    if len(owners) == 1:
-        return DomainDecision(next(iter(owners)), False, "route " + ", ".join(paths))
     if owners:
-        ordered = [n for n in names if n in owners]
-        return DomainDecision(None, True, f"routes span several domains: {', '.join(ordered)}")
-    return DomainDecision(None, False, "no route or domain named in the issue")
+        basis = "; ".join(["stated in the issue"] * bool(stated) + ["route " + ", ".join(paths)] * bool(paths))
+        return DomainDecision(tuple(n for n in names if n in owners), False, basis)
+    return DomainDecision((), False, "no route or domain named in the issue")
 
 
 def classify(subject: str, description: str, catalog: dict, llm) -> tuple[list[str], str]:
@@ -253,19 +255,22 @@ def classify(subject: str, description: str, catalog: dict, llm) -> tuple[list[s
     return [n for n in names if n.casefold() in wanted], str(data.get("reason") or "")[:200]
 
 
-def selection(catalog: dict, name: str) -> dict:
-    """The IssueState ``domain`` value for *name* ("" = not chosen)."""
-    route_files = next((d["route_files"] for d in catalog["domains"] if d["name"] == name), [])
+def selection(catalog: dict, names: list[str]) -> dict:
+    """The IssueState ``domain`` value for the chosen *names* ([] = not chosen: nothing is filtered)."""
+    selected = [d["name"] for d in catalog["domains"] if d["name"] in names]
+    route_files = sorted({f for d in catalog["domains"] if d["name"] in selected for f in d["route_files"]})
+    foreign = sorted(f for f, owners in catalog["file_owners"].items()
+                     if selected and owners and "" not in owners and not set(owners) & set(selected))
     return {"root": catalog["root"], "layers": catalog["layers"],
             "names": [d["name"] for d in catalog["domains"]],
-            "name": name, "route_files": route_files if name else []}
+            "selected": selected, "route_files": route_files, "foreign_route_files": foreign}
 
 
 def format_question(options: list[str], retry: bool = False) -> str:
     """The GitLab question note listing *options*, with the hidden marker."""
     lines = [QUESTION, ""]
     lines += [f"{i}. `{name}`" for i, name in enumerate(options, 1)]
-    lines += ["", "Reply with the name or number of one of the options."]
+    lines += ["", "Reply with the names or numbers of one or more options."]
     if retry:
         lines.append("_The previous reply did not match any option._")
     lines += ["", f"<!-- {QUESTION_MARKER} {json.dumps(options, ensure_ascii=False)} -->"]
@@ -284,24 +289,25 @@ def question_options(body: str) -> list[str] | None:
     return None
 
 
-def parse_answer(body: str, options: list[str]) -> str | None:
-    """The single option a human reply names (by number or name), else None."""
+def parse_answer(body: str, options: list[str]) -> list[str]:
+    """The options a human reply names (a bare list of numbers, else names); [] when none or out of range."""
     text = re.sub(r"<!--.*?-->", " ", body or "", flags=re.S)
     text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
     text = text.replace("`", " ").replace("*", " ")
-    number = re.fullmatch(r"\s*(\d+)\s*[.)]?\s*", text)
-    if number and 1 <= int(number.group(1)) <= len(options):
-        return options[int(number.group(1)) - 1]
-    named = [o for o in options if re.search(_name_pattern(o), text, re.I)]
-    return named[0] if len(named) == 1 else None
+    if _NUMBERS_RE.fullmatch(text):
+        numbers = {int(n) for n in re.findall(r"\d+", text)}
+        if not all(1 <= n <= len(options) for n in numbers):
+            return []
+        return [o for i, o in enumerate(options, 1) if i in numbers]
+    return [o for o in options if re.search(_name_pattern(o), text, re.I)]
 
 
-def answer(notes: list[dict], user_id: int, options: list[str]) -> str | None:
-    """The domain the newest human reply to Nesti's latest question names, else None."""
+def answer(notes: list[dict], user_id: int, options: list[str]) -> list[str]:
+    """The domains the newest matching human reply to Nesti's latest question names, else []."""
     questions = [n for n in notes
                  if n.get("author_id") == user_id and question_options(n.get("body") or "") is not None]
     if not questions:
-        return None
+        return []
     question_id = max(n["id"] for n in questions)
     replies = sorted((n for n in notes if n.get("author_id") != user_id and n["id"] > question_id),
                      key=lambda n: n["id"], reverse=True)
@@ -309,7 +315,7 @@ def answer(notes: list[dict], user_id: int, options: list[str]) -> str | None:
         chosen = parse_answer(note.get("body") or "", options)
         if chosen:
             return chosen
-    return None
+    return []
 
 
 def ask(client, iid: int, options: list[str]) -> None:
