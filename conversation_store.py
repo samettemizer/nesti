@@ -2,7 +2,8 @@
 conversation_store.py – Redis-backed per-issue conversation history.
 
 Key schema:
-    ai-dev:issue:{issue_id}:messages  →  JSON list of {"role": ..., "content": ...}
+    ai-dev:issue:{host/project}:{issue_id}:messages  →  JSON list of {"role": ..., "content": ...}
+    (the project is ``gitlab_project.identity()``: iids repeat across projects)
 
 TTL: CONVERSATION_TTL_DAYS (default 7). Reset on every write so active
 issues never expire mid-flight.
@@ -21,6 +22,7 @@ import os
 
 import redis
 
+import gitlab_project
 from layer_output import condense
 
 logger = logging.getLogger(__name__)
@@ -185,7 +187,7 @@ class ConversationStore:
     # ------------------------------------------------------------------
 
     def _key(self, issue_id: int) -> str:
-        return f"{_KEY_PREFIX}{issue_id}:messages"
+        return f"{_KEY_PREFIX}{gitlab_project.identity()}:{issue_id}:messages"
 
     @staticmethod
     def _resolve_ttl_seconds() -> int:

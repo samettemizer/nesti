@@ -58,9 +58,11 @@ unlabelled issue is treated as human discussion and never touched.
    automatically.
 5. **Failure.** After all retries are exhausted (or after an unexpected crash),
    Nesti removes the lock label and posts a failure comment with the last test
-   output. The issue returns to the pending pool and will be picked up again on
-   the next poll. Fix the issue text (or the acceptance criteria) before it is
-   retried.
+   output. The issue returns to the pending pool. After failed coding
+   attempts it is picked up again only once its title, its description or the
+   target branch (a new commit) changes, so fix the issue text (or the
+   acceptance criteria) first. A planning failure, exhausted coder providers
+   or a crash are retried on the next poll.
 
 ### Issue numbers
 
@@ -127,8 +129,7 @@ artefacts explicitly so the planner knows what to create or modify:
 | Controller | Action methods, which routes they serve |
 | API Resource | Fields exposed in the JSON response |
 | Route entry | HTTP verb, URI, controller method |
-| Blade view | Path under `resources/views/` |
-| Vue component | Path under `resources/js/components/` |
+| Vue page/component | Path under the SPA's `src/` (e.g. `frontend/src/components/`), and the router path of a new page |
 
 **Database changes are normal work.** Migrations, model factories, and seeders
 are expected. Nesti will **never** edit an existing migration — always ask for
@@ -198,11 +199,10 @@ Test layers follow the files the change touched, not the declared scope:
 
 | The change touches | Layers that run |
 |--------------------|-----------------|
-| PHP only | PHPUnit → OpenAPI (if `/api` routes, controllers, resources or requests touched) |
-| Frontend only (`.vue`, JS/CSS, `resources/js/`, `e2e/`, `package.json`), repository has Vue | Vitest → Playwright — PHPUnit skipped |
-| Both sides (a Blade view or `routes/web.php` counts as both) | PHPUnit → OpenAPI (if API touched) → Vitest → Playwright |
-| Neither side (e.g. README only; JS in a repository without Vue) | PHPUnit |
-| Repository with no PHP at all | Vitest → Playwright, always |
+| Backend folder only | PHPUnit → OpenAPI (if `/api` routes, controllers, resources or requests touched) |
+| SPA folder only | Vitest → Playwright — PHPUnit skipped |
+| Both folders | PHPUnit → OpenAPI (if API touched) → Vitest → Playwright |
+| Neither folder (e.g. README only) | PHPUnit |
 
 **Frontend-only issues are fully supported.** Not every website change has a
 backend part. Do **not** add backend requirements to a purely visual or
@@ -239,31 +239,17 @@ Write acceptance criteria that map to the test layers the issue touches:
 
 ### Practical warnings
 
-**E2E database state.** The isolated Playwright database starts with
-`DatabaseSeeder`; a declared existing fixture seeder may additionally run
-once. For a hard nonempty existing unauthenticated GET collection, name the
-endpoint/model/seeder in committed `e2e/nesti-fixtures.json`:
+**E2E runs without the API.** Playwright builds the SPA and serves it with
+`vite preview`; the Laravel API is not running and there is no database.
+Specs sign in and answer every API request through the SPA's
+`e2e/support/session.(js|ts)` helper (`signIn`, then `stubApi`, then
+`page.goto`); Nesti creates that helper in the first change that needs it.
+Name the rows a page should show so the spec can stub them; stub bodies
+follow the backend's API Resources.
 
-```json
-{"version":1,"fixtures":[{"endpoint":"/api/tasks","model":"App\\Models\\Task","seeder":"Database\\Seeders\\TaskSeeder"}]}
-```
-
-Do not declare a manifest for valid empty states, mocked UI, or a spec that
-creates data through existing UI/API routes. For an existing API/model with
-no seeder, declare the desired conventional seeder in JSON; do not create or
-register a nonexistent PHP class in the frontend parent. Only verified class
-and file absence pauses it for one backend dependency, resumed after merge.
-New model/API work still includes its factory, seeder and PHPUnit proof in
-the same issue. The manifest is sandbox test setup, not production default
-seeding. Retries re-emit it or deliberately remove the prerequisite with an
-empty fixture list.
-
-**Real-page integration.** Register/mount the component in the actual
-served JS entry and Blade view while preserving PrimeVue/Aura/plugins.
-In-DOM custom tags are kebab-case with closing tags; preserve an SFC root
-when the app uses one. Register the real API response waiter before
-navigation, then compare visible row content with that response. A passing
-isolated component test or unused `App.vue` does not prove `/` renders it.
+**Wire into the SPA.** Register a new page in the SPA's existing router (and
+its layout menu when it has one) and call the API through its existing HTTP
+client. A passing isolated component test does not prove the route renders it.
 
 **Component-test DOM.** Component-test criteria should be about rendered text,
 props, and events rather than PrimeVue's internal DOM structure. For example,
@@ -362,18 +348,26 @@ use this setting. Tokens and characters are different units.
 
 ### Empty repository (greenfield)
 
-An empty GitLab repository is scaffolded into a full **Laravel 13 + Scramble +
-PrimeVue** application on the first issue. The first Merge Request contains the
+An empty GitLab repository is scaffolded on the first issue into an API-only
+**Laravel 13 + Scramble** backend in `webservice/`, plus a **PrimeVue** starter
+SPA when the issue asks for a UI. The first Merge Request contains the
 skeleton plus the requested feature. This means the very first issue can ask
 for database tables, API endpoints, and Vue components — everything will be
 created from scratch.
 
-### Existing Laravel application
+### Existing Laravel API + SPA
 
-An existing Laravel repository is only **topped up** with the files needed for
-the testing pipeline (e.g. `vitest.config.js`, `playwright.config.js`,
-`tests/Feature/OpenApiDocumentationTest.php`) when they are absent. The
-existing application structure, routes, and configuration are preserved.
+An existing project is only **topped up** with the files needed for the
+testing pipeline when they are absent: `tests/Feature/OpenApiDocumentationTest.php`
+in the backend, `vitest.config.js`, `vitest.setup.js` and `playwright.config.js`
+in the SPA. The existing application structure, routes, and configuration are
+preserved.
+
+### Laravel app that serves its own frontend
+
+Nesti works only on a separate SPA plus an API-only Laravel backend. A Laravel
+app whose Vite build uses Vue, React or Svelte, or that requires Inertia or
+Livewire, is refused at startup.
 
 ### Non-Laravel PHP repository
 
@@ -423,13 +417,13 @@ Add a searchable task table
 
 **Description:**
 ```
-Show the existing GET /api/tasks on `/` in
-`resources/js/components/TaskTable.vue`. Use PrimeVue DataTable + Column
+Show the existing GET /api/tasks on a new `/tasks` page in
+`frontend/src/components/TaskTable.vue`. Use PrimeVue DataTable + Column
 for title, due_date, and is_done, with sorting and client-side search.
-Wire into the served entry/view; preserve PrimeVue/Aura. No backend changes.
+Register the page in the SPA router. No backend changes.
 
 - Vitest: verify columns, the `tasks` prop, and the `refresh` event.
-- Playwright: create tasks through the existing API, then verify visible
+- Playwright: stub GET /api/tasks with three tasks, then verify visible
   rows, title sorting, and search without a reload.
 ```
 
@@ -438,10 +432,8 @@ Wire into the served entry/view; preserve PrimeVue/Aura. No backend changes.
 ### 3. Frontend Form (Vitest + Playwright layers)
 
 > PrimeVue Dialog posting to an existing API. A frontend-scoped issue: the
-> change runs Vitest → Playwright; specs can create their own data through
-> the existing API. A hard nonempty prerequisite uses the fixture manifest.
-> PHPUnit joins if the change touches shared Blade/web-route plumbing;
-> OpenAPI does not run when the `/api` surface is unchanged.
+> change runs Vitest → Playwright with every API request stubbed; OpenAPI
+> does not run when the `/api` surface is unchanged.
 
 **Title:**
 ```
@@ -450,7 +442,7 @@ Add a task creation dialog
 
 **Description:**
 ```
-Add `resources/js/components/TaskCreateDialog.vue` to the existing task page
+Add `frontend/src/components/TaskCreateDialog.vue` to the existing task page
 using PrimeVue Dialog, InputText, DatePicker, Button, and Message.
 Submit to the existing POST /api/tasks; no backend changes.
 
@@ -503,7 +495,7 @@ Requirements:
 - Only allow the current user's tasks. Reject the entire request with 403
   if any task belongs to another user; otherwise update all tasks atomically.
   Already-completed tasks remain unchanged. No schema changes.
-- In resources/js/components/TaskTable.vue, add PrimeVue DataTable row
+- In frontend/src/components/TaskTable.vue, add PrimeVue DataTable row
   selection and a "Complete selected" Button, disabled when nothing is
   selected. Show failures with Message; preserve selection on failure.
   On success, refresh the table and clear selection.
@@ -515,9 +507,9 @@ Acceptance Criteria:
   succeeds without further changes.
 - OpenAPI: document the new route, task_ids, and response shape.
 - Vitest: verify button state, selection reset, and visible error messages.
-- Playwright: create tasks through the existing authenticated API, select
-  two on the real task page, complete them, and verify their status persists
-  after reload while an unselected task remains open.
+- Playwright: stub the task list and POST /api/tasks/complete, select two
+  rows, complete them, and verify their status changes while an unselected
+  task remains open.
 ```
 
 We recommend this structured format when a request has detailed requirements
@@ -533,13 +525,13 @@ enough; these headings are optional.
 | Title too generic (`"bug fix"`, `"feature"`) | The model cannot determine what to do | Use verb + object format |
 | Ambiguous requested change | The model must guess the intended behaviour | State the exact change; headings are optional |
 | Missing the `nesti` label | Nesti will never see the issue | Add the opt-in label before or after creating the issue |
-| Editing an issue after `nesti::in-progress` appears | The run captured the text at pickup; later edits are invisible to it | Wait for the result, fix the issue text, and let the next poll retry it |
+| Editing an issue after `nesti::in-progress` appears | The run captured the text at pickup; later edits are invisible to it | Wait for the result, then fix the issue text; the edit makes a failed issue eligible again |
 | Adding/removing `nesti::in-progress` by hand | Breaks the lock protocol | Let Nesti manage the lock label |
 | Skill URL unreachable or behind auth | Fetch fails, Telegram warning fires | Verify the URL is publicly accessible before submitting |
 | Skill document too large (>12,000 chars) | Content is truncated at 12,000 chars | Link only the relevant component page |
 | Multiple unrelated features in one issue | Planning and code quality degrade | Open a separate issue per feature |
 | Expecting the README to describe the new feature without asking | Documentation files are out of scope unless the issue requests them | Name the file: "Update README.md with …" |
-| Frontend criteria that assume database rows exist | The E2E sandbox contains only what `DatabaseSeeder` creates | Ask for a seeder or create data through the UI/API in the spec |
+| Frontend criteria that assume database rows exist | The E2E sandbox runs no API or database; every request is stubbed | Name the rows the page should show; the spec stubs them |
 | Frontend criteria written as implementation details | Cannot be converted into Playwright assertions | Describe observable user behaviour instead |
 | Asking for changes to an existing migration | Nesti refuses to edit existing migrations | Ask for a NEW migration that alters the table |
 | Requiring raw DDL (`CREATE TABLE`, `ALTER TABLE`) | The test suite runs on SQLite; vendor-specific SQL breaks it | Describe the schema; the model uses the Blueprint API |
@@ -563,8 +555,8 @@ Understanding the retry loop helps you write better issues:
    **shared across all four layers** — not per layer. All layers funnel into
    one escalation step. `attempt` increments once per code-generation run.
 5. After all retries are exhausted, the lock label is removed and a failure
-   comment is posted. The issue returns to the pending pool and will be
-   retried on the next poll.
+   comment is posted. The issue returns to the pending pool but is retried
+   only after its title, its description or the target-branch HEAD changes.
 
 **Stale files are pruned on retry.** Each retry must re-emit the complete set
 of files. A file the previous attempt wrote and the new attempt does not

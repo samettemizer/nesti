@@ -15,7 +15,7 @@ _Adapted for Nesti from the local skill library's minimalist-ui (origin unrecord
 Warm monochrome canvas, near-black text, 1px `#EAEAEA` lines, flat surfaces, scarce pastels, serif headings over a sans body, wide whitespace. Use PrimeVue 5 components; never hand-roll a table, form, dialog or accordion.
 
 Restyle PrimeVue through tokens or `pt`:
-- Feature-wide: `class="minimal"` on each restyled page component's root element; `.minimal` in `resources/css/app.css` sets CSS variables from the components' Design Tokens tables, inherited by every component inside with hover states intact.
+- Feature-wide: `class="minimal"` on each restyled page component's root element; `.minimal` in the SPA's global stylesheet (the one `src/main.*` imports) sets CSS variables from the components' Design Tokens tables, inherited by every component inside with hover states intact.
 - One instance: `pt` keyed by a Pass Through section (a string is a class, `{ style: { ... } }` an inline style), or scoped `dt` shaped like a preset's component layer: `<Card :dt="{ root: { shadow: 'none' } }">`.
 - Dialog and Toast render outside `.minimal`: on the instance, Dialog `pt.root` / Toast `pt.message` = `{ style: { boxShadow: 'none', border: '1px solid var(--min-border)' } }`.
 
@@ -27,12 +27,12 @@ Restyle PrimeVue through tokens or `pt`:
 | Status | `Tag` with `severity`, `rounded` | severities remapped to pastels |
 | FAQ | `Accordion` > `AccordionPanel` > `AccordionHeader` + `AccordionContent` | transparent, 1px dividers, `#toggleicon="{ active }"` with `pi pi-minus` / `pi pi-plus` |
 | Table | `DataTable` + `Column` | no `showGridlines` or `stripedRows`; `size="small"` if dense |
-| Shortcut | plain `<kbd>` | styled in app.css |
+| Shortcut | plain `<kbd>` | styled in the global stylesheet |
 | Icon | `<i class="pi pi-check" />`, Button `icon="pi pi-check"` | already loaded |
 
 ## Palette
 
-Colour marks meaning; pastels only on tags, inline code, small icon backgrounds. Append to `resources/css/app.css`, keeping every existing line (Tailwind import first). No preset, no `app.js` change.
+Colour marks meaning; pastels only on tags, inline code, small icon backgrounds. Append to the SPA's global stylesheet, keeping every existing line (Tailwind import first). No preset, no `src/main.*` change.
 
 ```css
 :root {
@@ -102,10 +102,10 @@ Secondary text: `.min-muted`. Tags: `:pt="{ root: 'min-tag' }"`.
 
 ## Execution in a Nesti change
 
-- Plan (no code): per `.vue` file, its PrimeVue components, where `class="minimal"` sits, any per-instance `pt`/`dt`; the `app.css` additions; Vitest and Playwright cases by behaviour. A pure restyle is frontend-only: no PHP.
-- Code: `resources/css/app.css` whole with existing lines intact; `<script setup>` SFCs importing per file (`import Card from 'primevue/card'`). In `app.js` only the usual `app.component(...)` registration of a new page component; never touch the PrimeVue/Aura setup, never `definePreset`, no npm package for fonts, icons or animation.
+- Plan (no code): per `.vue` file, its PrimeVue components, where `class="minimal"` sits, any per-instance `pt`/`dt`; the global stylesheet additions; Vitest and Playwright cases by behaviour. A pure restyle is frontend-only: no PHP.
+- Code: the SPA's global stylesheet whole with existing lines intact; `<script setup>` SFCs importing per file (`import Card from 'primevue/card'`). A new page is a route in the SPA's existing router; never touch the PrimeVue/theme setup in `src/main.*`, never `definePreset`, no npm package for fonts, icons or animation.
 - Vitest: mount with PrimeVue + Aura; assert text, props, emitted events, never classes, styles or colours. With `v-animateonscroll`, `vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} })` before `mount` (jsdom lacks it).
-- Playwright: `getByRole`, `getByTestId`, `getByText(..., { exact: true })` on seeded or spec-created data; no style assertions or animation waits (`opacity: 0` counts as visible).
+- Playwright: `getByRole`, `getByTestId`, `getByText(..., { exact: true })` on data stubbed through `stubApi` from e2e/support/session; no style assertions or animation waits (`opacity: 0` counts as visible).
 
 ## Layout with Tailwind 4
 
@@ -118,7 +118,7 @@ Tailwind does layout only; colours, borders, radii and shadows of PrimeVue inter
 
 ## Motion
 
-Quiet, and only when the issue asks for it. Scroll entry uses PrimeVue's `v-animateonscroll` with the change's own keyframes: `tailwindcss-primeui` is not installed, so the doc's `animate-enter` / `fade-in-*` classes do not exist. Register the directive locally, never in `app.js`:
+Quiet, and only when the issue asks for it. Scroll entry uses PrimeVue's `v-animateonscroll` with the change's own keyframes: `tailwindcss-primeui` is not installed, so the doc's `animate-enter` / `fade-in-*` classes do not exist. Register the directive locally, never in `src/main.*`:
 
 ```vue
 <script setup>

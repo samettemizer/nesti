@@ -17,7 +17,7 @@ Nesti writes implementation and tests in one response; the sandbox gates (PHPUni
 1. Derive the acceptance criteria from the issue text. Each criterion is one observable behaviour.
 2. For each criterion, write the test that would fail against the current repository.
 3. Write the minimal implementation that makes that test pass. No speculative features, no behaviour the issue does not name.
-4. On a gate failure (its output is fed back), first check the test's interaction, async timing and fixture/API contract. Fix the implementation when it violates the criterion; fix invalid test setup when it does not exercise that criterion. Never weaken, skip or delete a valid assertion to get green.
+4. On a gate failure (its output is fed back), first check the test's interaction, async timing and stub/API contract. Fix the implementation when it violates the criterion; fix invalid test setup when it does not exercise that criterion. Never weaken, skip or delete a valid assertion to get green.
 
 The retry prompt lists the previous attempt's change set. Re-emit every still-needed file,
 including unchanged component and E2E files when only a test needs repair: omitting a file
@@ -35,8 +35,8 @@ A seam is the public boundary where behaviour is observed without reaching insid
 
 - **PHPUnit Feature** (`tests/Feature`): the HTTP seam. `use RefreshDatabase;`, data from model factories, `actingAs($user)` where the route needs auth, `getJson` / `postJson` / `putJson` / `deleteJson`, then `assertStatus`, `assertOk`, `assertCreated`, `assertNotFound`, `assertUnprocessable`, `assertJsonPath`, `assertJsonValidationErrors`.
 - **PHPUnit Unit** (`tests/Unit`): a service or model method called directly with plain inputs.
-- **Vitest** (`resources/js/components/__tests__/<Name>.test.js`): component props in, rendered text and emitted events out.
-- **Playwright** (`e2e/<feature>.spec.js`): one user-visible flow in the real app, against DatabaseSeeder data or data created inside the spec.
+- **Vitest** (`__tests__/<Name>.spec.js` beside the component under `<frontend>/src/`, in the SPA's language): component props in, rendered text and emitted events out.
+- **Playwright** (`<frontend>/e2e/<feature>.spec.js`): one user-visible flow in the built SPA, signed in and with every API request stubbed through `e2e/support/session`.
 
 Which layers a change needs:
 
@@ -206,17 +206,20 @@ public function send(Invoice $invoice): bool
 
 ```js
 import { expect, test } from '@playwright/test';
+import { signIn, stubApi } from './support/session';
 
-test('user adds a task', async ({ page }) => {
-    await page.goto('/');
-    await page.getByLabel('Title').fill('Buy milk');
-    await page.getByRole('button', { name: 'Add task' }).click();
+test('user sees their tasks', async ({ page }) => {
+    await signIn(page);
+    await stubApi(page, {
+        'GET /api/tasks': { data: [{ id: 1, title: 'Buy milk', is_done: false }], meta: { total: 1 } },
+    });
+    await page.goto('/tasks');
     await expect(page.getByText('Buy milk', { exact: true })).toBeVisible();
 });
 ```
 
-- The sandbox runs `php artisan migrate --force --seed`, builds assets and serves `http://127.0.0.1:8000`. The database holds exactly what `DatabaseSeeder` creates: never assume rows exist. Seed in `DatabaseSeeder::run()` with factories, or create the data through the UI or API inside the spec.
-- Read the API classes quoted in Existing Repository State: FormRequest validation defines writable fields, Resources define output, and services/controllers define pagination and ordering. A returned field is not necessarily writable. Reuse existing specs' setup routes, verify the created state, and preserve the API's order in expected rows unless the test explicitly changes sorting.
+- The sandbox builds the SPA and serves it with `vite preview` on `http://127.0.0.1:4173`; the Laravel API is not running and there is no database. `signIn(page)` seeds the session the way the app's own sign-in stores it and answers every unstubbed fetch/XHR with a logged 404; `stubApi(page, { 'GET /path': body | { status, json } })` answers the requests the page needs. Call `signIn`, then `stubApi`, then `page.goto`; fill the login form only in a spec about signing in. When `e2e/support/session.*` is absent, create it in the change with exactly those two exports.
+- Read the API classes quoted in Existing Repository State: Resources define the stub bodies' shape, FormRequest validation the 422 bodies, and services/controllers pagination and ordering. Stub paths are the ones the SPA's HTTP client builds (its base URL may be absolute and need not end in `/api`). Preserve the API's order in expected rows unless the test explicitly changes sorting.
 - Use precise locators: `getByRole('radio', { name: 'Done', exact: true })`, `getByTestId`, `getByText(..., { exact: true })`. A substring name can match both Done and Not done. Avoid CSS selectors on PrimeVue internals.
 - Rely on `expect(...).toBeVisible()` auto-waiting; never fixed sleeps.
 - Register `page.waitForResponse` before the action that triggers it, then await the saved promise.

@@ -53,30 +53,37 @@ def memory_remember_solution(
 
 
 @app.tool()
-def memory_remember_failure(issue_id: int, attempt: int, layer: str, output: str) -> dict:
+def memory_remember_failure(
+    issue_id: int, run_id: str, attempt: int, layer: str, output: str
+) -> dict:
     """
     Store one failed attempt of an issue (test layer name + its output) in
-    episodic memory. Returns result: {stored: bool} plus reason when not stored.
+    episodic memory. run_id is a caller-chosen id (1-64 of A-Z a-z 0-9 _ -) of
+    one attempt series. Returns result: {stored: bool} plus reason when not stored.
     """
-    return tool_memory_remember_failure(issue_id, attempt, layer, output)
+    return tool_memory_remember_failure(issue_id, run_id, attempt, layer, output)
 
 
 @app.tool()
-def memory_recall_failures(issue_id: int, text: str, attempt: int, limit: int = 2) -> dict:
+def memory_recall_failures(
+    issue_id: int, run_id: str, text: str, attempt: int, limit: int = 2
+) -> dict:
     """
-    Recall older failed attempts of an issue similar to text. attempt is the
-    attempt about to run; the attempt that just failed (attempt - 1) is
-    excluded. Returns result: [{issue_id, attempt, layer, summary, similarity}].
+    Recall older failed attempts of an issue similar to text, from run_id's
+    episodes of this client's project only. attempt is the attempt about to run;
+    the attempt that just failed (attempt - 1) is excluded.
+    Returns result: [{issue_id, attempt, layer, summary, similarity}].
     """
-    return tool_memory_recall_failures(issue_id, text, attempt=attempt, limit=limit)
+    return tool_memory_recall_failures(issue_id, run_id, text, attempt=attempt, limit=limit)
 
 
 @app.tool()
-def memory_forget_episodes(issue_id: int) -> dict:
+def memory_forget_episodes(issue_id: int, run_id: str) -> dict:
     """
-    Drop every episodic-memory row of an issue. Returns result: {deleted: int}.
+    Drop the episodic-memory rows of an issue's run_id in this client's project.
+    Returns result: {deleted: int}.
     """
-    return tool_memory_forget_episodes(issue_id)
+    return tool_memory_forget_episodes(issue_id, run_id)
 
 
 @app.tool()

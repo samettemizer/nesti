@@ -1,0 +1,10 @@
+// Nesti starter kit: sign-in and administration API for the SPA.
+Route::post('/login', [\App\Http\Controllers\Api\AuthController::class, 'login'])->middleware('throttle:6,1');
+
+Route::middleware('auth:sanctum')->group(function () {
+    Route::post('/logout', [\App\Http\Controllers\Api\AuthController::class, 'logout']);
+    Route::get('/users', [\App\Http\Controllers\Api\UserController::class, 'index'])->middleware('can:users.view');
+    Route::get('/roles', [\App\Http\Controllers\Api\RoleController::class, 'index'])->middleware('can:roles.view');
+    Route::get('/permissions', [\App\Http\Controllers\Api\PermissionController::class, 'index'])
+        ->middleware('can:roles.view');
+});

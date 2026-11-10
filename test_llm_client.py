@@ -61,8 +61,8 @@ class ProviderBoundaryTests(unittest.TestCase):
                 stream = False
                 expected_usage = "'prompt_tokens': 17"
                 if isinstance(client, llm.ClaudeConsumerClient):
-                    expected_system = client._SYSTEM_PREFIX + "\n\n" + _SYSTEM
-                    data = {"content": [{"text": _OUTPUT}],
+                    expected_system = client._SYSTEM_PREFIX + _SYSTEM
+                    data = {"content": [{"type": "text", "text": _OUTPUT}],
                             "usage": {"input_tokens": 17, "output_tokens": 29}}
                     expected_usage = "'input_tokens': 17"
                 elif isinstance(client, llm.ChatGPTConsumerClient):
@@ -107,6 +107,16 @@ class ProviderBoundaryTests(unittest.TestCase):
                     self.assertEqual(sent["request"]["contents"][0]["parts"][0]["text"], _MESSAGES[0]["content"])
                 else:
                     self.assertEqual([msg for msg in sent["messages"] if msg["role"] != "system"], _MESSAGES)
+                if isinstance(client, llm.ClaudeConsumerClient):
+                    self.assertEqual(sent["system"], [
+                        {"type": "text", "text": client._SYSTEM_PREFIX},
+                        {"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}},
+                    ])
+                    with patch.object(llm._ConsumerLLMBase, "_credentials", return_value=credentials), \
+                            patch("requests.adapters.HTTPAdapter.send", autospec=True, side_effect=send):
+                        client._call("", "Say ok")
+                    self.assertEqual(json.loads(captured[-1].body)["system"],
+                                     [{"type": "text", "text": client._SYSTEM_PREFIX}])
                 text = "\n".join(logs.output)
                 self.assertIn(f"system_chars={len(expected_system)} content_chars={len(_MESSAGES[0]['content'])} "
                               f"http_body_bytes={len(body)}", text)
@@ -122,7 +132,8 @@ class ProviderBoundaryTests(unittest.TestCase):
             captured.append(request)
             return httpx.Response(200, json={
                 "id": "msg_test", "type": "message", "role": "assistant", "model": "test",
-                "content": [{"type": "text", "text": _OUTPUT}], "stop_reason": "end_turn",
+                "content": [{"type": "thinking", "thinking": "private", "signature": "sig"},
+                            {"type": "text", "text": _OUTPUT}], "stop_reason": "end_turn",
                 "usage": {"input_tokens": 17, "output_tokens": 29},
             })
 
@@ -136,10 +147,52 @@ class ProviderBoundaryTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         body = captured[0].content
         self.assertEqual(json.loads(body)["messages"], _MESSAGES)
+        self.assertEqual(json.loads(body)["system"], [{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}])
         text = "\n".join(logs.output)
         self.assertIn(f"http_body_bytes={len(body)}", text)
         self.assertIn("'input_tokens': 17", text)
         self.assertNotIn("secret-key", text)
+
+    def test_claude_consumer_joins_text_blocks_and_reports_textless_reply(self):
+        thinking = {"type": "thinking", "thinking": "private", "signature": "sig"}
+        client = llm.ClaudeConsumerClient()
+
+        def call(data):
+            with patch.object(llm._ConsumerLLMBase, "_credentials", return_value={"access_token": "t"}), \
+                    patch.object(llm, "_token_store"), \
+                    patch.object(llm, "configured_model", return_value="test-model"), \
+                    patch("requests.adapters.HTTPAdapter.send", autospec=True,
+                          side_effect=lambda adapter, request, **kwargs: _response(request, data)):
+                return client._call(_SYSTEM, "prompt")
+
+        self.assertEqual(call({"content": [thinking, {"type": "text", "text": "A"},
+                                           {"type": "text", "text": "B"}]}), "AB")
+        with self.assertRaises(RuntimeError) as raised:
+            call({"content": [thinking], "stop_reason": "max_tokens"})
+        self.assertIn("max_tokens", str(raised.exception))
+        self.assertIn("thinking", str(raised.exception))
+
+    def test_codex_cache_affinity_is_stable_across_calls(self):
+        """One client sends one session-id, equal to prompt_cache_key, on every request."""
+        captured = []
+        stream = b"data: " + json.dumps({"type": "response.output_text.delta", "delta": "ok"}).encode() + b"\n\n"
+
+        def send(adapter, request, **kwargs):
+            captured.append(request)
+            return _response(request, stream, stream=True)
+
+        client = llm.ChatGPTConsumerClient()
+        with patch.object(llm._ConsumerLLMBase, "_credentials",
+                          return_value={"access_token": "t", "account_id": "a"}), \
+                patch.object(llm, "_token_store"), \
+                patch("requests.adapters.HTTPAdapter.send", autospec=True, side_effect=send):
+            client.generate_plan(_SYSTEM, "plan request")
+            client.generate_code(_SYSTEM, "code request")
+        keys = {(r.headers["session-id"], json.loads(r.body)["prompt_cache_key"]) for r in captured}
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(len(keys), 1)
+        session_id, cache_key = keys.pop()
+        self.assertEqual(session_id, cache_key)
 
     def test_missing_usage_is_unavailable_and_never_inferred(self):
         payload = {"choices": [{"message": {"content": _OUTPUT}}]}
@@ -180,6 +233,7 @@ class ProviderBoundaryTests(unittest.TestCase):
 
                 class Provider:
                     available = True
+                    caches_user_prefix = False
                     label = name = "offline test provider"
 
                     def __init__(self, fail):
@@ -209,6 +263,34 @@ class ProviderBoundaryTests(unittest.TestCase):
                     self.assertEqual((system, user), (_SYSTEM, "unused"))
                     self.assertIs(messages, _MESSAGES)
                     self.assertEqual(snapshot, original)
+
+    def test_cache_break_splits_claude_user_prompt_and_is_stripped_for_others(self):
+        bodies = []
+        stream = b"data: " + json.dumps({"type": "response.output_text.delta", "delta": "ok"}).encode() + b"\n\n"
+
+        def send(adapter, request, **kwargs):
+            bodies.append(json.loads(request.body))
+            if "anthropic" in request.url:
+                return _response(request, {"error": "overloaded"}, status=529)
+            return _response(request, stream, stream=True)
+
+        chain = llm.LLMClient.__new__(llm.LLMClient)
+        chain._planners = chain._coders = [llm.ClaudeConsumerClient(), llm.ChatGPTConsumerClient()]
+        chain._min_coder_tier = 0
+        chain._api_failed_coders = set()
+        prompt = "STABLE" + llm.CACHE_BREAK + "VOLATILE"
+        with patch.object(llm._ConsumerLLMBase, "_credentials",
+                          return_value={"access_token": "t", "account_id": "a"}), \
+                patch.object(llm, "_token_store"), \
+                patch.object(llm, "telegram_notify"), \
+                patch("requests.adapters.HTTPAdapter.send", autospec=True, side_effect=send):
+            self.assertEqual(chain.generate_code(_SYSTEM, prompt), "ok")
+        self.assertEqual(bodies[0]["messages"], [{"role": "user", "content": [
+            {"type": "text", "text": "STABLE", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "VOLATILE"},
+        ]}])
+        self.assertEqual(bodies[1]["input"][0]["content"][0]["text"], "STABLEVOLATILE")
+        self.assertNotIn(llm.CACHE_BREAK, json.dumps(bodies[1]))
 
 
 if __name__ == "__main__":

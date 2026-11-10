@@ -3,19 +3,19 @@ graph/builder.py – assembles and compiles the LangGraph pipeline.
 
 Topology
 ────────
-    setup ─┬→ bootstrap → load_skills → plan ─┬→ code → detect_stack ─┐
+    setup ─┬→ detect_domain ─┬→ bootstrap → load_skills → plan ─┬→ code → detect_stack ─┐
            │                                  │                       │
            │    ┌─────────────────────────────┘                       │
            │    │   phpunit_test ←────────────────────────────────────┤
            │    │        │   └→ openapi_test ─→ vitest_test ─→ playwright_test ─→ commit ─┐
            │    │        └→ vitest_test ←───────────────────────────────────┘ │           │
-           │    │                                                 pause_dependency ──────┤
            │    │   on_layer_failure ─→ code (loop)                                       ├→ cleanup → END
            │    └→ failure ───────────────────────────────────────────────────────────────┤
            └──────────────────────────────────────────────────────────────────────────────┘
 
 ``setup`` claims the issue first; a refused claim goes straight to ``cleanup``
-so nothing is cloned and no LLM is called.
+so nothing is cloned and no LLM is called.  ``detect_domain`` picks the owning
+domain of a domain-split backend, or asks in GitLab and pauses (→ ``cleanup``).
 
 ``bootstrap`` guarantees the clone is a Laravel application before any skill or
 prompt work happens: a greenfield repository is scaffolded, an existing Laravel
@@ -35,29 +35,25 @@ escalation node ``on_layer_failure``, which loops back to ``code``.
 ``openapi_test`` sits between the PHP and frontend layers and runs only when
 the attempt touched the API surface of a Laravel repo that has one.
 
-``pause_dependency`` follows a Playwright run that the sandbox stopped on a
-verified missing seeder: it pauses the issue (→ cleanup) or, when the
-prerequisite belongs to the change itself, returns to the shared retry budget.
-
-``cleanup`` is reached from ``commit``, ``failure``, ``pause_dependency`` and a
-refused ``setup``, so the tempdir workspace is always removed regardless of
-outcome.
+``cleanup`` is reached from ``commit``, ``failure`` and a refused
+``setup``/``detect_domain``, so the tempdir workspace is always removed
+regardless of outcome.
 """
 
 from langgraph.graph import StateGraph, END
 
 from graph.state import IssueState
 from graph.nodes import (
-    node_setup, node_bootstrap, node_load_skills, node_plan, node_code,
+    node_setup, node_detect_domain, node_bootstrap, node_load_skills, node_plan, node_code,
     node_detect_stack,
     node_test, node_openapi_test,
     node_vitest_test, node_playwright_test,
-    node_pause_dependency,
     node_on_layer_failure,
     node_commit, node_failure, node_cleanup,
 )
 from graph.edges import (
     route_after_setup,
+    route_after_domain,
     route_after_plan,
     route_after_code,
     route_after_detect_stack,
@@ -65,7 +61,6 @@ from graph.edges import (
     route_after_openapi,
     route_after_vitest,
     route_after_playwright,
-    route_after_dependency_pause,
 )
 
 
@@ -74,6 +69,7 @@ def build_graph():
 
     # ── Register nodes ────────────────────────────────────────────────────
     g.add_node("setup",             node_setup)
+    g.add_node("detect_domain",     node_detect_domain)
     g.add_node("bootstrap",         node_bootstrap)
     g.add_node("load_skills",       node_load_skills)
     g.add_node("plan",              node_plan)
@@ -83,7 +79,6 @@ def build_graph():
     g.add_node("openapi_test",      node_openapi_test)
     g.add_node("vitest_test",       node_vitest_test)
     g.add_node("playwright_test",   node_playwright_test)
-    g.add_node("pause_dependency",  node_pause_dependency)
     g.add_node("on_layer_failure",  node_on_layer_failure)
     g.add_node("commit",            node_commit)
     g.add_node("failure",           node_failure)
@@ -104,6 +99,11 @@ def build_graph():
     g.add_conditional_edges(
         "setup",
         route_after_setup,
+        {"detect_domain": "detect_domain", "cleanup": "cleanup"},
+    )
+    g.add_conditional_edges(
+        "detect_domain",
+        route_after_domain,
         {"bootstrap": "bootstrap", "cleanup": "cleanup"},
     )
     g.add_conditional_edges(
@@ -163,18 +163,8 @@ def build_graph():
         route_after_playwright,
         {
             "commit":           "commit",
-            "pause_dependency": "pause_dependency",
             "on_layer_failure": "on_layer_failure",
             "failure":          "failure",
-        },
-    )
-    g.add_conditional_edges(
-        "pause_dependency",
-        route_after_dependency_pause,
-        {
-            "on_layer_failure": "on_layer_failure",
-            "failure":          "failure",
-            "cleanup":          "cleanup",
         },
     )
 

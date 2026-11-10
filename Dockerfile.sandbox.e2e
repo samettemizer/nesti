@@ -1,10 +1,11 @@
-# Playwright sandbox image used by FrontendRunner to run E2E tests.
+# Playwright sandbox image used by FrontendRunner to run E2E tests of a
+# separated SPA.  The Laravel API never runs here: specs stub every request.
 #
 # Build:
 #   docker build -t nesti-sandbox-e2e -f Dockerfile.sandbox.e2e .
 #
 # Selected via DOCKER_SANDBOX_E2E_IMAGE.  The base image already bundles
-# Node.js, the browsers, and every system dependency they need.
+# the browsers and every system dependency they need.
 #
 # Version contract: the browsers baked into this image are the ones shipped
 # with Playwright 1.50, so the generated package.json pins "@playwright/test"
@@ -18,45 +19,23 @@ FROM mcr.microsoft.com/playwright:v1.50.0-noble
 
 WORKDIR /app
 
-# Ubuntu 24.04 (noble) carries php8.3.  Install the PHP CLI + extensions
-# Laravel needs, replace the image's bundled Node 20 with Node 22 (vitest/vite
-# refuse Node 20), and add Composer so the CMD's artisan branch can boot the app.
+# Replace the image's bundled Node 20 with Node 22 (vitest/vite refuse Node 20).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      php8.3-cli php8.3-sqlite3 php8.3-mbstring php8.3-xml php8.3-curl php8.3-zip php8.3-intl \
-      unzip ca-certificates curl gnupg \
+      ca-certificates curl gnupg \
  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
- && curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
  && rm -rf /var/lib/apt/lists/*
 
 # See Dockerfile.sandbox: the workspace is chowned back to the host user, so
-# git (which composer shells out to) would otherwise abort with "dubious
+# git (which npm may shell out to) would otherwise abort with "dubious
 # ownership" and that fatal would lead the retry prompt.
 RUN git config --global --add safe.directory '*'
-
-# Nesti's fixture helper (scripts/e2e_fixtures.php) replaces the former
-# `php artisan migrate --force --seed` in the artisan branch below.  It boots
-# the workspace application against its recreated SQLite file only, runs
-# migrate and the default db:seed, then prepares every fixture the suite
-# declared in e2e/nesti-fixtures.json: it probes each declared GET collection
-# through Laravel's HTTP kernel and, when the endpoint and its model table are
-# both verifiably empty, runs the declared seeder once.  Exit codes:
-#   0  fixtures ready (report {"status":"ready"})
-#   78 a declared seeder's class AND file are both absent (report
-#      {"status":"missing_seeder",...}); Nesti pauses the issue for a backend
-#      dependency instead of counting a failed browser suite
-#   1  any other preparation/contract error (no report)
-# `set -e` stops the CMD on either nonzero code, before the build and browser.
-# The report is written to /nesti-results — outside the repository — which
-# FrontendRunner mounts over this directory with its own empty one.
-COPY scripts/e2e_fixtures.php /opt/nesti/e2e_fixtures.php
-RUN mkdir -p /nesti-results
 
 # Same two-step lockfile fallback as the Node sandbox — missing lockfile falls
 # back to `npm install`, stale lockfile falls through `npm ci` to `npm install`
 # (see Dockerfile.sandbox.node for the full reasoning).
 #
-# `npm run build` is not optional: playwright.config.js serves the app through
+# `npm run build` is not optional: playwright.config.js serves the SPA through
 # `vite preview`, which only serves an already-built dist/ directory.  Without
 # the build step webServer would time out on every run.
 #
@@ -66,11 +45,4 @@ RUN mkdir -p /nesti-results
 # pin slips through it fetches the matching build instead of failing the whole
 # E2E layer on an infrastructure mismatch the model cannot fix by rewriting
 # its code.  Only chromium is fetched — the suite runs headless Chromium.
-#
-# For a Laravel repo the artisan branch prepares the app (composer install,
-# .env, key, a freshly recreated database/database.sqlite, then the fixture
-# helper) so Playwright's webServer can boot it via `php artisan serve`.  The
-# exported APP_ENV/DB_* pin the testing environment to that workspace SQLite
-# file, whatever the repository's .env says.  A pure SPA repo skips to the
-# lockfile-tolerant npm install and the vite build/preview contract.
-CMD ["bash", "-lc", "set -e; if [ -f artisan ]; then export APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=\"$PWD/database/database.sqlite\"; composer install --no-interaction --prefer-dist --no-progress; [ -f .env ] || cp .env.example .env; php artisan key:generate --force; php artisan config:clear; rm -f database/database.sqlite; touch database/database.sqlite; php /opt/nesti/e2e_fixtures.php; fi; if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi; npx playwright install chromium; npm run build; npx playwright test --reporter=list"]
+CMD ["bash","-lc","set -e; if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi; npx playwright install chromium; npm run build; npx playwright test --reporter=list"]

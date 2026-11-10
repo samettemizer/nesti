@@ -63,7 +63,10 @@ class IssueState(TypedDict, total=False):
     scope: str                         # "backend" | "frontend" | "fullstack" — prompts only
     code_response: str                 # latest coder output
     repo_path: str                     # local clone path
+    base_sha: str                      # target-branch commit the clone started from
     layout: dict                       # {"backend": str|None, "frontend": str|None}; "." = clone root
+    domain: dict | None  # domain-split backend: issue_domain.selection(); "selected" [] = not chosen; None = no domain architecture
+    app_facts: str                     # Laravel Boost app info + schema summary at HEAD; prompts only, never a gate
     branch_name: str                   # git branch
     workspace: str                     # tempdir path
 
@@ -79,6 +82,7 @@ class IssueState(TypedDict, total=False):
     # ── Laravel detection / bootstrap ────────────────────────────
     is_laravel: bool                   # repository contains artisan
     bootstrapped: bool                 # True when this run scaffolded the skeleton
+    bootstrap_files: list[str]         # committed paths of a scaffold/starter-kit bootstrap (gate the layers); [] for a top-up
     has_api_routes: bool               # routes/api.php exists
     run_openapi: bool                  # OpenAPI layer applies to this attempt
 
@@ -103,6 +107,7 @@ class IssueState(TypedDict, total=False):
     openapi_passed: bool
     openapi_output: str
     openapi_paths: list[str]           # paths present in the exported document
+    openapi_baseline_routes: list[str] | None  # HEAD "METHOD uri" list, exported at most once per run
 
     # ── Frontend test results ────────────────────────────────────
     vitest_passed: bool
@@ -110,19 +115,13 @@ class IssueState(TypedDict, total=False):
     playwright_passed: bool
     playwright_output: str
 
-    # ── Fixture dependencies ───────────────────────────────────────────────
-    # A verified missing-seeder report from the E2E sandbox (endpoint/model/
-    # seeder/table) and what node_pause_dependency made of it.  Both are
-    # cleared by node_code so no attempt inherits a previous block.
-    fixture_request: dict | None       # set only by node_playwright_test
-    dependency_status: str             # "" | "paused" | "ineligible" | "error"
-
     # ── Hierarchical vector memory ───────────────────────────────
     # How much memory reached the prompts — reported in the MR body so a
     # reviewer sees it without reading logs.  All zero when memory is off.
     retrieved_chunks: int              # doc chunks injected into the last prompt
     past_solutions: int                # similar merged issues injected at plan time
     recalled_failures: int             # older failed attempts injected at code time
+    run_id: str                        # random per graph run; scopes episodic memory to this run
 
     # ── Terminal flags ─────────────────────────────────────────────────────
     mr_url: str                        # set when MR is opened

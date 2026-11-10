@@ -82,10 +82,12 @@ class LayoutTests(_StateCase):
         self.assertEqual(record["mode"], "backend-only")
         self.assertTrue(record["resolved_by"].startswith("deterministic:"))
 
-    def test_root_artisan_with_plugin_vue_is_integrated(self):
+    def test_laravel_app_serving_its_frontend_is_refused(self):
         _touch(self.root / "artisan")
         _touch(self.root / "vite.config.js", "import vue from '@vitejs/plugin-vue';")
-        self.assertEqual(project_layout.resolve_layout(self.root, StubLLM())["mode"], "integrated")
+        with self.assertRaisesRegex(LayoutError, "not supported"):
+            project_layout.resolve_layout(self.root, StubLLM())
+        self.assertFalse(project_layout.LAYOUT_FILE.exists())
 
     def test_empty_dir_is_greenfield(self):
         (self.root / ".git").mkdir()
@@ -114,6 +116,14 @@ class SummaryTests(_StateCase):
         self.assertIn("backend/app/Domains/*", first)
         self.assertIn("3 domains", first)
         self.assertIn("Repository", second)
+
+    def test_service_subfolders_are_not_domains(self):
+        self.make_monorepo(self.root)
+        _touch(self.root / "backend/app/Services/Payment/StripeGateway.php", "<?php")
+        _touch(self.root / "backend/app/Services/Billing/Invoice.php", "<?php")
+        arch = project_layout.scan_architecture(self.root, {"backend": "backend", "frontend": "frontend"})
+        self.assertEqual(arch["backend"]["style"], "custom")
+        self.assertIsNone(arch["backend"]["domain_root"])
 
     def test_default_architecture(self):
         _touch(self.root / "artisan")

@@ -9,18 +9,18 @@ triggers: visual design, ui design, typography, color palette, design system, lo
 
 # Frontend Visual Design
 
-*Visual direction for a Nesti screen: where design decisions go, how to plan them, what to avoid. Adapted for Nesti from the `frontend-design` skill (Apache License 2.0, see practices/licenses/frontend-design.txt). Modified: retargeted to issue-driven Laravel 13 + Vue 3 + PrimeVue 5 screens; interactive and screenshot steps removed; PrimeVue theming placement and entry-point registration added.*
+*Visual direction for a Nesti screen: where design decisions go, how to plan them, what to avoid. Adapted for Nesti from the `frontend-design` skill (Apache License 2.0, see practices/licenses/frontend-design.txt). Modified: retargeted to issue-driven Laravel 13 API + Vue 3 + PrimeVue 5 SPA screens; interactive and screenshot steps removed; PrimeVue theming placement and router registration added.*
 
 ## Where design decisions live in a Nesti app
 
 - Build with PrimeVue 5 components, not hand-written markup: DataTable + Column, InputText / Select / DatePicker / Checkbox / InputNumber, Button, Dialog / ConfirmDialog, Toast / Message, Menubar / Breadcrumb / Tabs. Import per file (`import Button from 'primevue/button'`).
-- resources/js/app.js keeps its PrimeVue plugin, Aura preset and every existing import and registration exactly as they are: never call `definePreset` or reconfigure PrimeVue there. The usual import/registration/mount a new feature needs is expected, otherwise the served page never shows it. In the in-DOM template (`createApp({})` mounted on `<div id="app">` in resources/views/app.blade.php) add `app.component('TaskTable', TaskTable)` before `app.mount('#app')` and `<task-table></task-table>` inside that div; in-DOM tags, props and events are kebab-case and custom tags are never self-closing. An SFC-root app (`createApp(App)`) keeps its architecture and renders the feature from App.vue. An App.vue no entry imports is not a page. If the issue explicitly demands an app-wide theme change, the planner flags it as a risk in the plan instead of silently rewriting the setup.
-- App-wide typography, colour CSS variables and keyframes go in resources/css/app.css (loaded by `@vite` in resources/views/app.blade.php; Tailwind 4 is imported there).
+- The SPA's `src/main.*` keeps its PrimeVue plugin, theme preset and every existing import and registration exactly as they are: never call `definePreset` or reconfigure PrimeVue there. A new page is a route in the SPA's existing router (`src/router/index.*`) and, when the layout has a menu, an entry in that menu; otherwise nobody can reach it. Components are imported per file where they are used, never registered globally for one feature. If the issue explicitly demands an app-wide theme change, the planner flags it as a risk in the plan instead of silently rewriting the setup.
+- App-wide typography, colour CSS variables and keyframes go in the SPA's global stylesheet, the one `src/main.*` imports (Tailwind 4 is imported there when the SPA uses it).
 - Per-instance visuals: the `pt` (pass-through) prop for classes/attributes on a component's DOM sections, the `dt` prop for design tokens scoped to one instance (PrimeVue recommends it over `:deep()`), or a scoped `<style>` in the SFC.
 - Layout (grid, flex, spacing, breakpoints) with Tailwind 4 utility classes. `tailwindcss-primeui` is not installed.
 - Icons: PrimeIcons classes are already loaded (`icon="pi pi-check"` on Button, `<i class="pi pi-inbox" />`). No other icon library.
 - Use Button `severity` (secondary, success, info, warn, help, danger, contrast) for emphasis rather than custom colours.
-- A web font only when the issue's direction needs it: add an npm font package and `@import` it in resources/css/app.css. Adding an npm dependency is allowed; rewriting vite.config.js, vitest.config.js or playwright.config.js is not. Never load fonts or images from external network hosts at runtime.
+- A web font only when the issue's direction needs it: add an npm font package and `@import` it in the SPA's global stylesheet. Adding an npm dependency is allowed; rewriting vite.config.js, vitest.config.js, vitest.setup.js or playwright.config.js is not. Never load fonts or images from external network hosts at runtime.
 
 ```vue
 <script setup>
@@ -48,7 +48,7 @@ Distinguish two kinds of screen:
 ## Planning the design
 
 The planner writes no code; it puts a compact token plan into the implementation plan, and the coder follows it:
-- Colour: 4–6 named hex values, each mapped to where it lives (a CSS variable in resources/css/app.css, a `dt` token, or a Button `severity`).
+- Colour: 4–6 named hex values, each mapped to where it lives (a CSS variable in the global stylesheet, a `dt` token, or a Button `severity`).
 - Type: typefaces and their roles (display, body, data), with the scale.
 - Layout: one-sentence concept plus a small ASCII sketch; state alignment and the mobile behaviour.
 - Principles: two or three lines on what makes this screen specific to its subject.
@@ -70,7 +70,7 @@ Each is legitimate for some briefs, but they are defaults, not choices. Where th
 
 ## Typography and structure
 
-Typography carries the personality. One family or two; if two, make them clearly distinct. Choose deliberately rather than by habit, and set a clear type scale with intentional weights and spacing (define it once as CSS variables in resources/css/app.css). A headline's type treatment is part of the design, not a neutral vehicle.
+Typography carries the personality. One family or two; if two, make them clearly distinct. Choose deliberately rather than by habit, and set a clear type scale with intentional weights and spacing (define it once as CSS variables in the global stylesheet). A headline's type treatment is part of the design, not a neutral vehicle.
 
 Keep line length under 80 characters (Tailwind `max-w-prose` or a `ch`-based max width). Serif body text may run slightly longer and needs slightly more line-height than sans-serif.
 
@@ -85,7 +85,7 @@ Visual structure is information. Borders, numbering, dividers and labels must en
 
 Use motion nobody triggered sparingly, only to draw attention. One orchestrated moment beats scattered effects; fade-and-slide-up on every section and hover transitions on every card read as generated. Motion that answers a person's action (opening a Dialog, expanding a row, confirming with a Toast) is welcome when it shows what changed; PrimeVue components already animate these.
 
-For a scroll reveal use the `v-animateonscroll` directive with the change's own keyframe classes, defined in resources/css/app.css or the SFC's `<style>`; the classes in PrimeVue's example come from tailwindcss-primeui, which is not installed. Always respect reduced motion:
+For a scroll reveal use the `v-animateonscroll` directive with the change's own keyframe classes, defined in the global stylesheet or the SFC's `<style>`; the classes in PrimeVue's example come from tailwindcss-primeui, which is not installed. Always respect reduced motion:
 
 ```css
 @keyframes reveal-up { from { opacity: 0; transform: translateY(1rem); } to { opacity: 1; transform: none; } }
@@ -99,7 +99,7 @@ For a scroll reveal use the `v-animateonscroll` directive with the change's own 
 <script setup>
 import AnimateOnScroll from 'primevue/animateonscroll';
 
-const vAnimateonscroll = AnimateOnScroll; // local registration; never register directives in app.js
+const vAnimateonscroll = AnimateOnScroll; // local registration; never register directives in src/main.*
 </script>
 
 <template>
@@ -126,5 +126,5 @@ Keep the tone plain: sentence case, plain verbs, no filler. Each written element
 ## Testing a design change
 
 - Vitest asserts copy, props and emitted events (`wrapper.text()`, `wrapper.emitted()`), never CSS classes, colours or PrimeVue's internal DOM shape. Mount with the PrimeVue plugin and Aura preset in `global.plugins`.
-- Playwright opens the served page and asserts what a user sees on real data: `getByRole('button', { name: 'Publish' })`, `getByText('Published', { exact: true })`, `getByTestId(...)`. Data comes from DatabaseSeeder, from the spec itself, or from a fixture declared in e2e/nesti-fixtures.json.
+- Playwright opens the page after `signIn` and `stubApi` from e2e/support/session (the API is not running; every request is stubbed) and asserts what a user sees: `getByRole('button', { name: 'Publish' })`, `getByText('Published', { exact: true })`, `getByTestId(...)`.
 - Styling itself is not unit-tested. A purely visual change still ships a spec for the behaviour or copy the issue names.

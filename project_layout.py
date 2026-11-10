@@ -3,9 +3,11 @@ Project layout resolution, ``state/layout.json`` persistence and the
 architecture scan behind ``nesti /arch``.
 
 ``NESTI_PROJECT_PATH`` names a project root holding one Laravel API folder and,
-optionally, one separate Vue SPA folder. A root Laravel app is resolved
-deterministically; anything else is resolved once by the active LLM provider
-and persisted. Never imports ``graph.tools`` (which imports this module).
+optionally, one separate Vue SPA folder. A root Laravel app (with or without a
+``.frontend`` SPA), Nesti's ``webservice/`` + ``frontend/`` scaffold
+and an empty root are resolved deterministically; anything else is resolved
+once by the active LLM provider and persisted. Never imports ``graph.tools``
+(which imports this module).
 """
 
 import json
@@ -15,10 +17,16 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import gitlab_project
+
 logger = logging.getLogger(__name__)
 
 STATE_DIR = Path(__file__).resolve().parent / "state"
 LAYOUT_FILE = STATE_DIR / "layout.json"
+
+SCAFFOLD_BACKEND_DIR = "webservice"
+SCAFFOLD_SPA_DIR = "frontend"
+ROOT_SPA_DIR = ".frontend"
 
 # The first twelve names copy graph.tools._STACK_SCAN_PRUNE (not imported: circular).
 _PRUNE = {
@@ -80,14 +88,39 @@ def _visible(root: Path) -> list[Path]:
     return sorted((p for p in root.iterdir() if not p.name.startswith(".")), key=lambda p: p.name)
 
 
-def _has_plugin_vue(root: Path) -> bool:
-    for name in ("vite.config.js", "vite.config.ts"):
+# A Laravel app that renders its own frontend: Vue/React/Svelte through its Vite build, Inertia or Livewire.
+_WEBSITE_VITE_PLUGINS = ("@vitejs/plugin-vue", "@vitejs/plugin-react", "@sveltejs/vite-plugin-svelte")
+_WEBSITE_PACKAGES = ("inertiajs/inertia-laravel", "livewire/livewire")
+UNSUPPORTED_WEBSITE = (
+    "Nesti works only on a separated SPA frontend with an API-only Laravel backend; "
+    "a Laravel app that serves its own frontend is not supported"
+)
+
+
+def _website_reason(app: Path) -> str | None:
+    """Why the Laravel app in *app* serves its own frontend, or None for an API-only app."""
+    # shortcut: Blade-only websites (no Vite framework plugin, no Inertia/Livewire) pass as API-only; add a resources/views heuristic if one shows up.
+    for name in ("vite.config.js", "vite.config.ts", "vite.config.mjs"):
         try:
-            if "@vitejs/plugin-vue" in (root / name).read_text(encoding="utf-8", errors="replace"):
-                return True
+            text = (app / name).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-    return False
+        for plugin in _WEBSITE_VITE_PLUGINS:
+            if plugin in text:
+                return f"{name} uses {plugin}"
+    require = _read_json(app / "composer.json").get("require")
+    if isinstance(require, dict):
+        for package in _WEBSITE_PACKAGES:
+            if package in require:
+                return f"composer.json requires {package}"
+    return None
+
+
+def _refuse_website(app: Path, label: str) -> None:
+    """Raise LayoutError when the Laravel app in *app* serves its own frontend."""
+    reason = _website_reason(app)
+    if reason is not None:
+        raise LayoutError(f"{label}: {reason}. {UNSUPPORTED_WEBSITE}")
 
 
 def _packages(pkg: dict) -> dict:
@@ -96,6 +129,17 @@ def _packages(pkg: dict) -> dict:
         if isinstance(pkg.get(key), dict):
             deps.update(pkg[key])
     return deps
+
+
+def spa_dir_for(backend: str) -> str:
+    """Conventional SPA folder for a backend folder: `.frontend` beside a root app, else `frontend`."""
+    return ROOT_SPA_DIR if backend == "." else SCAFFOLD_SPA_DIR
+
+
+def _is_spa(path: Path) -> bool:
+    """True for a real (non-symlink) folder without artisan whose package.json depends on vue."""
+    return (path.is_dir() and not path.is_symlink() and not (path / "artisan").exists()
+            and "vue" in _packages(_read_json(path / "package.json")))
 
 
 def _walk_files(path: Path) -> list[Path]:
@@ -118,8 +162,6 @@ def _mode(layout: dict) -> str:
     backend, frontend = layout.get("backend"), layout.get("frontend")
     if backend is None and frontend is None:
         return "greenfield"
-    if backend == "." and frontend == ".":
-        return "integrated"
     if frontend is None:
         return "backend-only"
     return "separated"
@@ -146,16 +188,23 @@ def project_root() -> Path:
 
 def _deterministic(root: Path) -> tuple[dict, str] | None:
     if (root / "artisan").is_file():
-        if _has_plugin_vue(root):
-            return {"backend": ".", "frontend": "."}, "root Laravel app with @vitejs/plugin-vue"
+        _refuse_website(root, "root Laravel app")
+        if _is_spa(root / ROOT_SPA_DIR):
+            return {"backend": ".", "frontend": ROOT_SPA_DIR}, "root Laravel app with a .frontend SPA"
         return {"backend": ".", "frontend": None}, "root Laravel app"
-    if not _visible(root):
+    visible = _visible(root)
+    if ((root / SCAFFOLD_BACKEND_DIR / "artisan").is_file()
+            and {p.name for p in visible if p.is_dir()} <= {SCAFFOLD_BACKEND_DIR, SCAFFOLD_SPA_DIR}):
+        spa = SCAFFOLD_SPA_DIR if _is_spa(root / SCAFFOLD_SPA_DIR) else None
+        _refuse_website(root / SCAFFOLD_BACKEND_DIR, f"{SCAFFOLD_BACKEND_DIR}/")
+        return {"backend": SCAFFOLD_BACKEND_DIR, "frontend": spa}, "Nesti scaffold layout"
+    if not visible:
         return {"backend": None, "frontend": None}, "empty project"
     return None
 
 
 def deterministic_layout(root: Path) -> dict | None:
-    """Layout of a root Laravel app or an empty root; ``None`` when the LLM must decide."""
+    """Layout of a root Laravel app, Nesti's webservice/ scaffold or an empty root; ``None`` when the LLM must decide; raises LayoutError for a Laravel app that serves its own frontend."""
     found = _deterministic(root)
     return found[0] if found else None
 
@@ -183,7 +232,8 @@ def validate_layout(root: Path, layout: dict) -> None:
     if backend == ".":
         if not (root / "artisan").is_file():
             raise LayoutError("backend '.' but the root has no artisan")
-        expected = "." if _has_plugin_vue(root) else None
+        _refuse_website(root, "root Laravel app")
+        expected = ROOT_SPA_DIR if _is_spa(root / ROOT_SPA_DIR) else None
         if frontend != expected:
             raise LayoutError(f"a root Laravel app has frontend {expected!r}, not {frontend!r}")
         return
@@ -191,6 +241,7 @@ def validate_layout(root: Path, layout: dict) -> None:
     for name in ("artisan", "composer.json"):
         if not (back / name).is_file():
             raise LayoutError(f"backend folder {backend!r} has no {name}")
+    _refuse_website(back, f"backend folder {backend!r}")
     if frontend is None:
         return
     if frontend == backend:
@@ -280,6 +331,7 @@ def load_layout() -> dict | None:
 def save_layout(record: dict) -> None:
     """Atomically write *record* to ``layout.json``."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    record["gitlab_project"] = gitlab_project.identity()
     target = LAYOUT_FILE
     tmp = target.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -311,24 +363,35 @@ def refresh_architecture(record: dict) -> dict:
 
 
 def clone_layout(clone: Path) -> dict:
-    """Layout of a pipeline clone: deterministic, else the saved layout validated against it."""
+    """
+    Layout of a pipeline clone: deterministic, else the saved layout validated against it.
+
+    A layout without a frontend gains the conventional SPA folder once Nesti's
+    starter kit has added it (an LLM-resolved backend folder included).
+    """
     layout = deterministic_layout(clone)
-    if layout is not None:
-        return layout
-    record = load_layout()
-    if not record:
-        raise LayoutError("layout.json not found: run nesti /arch")
-    layout = record.get("layout") or {}
-    try:
-        validate_layout(clone, layout)
-    except LayoutError as exc:
-        raise LayoutError(f"layout.json does not match the repository: {exc}; run nesti /arch") from exc
-    return {"backend": layout.get("backend"), "frontend": layout.get("frontend")}
+    if layout is None:
+        record = load_layout()
+        if not record:
+            raise LayoutError("layout.json not found: run nesti /arch")
+        saved = record.get("layout") or {}
+        try:
+            validate_layout(clone, saved)
+        except LayoutError as exc:
+            raise LayoutError(f"layout.json does not match the repository: {exc}; run nesti /arch") from exc
+        layout = {"backend": saved.get("backend"), "frontend": saved.get("frontend")}
+    if (layout["frontend"] is None and layout["backend"] is not None
+            and _is_spa(clone / spa_dir_for(layout["backend"]))):
+        layout["frontend"] = spa_dir_for(layout["backend"])
+    return layout
 
 
 # ---------------------------------------------------------------------------
 # Architecture scan
 # ---------------------------------------------------------------------------
+
+_DOMAIN_LAYERS = {"Http", "Models", "Controllers"}
+
 
 def _names(items: list[str]) -> str:
     return ", ".join(items[:8]) + (", …" if len(items) > 8 else "")
@@ -343,15 +406,16 @@ def _scan_backend(back: Path) -> dict:
     custom_dirs = [d for d in app_dirs if d not in _LARAVEL_SKELETON | _LARAVEL_GENERATED]
 
     domain_root, domains = None, []
-    candidates = sorted(custom_dirs, key=lambda d: -len(_subdirs(back / "app" / d)))
-    if candidates:
-        best = back / "app" / candidates[0]
-        subs = _subdirs(best)
+    for candidate in sorted(custom_dirs, key=lambda d: -len(_subdirs(back / "app" / d))):
+        subs = _subdirs(back / "app" / candidate)
         with_php = [s for s in subs if any(f.suffix == ".php" for f in _walk_files(s))]
-        if len(with_php) >= 2:
-            domain_root = candidates[0]
+        # A domain is a vertical slice; app/Services/{Payment,Billing} on a default app is not.
+        sliced = [s for s in with_php if _DOMAIN_LAYERS & {p.name for p in _subdirs(s)}]
+        if len(with_php) >= 2 and len(sliced) * 2 >= len(with_php):
+            domain_root = candidate
             domains = [{"name": s.name, "files": len(_walk_files(s)),
                         "layers": [p.name for p in _subdirs(s)]} for s in subs]
+            break
     counts: dict[str, int] = {}
     for d in domains:
         for layer in d["layers"]:
@@ -403,7 +467,8 @@ def _tree(path: Path, rel: str, depth: int, layout: dict, domain_path: str | Non
 def _summary(backend_dir: str | None, frontend_dir: str | None,
              backend: dict | None, frontend: dict | None) -> list[str]:
     if backend is None:
-        return ["The project is empty; Nesti scaffolds a Laravel application with the first issue."]
+        return ["The project is empty: the first issue scaffolds the Laravel API in webservice/, and a "
+                "Sakai SPA in frontend/ when that issue asks for a user interface."]
     bp = "" if backend_dir == "." else f"{backend_dir}/"
     sentences = []
     if backend["style"] == "domain":
@@ -429,10 +494,7 @@ def _summary(backend_dir: str | None, frontend_dir: str | None,
     else:
         sentences.append("The backend follows Laravel's default application structure; "
                          "no custom domain or module layer was found.")
-    if frontend and frontend.get("integrated"):
-        sentences.append("The Vue frontend is integrated in the Laravel app (resources/js), "
-                         "the layout of Nesti's own scaffold.")
-    elif frontend:
+    if frontend:
         pk = frontend["packages"]
         parts = [f"vue {pk.get('vue', '?')}", f"primevue {pk.get('primevue', '?')}"]
         if frontend["typescript"]:
@@ -441,7 +503,10 @@ def _summary(backend_dir: str | None, frontend_dir: str | None,
             parts.append("vue-router")
         if "pinia" in pk:
             parts.append("Pinia")
-        sentences.append(f"The frontend is a separate Vue SPA in `{frontend_dir}/` ({', '.join(parts)}).")
+        if backend_dir == ".":
+            sentences.append(f"Laravel API in the repository root, SPA in {frontend_dir}/ ({', '.join(parts)}).")
+        else:
+            sentences.append(f"The frontend is a separate Vue SPA in `{frontend_dir}/` ({', '.join(parts)}).")
     else:
         sentences.append("There is no frontend SPA.")
     return sentences
@@ -454,9 +519,7 @@ def scan_architecture(root: Path, layout: dict) -> dict:
     if backend_dir is not None:
         backend = {"path": backend_dir, **_scan_backend(root / backend_dir)}
     frontend = None
-    if frontend_dir == ".":
-        frontend = {"path": ".", "integrated": True}
-    elif frontend_dir:
+    if frontend_dir:
         spa = root / frontend_dir
         frontend = {"path": frontend_dir, "packages": _packages(_read_json(spa / "package.json")),
                     "typescript": (spa / "tsconfig.json").is_file(),

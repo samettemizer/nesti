@@ -52,18 +52,11 @@ node_plan decides whether the issue is backend, frontend or fullstack work
 (issue text first, then the planner's ``SCOPE:`` line) and logs it as the run's
 one ``SCOPE:`` line.  The scope narrows the prompts, the reference docs and the
 retrieved chunks; it never gates a test layer.
-
-Fixture dependencies
-────────────────────
-When the E2E sandbox verifies that a declared fixture's seeder genuinely does
-not exist, node_playwright_test logs BLOCKED and node_pause_dependency pauses
-the issue durably in GitLab and opens one backend dependency issue — with no
-planner, coder or escalation call, independently of the scope.  The issue is
-resumed by TaskEngine's reconciliation only after that child's MR is merged.
 """
 
 import logging
 import json
+import math
 import os
 import re
 import shutil
@@ -78,20 +71,24 @@ from graph.tools import (
     tool_skill_fetch, tool_gitlab_clone, tool_gitlab_create_branch,
     tool_docker_run_tests, tool_gitlab_commit_and_push, tool_gitlab_open_mr,
     tool_issue_set_status, tool_detect_stack, tool_vitest_run_tests,
-    tool_playwright_run_tests, tool_laravel_bootstrap, tool_openapi_export,
+    tool_playwright_run_tests, tool_laravel_bootstrap, tool_openapi_export, tool_starter_kit,
     tool_skill_catalog_select, tool_skill_catalog_status, tool_quota_check,
     tool_memory_search_docs, tool_memory_find_similar, tool_memory_remember_solution,
     tool_memory_remember_failure, tool_memory_recall_failures,
-    tool_memory_forget_episodes, tool_issue_pause_for_fixture,
+    tool_memory_forget_episodes,
+    tool_issue_domain_answer, tool_issue_ask_domain, tool_app_facts,
     _STACK_SCAN_PRUNE,
 )
+from gitlab_issues_client import failed_run_marker
+from issue_domain import classify as classify_domain, detect as detect_domain, domain_catalog, selection
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
-from project_layout import LayoutError, clone_layout
+from project_layout import SCAFFOLD_BACKEND_DIR, LayoutError, clone_layout, spa_dir_for
 from conversation_store import ConversationStore
 from prompt_builder import (
     build_plan_prompt, build_code_prompt, drop_injected_chunks, format_catalog_for_prompt,
 )
+import code_skeleton
 from layer_output import condense
 from telegram_notifier import notify as telegram_notify
 
@@ -161,9 +158,7 @@ def _cleared_layer_outputs() -> dict:
     (``_last_failure_output`` picks the newest red layer with any output),
     widen the scope on the wrong side, and reach the MR body as a layer that
     never ran on the merged code.  Clearing them in node_code's *return* keeps
-    its own episodic-recall query on the failure that led to it.  The fixture
-    fields are cleared for the same reason: no attempt inherits an earlier
-    attempt's block.
+    its own episodic-recall query on the failure that led to it.
     """
     return {
         "test_output": "",
@@ -171,8 +166,6 @@ def _cleared_layer_outputs() -> dict:
         "openapi_paths": [],
         "vitest_output": "",
         "playwright_output": "",
-        "fixture_request": None,
-        "dependency_status": "",
     }
 
 
@@ -294,6 +287,30 @@ def _committed_paths(root: str, relatives: list[str]) -> set[str]:
     return {path for path in listed.split("\0") if path}
 
 
+def _commit_bootstrap(repo_path: str, message: str) -> list[str]:
+    """
+    Commit everything the bootstrap/starter changed in the clone, locally (the
+    MR push carries it).  Returns the committed repo-relative paths; ``[]``
+    when nothing changed or outside a git repository.
+
+    With the scaffold in HEAD, ``_prune_stale_files`` restores a scaffold file
+    a retry omits instead of deleting it, the MR shows a separate bootstrap
+    commit, and ``commit_and_push`` still sees the coder's diff against HEAD.
+    """
+    try:
+        with git.Repo(repo_path) as repo:
+            repo.git.add(A=True)
+            files = [p for p in repo.git.diff("--cached", "--name-only", "-z").split("\0") if p]
+            if files:
+                repo.index.commit(message)
+    except (git.InvalidGitRepositoryError, git.NoSuchPathError) as exc:
+        logger.debug("Bootstrap not committed: %s", exc)
+        return []
+    if files:
+        logger.info("Bootstrap committed locally: %d file(s)", len(files))
+    return files
+
+
 def _prune_stale_files(
     previous: list[str], current: list[str], repo_path: str
 ) -> list[str]:
@@ -380,38 +397,27 @@ _INVENTORY_DIRS = (
     ("app/Http/Resources", 40),
     ("app/Http/Requests", 40),
     ("app/Services", 40),
-    ("resources/js/components", 40),
     ("resources/views", 40),
     ("tests/Feature", 40),
-    ("e2e", 40),
 )
 
 # Route files are quoted rather than listed: the coder must see which URIs are
-# already registered, not merely that the file exists.
+# already registered, not merely that the file exists. Route files kept in
+# routes/ subdirectories (loaded by api.php/web.php) are quoted too, within
+# their own total; the rest are named.
 _INVENTORY_ROUTE_FILES = ("routes/api.php", "routes/web.php")
 _MAX_ROUTE_FILE_CHARS = 1500
+_MAX_ROUTE_SUBDIR_CHARS = 8000
 
 # Every scope quotes the default seeder so backend removals can preserve
-# unrelated registrations. Frontend/fullstack also quote the served entry
-# chain, fixture manifest and configs. Only COMPLETE bodies are quoted; an
+# unrelated registrations, and bootstrap/app.php, whose withRouting() decides
+# the URL prefix of routes/api.php. Only COMPLETE bodies are quoted; an
 # oversized or unreadable body is named as omitted, never safe to rewrite.
-_INVENTORY_QUOTED_FILES = (
-    ("resources/js/app.js", "js"),
-    ("resources/js/app.ts", "ts"),
-    ("resources/views/app.blade.php", "blade"),
-    ("resources/js/App.vue", "vue"),
-    ("database/seeders/DatabaseSeeder.php", "php"),
-    ("e2e/nesti-fixtures.json", "json"),
-    ("vite.config.js", "js"),
-    ("vite.config.ts", "ts"),
-    ("playwright.config.js", "js"),
-    ("playwright.config.ts", "ts"),
-    ("vitest.config.js", "js"),
-    ("vitest.config.ts", "ts"),
-    ("package.json", "json"),
-)
+_BACKEND_QUOTED_FILES = (("database/seeders/DatabaseSeeder.php", "php"), ("bootstrap/app.php", "php"))
 _MAX_QUOTED_FILE_CHARS = 24000
 _MAX_QUOTED_TOTAL_CHARS = 48000
+# A Feature test qualifies as the convention example when it sends a request.
+_HTTP_TEST_CALL = re.compile(r"\$this->(?:get|post|put|patch|delete|json)(?:Json)?\(")
 
 
 def _inventory_listing(directory: Path) -> list[str]:
@@ -425,21 +431,24 @@ def _inventory_listing(directory: Path) -> list[str]:
 
 
 def _quoted_entry_files(
-    root: Path, scope: str = "fullstack", referenced_files: list[tuple[str, str]] | None = None,
-    prefix: str = "", quoted: tuple[tuple[str, str], ...] = _INVENTORY_QUOTED_FILES,
+    root: Path, referenced_files: list[tuple[str, str]], prefix: str,
+    quoted: tuple[tuple[str, str], ...], skeleton_paths: frozenset[str] = frozenset(),
+    skeletons: list[str] | None = None,
 ) -> list[str]:
-    """Quote complete task targets and entry bodies within one budget, never fragments."""
-    fixed_files = [
-        (relative, language) for relative, language in quoted
-        if scope != "backend" or relative == "database/seeders/DatabaseSeeder.php"
-    ]
-    files = dict((referenced_files or []) + fixed_files)
-    entries: list[tuple[str | None, str]] = []
+    """
+    Quote complete task targets and entry bodies within one budget, never fragments.
+
+    With *skeletons* (a list), PHP files in *skeleton_paths* are quoted as tree-sitter
+    skeletons, and the prefixed paths whose skeleton quote is emitted are appended to it.
+    """
+    files = dict((referenced_files or []) + list(quoted))
+    entries: list[tuple[str | None, str, str | None]] = []
     for relative, language in files.items():
         path = root / relative
+        skeletal = skeletons is not None and relative in skeleton_paths and language == "php"
         relative = prefix + relative
         if path.is_symlink():
-            entries.append((None, f"\n{relative}: exists, body omitted (symbolic link)."))
+            entries.append((None, f"\n{relative}: exists, body omitted (symbolic link).", None))
             continue
         if not path.is_file():
             continue
@@ -448,8 +457,12 @@ def _quoted_entry_files(
         except (OSError, UnicodeDecodeError) as exc:
             entries.append((None,
                 f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}). "
-                "Do not recreate it."))
+                "Do not recreate it.", None))
             continue
+        label, skeleton_path = "complete", None
+        if skeletal and (skeleton := code_skeleton.php_skeleton(body, _HTTP_TEST_CALL)) is not None:
+            body, skeleton_path = skeleton, relative
+            label = "skeleton: long method bodies elided as { … }; reference only, never emit a FILE block for it"
         if len(body) > _MAX_QUOTED_FILE_CHARS:
             telegram_notify(
                 f"⚠️ Nodes :: _MAX_QUOTED_FILE_CHARS limit:{_MAX_QUOTED_FILE_CHARS} exceeded: <b>{len(body)}</b>"
@@ -457,24 +470,26 @@ def _quoted_entry_files(
             )
             entries.append((None,
                 f"\n{relative}: exists, body omitted ({len(body)} characters, over the "
-                f"{_MAX_QUOTED_FILE_CHARS}-character quote limit). Do not recreate it from memory."))
+                f"{_MAX_QUOTED_FILE_CHARS}-character quote limit). Do not recreate it from memory.", None))
             continue
-        quote = f"\nCurrent {relative} (complete):\n```{language}\n{body}\n```"
+        quote = f"\nCurrent {relative} ({label}):\n```{language}\n{body}\n```"
         omitted = (
             f"\n{relative}: exists, body omitted (the {_MAX_QUOTED_TOTAL_CHARS}-character "
             "quote budget is spent). Do not recreate it from memory."
         )
-        entries.append((quote, omitted))
+        entries.append((quote, omitted, skeleton_path))
 
     # Reserve every omission notice first so later files can always be named;
     # headings, fences, separators and notices all count toward the budget.
-    remaining = _MAX_QUOTED_TOTAL_CHARS - len("\n\n".join(omitted for _, omitted in entries))
+    remaining = _MAX_QUOTED_TOTAL_CHARS - len("\n\n".join(omitted for _, omitted, _ in entries))
     sections: list[str] = []
-    for quote, omitted in entries:
+    for quote, omitted, skeleton_path in entries:
         extra = len(quote) - len(omitted) if quote is not None else 0
         if quote is not None and extra <= remaining:
             sections.append(quote)
             remaining -= extra
+            if skeleton_path is not None and skeletons is not None:
+                skeletons.append(skeleton_path)
         else:
             sections.append(omitted)
     return sections
@@ -506,27 +521,104 @@ def _api_contract_files(root: Path, routes: str) -> list[tuple[str, str]]:
     return list(files.items())
 
 
-_BACKEND_INVENTORY_DIRS = tuple(
-    entry for entry in _INVENTORY_DIRS if entry[0] not in ("resources/js/components", "e2e")
-)
+def _convention_test(root: Path, task_text: str) -> tuple[tuple[str, str], ...]:
+    """
+    The existing Feature test that best shows how this project's HTTP tests
+    build, authorise and authenticate users, as a quote entry (or nothing).
+
+    Only tests that send a request qualify. Task words are weighted by rarity
+    across the suite, so a word every test uses counts for nothing; ties go to
+    the smallest file.
+    """
+    tests: dict[Path, tuple[str, set[str]]] = {}
+    for path in sorted((root / "tests/Feature").glob("**/*Test.php")):
+        try:
+            if path.resolve().is_relative_to(root.resolve()):
+                body = path.read_text(encoding="utf-8")
+                tests[path] = (body, set(re.findall(r"[a-z]{4,}", body.lower())))
+        except (OSError, UnicodeDecodeError):
+            continue
+    words = set(re.findall(r"[a-z]{4,}", task_text.lower()))
+
+    def rank(path: Path) -> tuple[float, int]:
+        body, vocabulary = tests[path]
+        weight = sum(math.log(len(tests) / sum(word in v for _, v in tests.values()))
+                     for word in words & vocabulary)
+        return weight, -len(body)
+
+    candidates = [path for path, (body, _) in tests.items() if _HTTP_TEST_CALL.search(body)]
+    return ((max(candidates, key=rank).relative_to(root).as_posix(), "php"),) if candidates else ()
+
+
+def _scramble_filter_provider(root: Path) -> tuple[tuple[str, str], ...]:
+    """The first provider calling ``Scramble::routes(``, as a quote entry: new /api routes must pass it."""
+    for path in sorted((root / "app/Providers").glob("**/*.php")):
+        try:
+            if (path.resolve().is_relative_to(root.resolve())
+                    and "Scramble::routes(" in path.read_text(encoding="utf-8")):
+                return ((path.relative_to(root).as_posix(), "php"),)
+        except (OSError, UnicodeDecodeError):
+            continue
+    return ()
+
+
 _SPA_INVENTORY_DIRS = (("src", 80), ("e2e", 40))
 _SPA_QUOTED_FILES = tuple(
     (name, name.rsplit(".", 1)[-1]) for name in (
         "src/main.ts", "src/main.js", "src/App.vue", "index.html", "vite.config.ts",
-        "vite.config.js", "vitest.config.js", "vitest.config.ts", "playwright.config.js",
-        "playwright.config.ts", "package.json",
+        "vite.config.js", "vitest.config.js", "vitest.config.ts", "vitest.setup.js", "playwright.config.js",
+        "playwright.config.ts", "package.json", "src/router/index.js", "src/router/index.ts",
+        "src/layout/AppMenu.vue", "src/service/api.js", "e2e/support/session.js", "e2e/support/session.ts",
     )
 )
 
+_SESSION_MARKERS = ("localStorage.", "sessionStorage.", "createRouter(")
 
-def _is_separated(layout: dict | None) -> bool:
-    """True for a layout whose backend lives in its own folder, not the clone root."""
-    return bool(layout) and layout.get("backend") not in (None, ".")
+
+def _spa_session_sources(spa_root: Path) -> tuple[tuple[str, str], ...]:
+    """Without e2e/support/session.*, the first 4 src/ files holding the SPA's session storage or router."""
+    if any((spa_root / "e2e/support" / name).exists() for name in ("session.js", "session.ts")):
+        return ()
+    found: list[tuple[str, str]] = []
+    for rel in _inventory_listing(spa_root / "src"):
+        if len(found) == 4:
+            break
+        if not rel.endswith((".js", ".ts", ".vue")):
+            continue
+        try:
+            with (spa_root / "src" / rel).open(encoding="utf-8") as handle:
+                body = handle.read(_MAX_QUOTED_FILE_CHARS + 1)
+        except (OSError, UnicodeDecodeError):
+            continue
+        if any(marker in body for marker in _SESSION_MARKERS):
+            found.append((f"src/{rel}", rel.rsplit(".", 1)[-1]))
+    return tuple(found)
+
+
+
+def _domain_quotes(backend: Path, domain: dict | None) -> tuple[tuple[str, str], ...]:
+    """The chosen domains' route files and every PHP file of their folders, as backend-relative quote entries."""
+    if not domain or not domain["selected"]:
+        return ()
+    bases = [f"app/{domain['root']}/{name}" for name in domain["selected"]]
+    return tuple((f, "php") for f in domain["route_files"]) + tuple(
+        (f"{base}/{rel}", "php") for base in bases
+        for rel in _inventory_listing(backend / base) if rel.endswith(".php")
+    )
+
+
+def _foreign_paths(domain: dict | None) -> tuple[str, ...]:
+    """Backend-relative prefixes of the unchosen domains' folders and solely-owned route files."""
+    if not domain or not domain["selected"]:
+        return ()
+    return tuple(f"app/{domain['root']}/{name}/" for name in domain["names"]
+                 if name not in domain["selected"]) + tuple(domain["foreign_route_files"])
 
 
 def _repo_inventory(
-    repo_path: str, scope: str = "fullstack", task_text: str = "",
-    previous_files: list[str] | None = None, layout: dict | None = None,
+    repo_path: str, layout: dict, scope: str = "fullstack", task_text: str = "",
+    previous_files: list[str] | None = None, domain: dict | None = None,
+    skeletons: list[str] | None = None,
 ) -> str:
     """
     Describe what the cloned repository already contains, for the prompts.
@@ -538,14 +630,23 @@ def _repo_inventory(
     backend including a second ``create_tasks_table`` migration, and the PHP
     layer then failed with "table already exists" on every attempt.
 
-    Every scope gets the backend listing, route files and default seeder.
+    Every scope gets the backend listing, route files (including those in
+    routes/ subdirectories), the default seeder and bootstrap/app.php, whose
+    withRouting() fixes the API prefix. Backend/fullstack also get
+    tests/TestCase.php and one existing HTTP Feature test (``_convention_test``)
+    so new tests follow the project's own user and authentication setup.
     Files named by the issue or plan get complete bodies before fixed entry
     files, so modifying an existing component does not require guessing its
     implementation. Tests importing a named SFC bring their existing mount
-    setup even when the issue names no test. Frontend/fullstack also get the served entry chain,
-    fixture manifest and configs within the same bounded quote section. API
+    setup even when the issue names no test. Frontend/fullstack also get the SPA entry files
+    and configs within the same bounded quote section; an SPA without e2e/support/session.*
+    also gets the files that hold its session storage and router, so the coder can write the
+    shared sign-in helper. API
     class references also supply validation, serialization and pagination
     contracts; a response field alone does not establish a writable field.
+    With *skeletons* (a list; coding prompt only) the example Feature test,
+    when nobody named it, becomes a tree-sitter PHP skeleton, and its prefixed
+    path is appended to it.
 
     Never raises: an unreadable workspace yields an empty string and the
     prompts are built without the section, exactly as before; one unreadable
@@ -556,28 +657,27 @@ def _repo_inventory(
         if not root.is_dir():
             return ""
 
-        if not _is_separated(layout):
-            lines = _inventory_lines(
-                root, "", scope, task_text, previous_files,
-                _INVENTORY_DIRS, _INVENTORY_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
+        backend = root / layout["backend"]
+        app = backend / "app"
+        custom = tuple(
+            (f"app/{d.name}", 40) for d in sorted(app.iterdir()) if d.is_dir()
+            and d.name != "Http" and f"app/{d.name}" not in dict(_INVENTORY_DIRS)
+        ) if app.is_dir() else ()
+        lines = _inventory_lines(
+            backend, "" if layout["backend"] == "." else layout["backend"] + "/",
+            scope, task_text, previous_files,
+            _INVENTORY_DIRS + custom,
+            _BACKEND_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
+            extra_quoted=_domain_quotes(backend, domain) if scope != "frontend" else (),
+            foreign=_foreign_paths(domain) if scope != "frontend" else (),
+            skeletons=skeletons,
+        )
+        if scope != "backend" and layout.get("frontend"):
+            lines += _inventory_lines(
+                root / layout["frontend"], layout["frontend"] + "/", scope, task_text,
+                previous_files, _SPA_INVENTORY_DIRS, _SPA_QUOTED_FILES, (),
+                extra_quoted=_spa_session_sources(root / layout["frontend"]),
             )
-        else:
-            backend = root / layout["backend"]
-            app = backend / "app"
-            custom = tuple(
-                (f"app/{d.name}", 40) for d in sorted(app.iterdir()) if d.is_dir()
-                and d.name != "Http" and f"app/{d.name}" not in dict(_BACKEND_INVENTORY_DIRS)
-            ) if app.is_dir() else ()
-            lines = _inventory_lines(
-                backend, layout["backend"] + "/", scope, task_text, previous_files,
-                _BACKEND_INVENTORY_DIRS + custom,
-                (("database/seeders/DatabaseSeeder.php", "php"),), _INVENTORY_ROUTE_FILES,
-            )
-            if scope != "backend" and layout.get("frontend"):
-                lines += _inventory_lines(
-                    root / layout["frontend"], layout["frontend"] + "/", scope, task_text,
-                    previous_files, _SPA_INVENTORY_DIRS, _SPA_QUOTED_FILES, (),
-                )
 
         if not lines:
             return (
@@ -598,9 +698,16 @@ def _repo_inventory(
 def _inventory_lines(
     root: Path, prefix: str, scope: str, task_text: str, previous_files: list[str] | None,
     dirs: tuple[tuple[str, int], ...], quoted: tuple[tuple[str, str], ...],
-    route_files: tuple[str, ...],
+    route_files: tuple[str, ...], extra_quoted: tuple[tuple[str, str], ...] = (),
+    skeletons: list[str] | None = None, foreign: tuple[str, ...] = (),
 ) -> list[str]:
-    """Inventory lines for one application folder; every emitted path is *prefix* + relative."""
+    """
+    Inventory lines for one application folder; every emitted path is *prefix* + relative.
+
+    *extra_quoted* is quoted right after the files the task names, ahead of the API
+    contract files and the fixed entries. Paths starting with a *foreign* prefix
+    (unchosen domains) are left out of the listings, API contracts and route quotes.
+    """
     if not root.is_dir():
         return []
     lines: list[str] = []
@@ -615,7 +722,7 @@ def _inventory_lines(
         directory = root / relative
         if not directory.is_dir():
             continue
-        names = _inventory_listing(directory)
+        names = [n for n in _inventory_listing(directory) if not f"{relative}/{n}".startswith(foreign)]
         if not names:
             continue
         shown = names[:cap]
@@ -626,7 +733,9 @@ def _inventory_lines(
             basename = name.rsplit("/", 1)[-1]
             if re.search(r"\.(?:test|spec)\.[cm]?[jt]sx?$", name):
                 test_files.append(path)
-            pattern = rf"(?<![\w./-])(?:{re.escape(prefix + path)}|{re.escape(basename)})(?![\w./-])"
+            # The app-relative path is how sandbox output names a file ("at tests/Feature/X.php:26").
+            pattern = (rf"(?<![\w./-])(?:{re.escape(prefix + path)}|{re.escape(path)}|{re.escape(basename)})"
+                       r"(?![\w./-])")
             if task_text and re.search(pattern, task_text):
                 language = Path(name).suffix.lstrip(".")
                 referenced_files.append((path, language))
@@ -692,12 +801,40 @@ def _inventory_lines(
                     if re.search(rf"\b{re.escape(alias)}::", aliases):
                         imports.append(f"use {name};")
                 contract_routes = "\n".join(imports + relevant)
-            api_files = _api_contract_files(root, contract_routes)
+            api_files = [f for f in _api_contract_files(root, contract_routes) if not f[0].startswith(foreign)]
         if len(body) > _MAX_ROUTE_FILE_CHARS:
             body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
         lines.append(f"\nCurrent {prefix}{relative}:\n```php\n{body}\n```")
 
-    lines += _quoted_entry_files(root, scope, referenced_files + api_files, prefix, quoted)
+    remaining = _MAX_ROUTE_SUBDIR_CHARS
+    for path in sorted((root / "routes").glob("*/**/*.php")) if route_files else []:
+        if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+            continue
+        if path.relative_to(root).as_posix().startswith(foreign):
+            continue
+        relative = prefix + path.relative_to(root).as_posix()
+        try:
+            body = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError as exc:
+            lines.append(f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}).")
+            continue
+        if len(body) > _MAX_ROUTE_FILE_CHARS:
+            body = body[:_MAX_ROUTE_FILE_CHARS] + "\n… (truncated)"
+        quote = f"\nCurrent {relative}:\n```php\n{body}\n```"
+        if len(quote) > remaining:
+            lines.append(f"\n{relative}: exists, body omitted (route quote budget spent).")
+            continue
+        lines.append(quote)
+        remaining -= len(quote)
+
+    convention: tuple[tuple[str, str], ...] = ()
+    if scope != "frontend" and route_files:
+        convention = _convention_test(root, task_text)
+        quoted += (("tests/TestCase.php", "php"),) + convention + _scramble_filter_provider(root)
+    named = {path for path, _ in referenced_files}
+    skeleton_paths = frozenset({p for p, _ in convention} - named)
+    lines += _quoted_entry_files(root, referenced_files + list(extra_quoted) + api_files, prefix,
+                                 quoted, skeleton_paths, skeletons)
     return lines
 
 
@@ -763,21 +900,17 @@ def _test_report(state: IssueState) -> str:
     )
 
 
-_INTEGRATED_LAYOUT = {"backend": ".", "frontend": "."}
 _SPA_VERSION_PACKAGES = ("vue", "primevue", "@primeuix/themes", "vue-router", "pinia", "typescript", "axios")
 
 
 def _layer_path(state: IssueState, side: str) -> str:
     """Absolute folder of the layout's *side* ("backend"/"frontend") inside the clone."""
-    layout = state.get("layout") or _INTEGRATED_LAYOUT
-    return os.path.normpath(os.path.join(state["repo_path"], layout[side]))
+    return os.path.normpath(os.path.join(state["repo_path"], state["layout"][side]))
 
 
-def _prompt_layout(state: IssueState) -> dict | None:
-    """The layout for the prompts, with the SPA's installed versions for a separated one."""
-    layout = state.get("layout")
-    if not _is_separated(layout):
-        return layout
+def _prompt_layout(state: IssueState) -> dict:
+    """The layout for the prompts, with the SPA's installed versions."""
+    layout = state["layout"]
     versions: dict[str, str] = {}
     if layout.get("frontend"):
         try:
@@ -803,8 +936,8 @@ def node_setup(state: IssueState) -> dict:
     loop process, and one issue's escalations must not start the next one.
 
     Only a verified claim continues: the lock refuses an issue that stopped
-    being pending since it was listed (paused, held by a dependency record,
-    taken by another worker), and then nothing is cloned and no LLM is called
+    being pending since it was listed (paused, taken by another worker), and
+    then nothing is cloned and no LLM is called
     — ``failure_reason`` routes straight to cleanup.
     """
     logger.debug("→ node_setup")
@@ -844,32 +977,99 @@ def node_setup(state: IssueState) -> dict:
     return {
         "workspace": workspace,
         "repo_path": repo_path,
+        "base_sha": cloned["result"]["head_sha"],
         "branch_name": branch_name,
         "layout": layout,
     }
 
 
+def node_detect_domain(state: IssueState) -> dict:
+    """
+    Decide which domain of a domain-split backend the issue changes, before planning.
+
+    A greenfield clone or a backend without domains gets ``domain: None`` and the
+    run continues unchanged.  Otherwise an earlier human answer to Nesti's
+    question wins, then issue_domain.detect (every stated domain plus every
+    domain owning a named route), then the planner classification (accepted
+    only when exactly one domain is plausible).  When nothing decides, the issue
+    gets the domain question and is paused; ``failure_reason`` routes to
+    cleanup.  Logs exactly one ``DOMAIN:`` line per invocation.
+    """
+    logger.debug("→ node_detect_domain")
+    issue_id = state["issue_id"]
+
+    def log(value: str, basis: str) -> None:
+        logger.info("DOMAIN: %s · GitLab issue #%s · %s", value, issue_id, basis)
+
+    if (state.get("layout") or {}).get("backend") is None:
+        log("none", "greenfield repository")
+        return {"domain": None}
+    catalog = domain_catalog(Path(_layer_path(state, "backend")))
+    if catalog is None:
+        log("none", "no domain architecture")
+        return {"domain": None}
+    names = [d["name"] for d in catalog["domains"]]
+    subject = state.get("subject", "")
+    description = state["issue"].get("description", "") or ""
+    if classify_issue(subject, description).scope == "frontend":
+        log("skipped", "frontend scope")
+        return {"domain": selection(catalog, [])}
+
+    answered = tool_issue_domain_answer(issue_id, names)
+    if not answered["success"]:
+        shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
+        raise RuntimeError(f"Domain answer lookup failed: {answered['error']}")
+    domains, basis = answered["result"], "answered in GitLab"
+    if not domains:
+        decision = detect_domain(subject, description, catalog)
+        domains, basis = list(decision.domains), decision.basis
+        if not domains and not decision.ask:
+            picked, reason = classify_domain(subject, description, catalog, _llm)
+            if len(picked) == 1:
+                domains, basis = picked, f"planner: {reason}"
+            else:
+                basis = (reason if not picked and reason.startswith("classification failed")
+                         else f"planner found {len(picked)} plausible domains: {', '.join(picked) or 'none'}")
+    if not domains:
+        asked = tool_issue_ask_domain(issue_id, names)
+        if not asked["success"]:
+            shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
+            raise RuntimeError(f"Domain question failed: {asked['error']}")
+        log("asked", basis)
+        return {"domain": None, "failure_reason": f"Paused for a domain question: {basis}"}
+    log(", ".join(domains), basis)
+    return {"domain": selection(catalog, domains)}
+
+
 def node_bootstrap(state: IssueState) -> dict:
     """
-    Guarantee the clone is a Laravel 13 + Scramble + PrimeVue application.
+    Guarantee the clone holds a Laravel 13 + Scramble API, plus a SPA when the issue needs one.
 
-    A greenfield repository is scaffolded inside the PHP sandbox; an existing
-    Laravel app is topped up with the test-runner configs it lacks.  A
-    non-Laravel PHP project is a configuration error no model can fix by
-    rewriting its code, so this node mirrors node_setup's own failure
-    handling — remove the workspace and raise — and TaskEngine's crash net
-    reopens the issue with that reason without leaking a tempdir.
+    A greenfield repository gets the API scaffolded in ``webservice/`` inside
+    the PHP sandbox; an existing Laravel app is topped up with what it lacks.
+    A layout without a frontend gets the Sakai starter kit (``frontend/``, or
+    ``.frontend/`` beside a root app) when the issue asks for a user interface;
+    exactly one ``STARTER:`` line records that decision.  Whatever bootstrap
+    and starter changed is committed locally before coding; only a scaffold's
+    or starter kit's files are returned to gate the test layers — top-up
+    wiring of an existing app never decides a layer.
+
+    A non-Laravel PHP project, or a starter kit that cannot apply, is a
+    configuration error no model can fix by rewriting its code, so this node
+    mirrors node_setup's own failure handling — remove the workspace and raise
+    — and TaskEngine's crash net reopens the issue with that reason without
+    leaking a tempdir.
     """
     logger.debug("→ node_bootstrap")
+    repo = state["repo_path"]
     layout = state.get("layout") or {}
     if layout.get("backend") is None and layout.get("frontend") is None:
-        result = tool_laravel_bootstrap(state["repo_path"])
-        layout = _INTEGRATED_LAYOUT
+        result = tool_laravel_bootstrap(os.path.join(repo, SCAFFOLD_BACKEND_DIR))
+        layout = {"backend": SCAFFOLD_BACKEND_DIR, "frontend": None}
     else:
         result = tool_laravel_bootstrap(
             _layer_path(state, "backend"),
-            spa_path=_layer_path(state, "frontend")
-            if layout["frontend"] not in (None, ".") else "",
+            spa_path=_layer_path(state, "frontend") if layout["frontend"] else "",
         )
     if not result["success"]:
         shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
@@ -886,8 +1086,30 @@ def node_bootstrap(state: IssueState) -> dict:
             detail["mode"],
             detail["reason"],
         )
+
+    reasons, gates = [detail["reason"]], detail["created"]
+    if layout["frontend"]:
+        verdict, basis = "skipped", f"existing SPA {layout['frontend']}/"
+    else:
+        decision = classify_issue(state.get("subject", ""), state["issue"].get("description", "") or "")
+        if decision.scope != "backend" and decision.basis != "no signals":
+            spa_dir = spa_dir_for(layout["backend"])
+            starter = tool_starter_kit(repo, layout["backend"], spa_dir)
+            if not starter["success"]:
+                shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
+                raise RuntimeError(f"Starter kit failed: {starter['error']}")
+            layout, gates = {**layout, "frontend": spa_dir}, True
+            reasons.append(starter["result"]["reason"])
+            verdict = f"added {spa_dir}/ (roles: {starter['result']['variant']})"
+            basis = f"issue asks for a user interface ({decision.evidence()})"
+        else:
+            verdict, basis = "skipped", f"no frontend request ({decision.evidence()})"
+    logger.info("STARTER: %s · GitLab issue #%s · %s", verdict, state["issue_id"], basis)
+
+    files = _commit_bootstrap(repo, "Nesti bootstrap\n\n" + "\n".join(reasons))
     logger.debug("← node_bootstrap (created=%s)", detail["created"])
-    return {"is_laravel": True, "bootstrapped": detail["created"], "layout": layout}
+    return {"is_laravel": True, "bootstrapped": detail["created"], "layout": layout,
+            "bootstrap_files": files if gates else []}
 
 
 def node_load_skills(state: IssueState) -> dict:
@@ -945,6 +1167,22 @@ def _log_scope(issue_id: int, scope: str, decision: ScopeDecision, planner: str)
     )
 
 
+def _app_facts(state: IssueState, scope: str) -> str:
+    """Boost facts of the backend at the cloned HEAD for the prompts; logs the run's one ``APP FACTS:`` line."""
+    facts, backend = "", state["layout"].get("backend")
+    if scope == "frontend" or backend is None:
+        verdict, basis = "skipped", "frontend scope" if scope == "frontend" else "no backend"
+    else:
+        result = tool_app_facts(_layer_path(state, "backend"))
+        if result["success"]:
+            facts = result["result"]["facts"]
+            verdict, basis = ("exported" if facts else "skipped"), result["result"]["reason"]
+        else:
+            verdict, basis = "failed", (result["error"].splitlines() or [""])[0]
+    logger.info("APP FACTS: %s · GitLab issue #%s · %s", verdict, state["issue_id"], basis)
+    return facts
+
+
 def node_plan(state: IssueState) -> dict:
     """
     Generate implementation plan via LLM planner chain.
@@ -972,8 +1210,10 @@ def node_plan(state: IssueState) -> dict:
         max_practice_docs=1,
     )
     repo_context = _repo_inventory(
-        state.get("repo_path", ""), decision.scope, issue_text, layout=state.get("layout")
+        state.get("repo_path", ""), state["layout"], decision.scope, issue_text,
+        domain=state.get("domain"),
     )
+    app_facts = _app_facts(state, decision.scope)
 
     # memory: how similar issues were solved before (Redis solution
     # cache) and the corpus passages the keyword catalog missed (Qdrant).
@@ -1006,6 +1246,8 @@ def node_plan(state: IssueState) -> dict:
         past_solutions=past_solutions,
         scope=decision.scope,
         layout=_prompt_layout(state),
+        domain=state.get("domain"),
+        app_facts=app_facts,
         scope_evidence=decision.evidence(),
         metrics=metrics,
     )
@@ -1022,7 +1264,7 @@ def node_plan(state: IssueState) -> dict:
         logger.debug("← node_plan (failed)")
         return {
             "plan": "", "scope": decision.scope, "error": str(exc),
-            "messages": messages, **memory_counts,
+            "messages": messages, "app_facts": app_facts, **memory_counts,
         }
 
     logger.debug("Plan:\n%s", plan)
@@ -1031,7 +1273,7 @@ def node_plan(state: IssueState) -> dict:
     _log_scope(issue_id, scope, decision, declared or "no declaration")
     messages = _store.append(issue_id, "assistant", plan)
     logger.debug("← node_plan")
-    return {"plan": plan, "scope": scope, "messages": messages, **memory_counts}
+    return {"plan": plan, "scope": scope, "messages": messages, "app_facts": app_facts, **memory_counts}
 
 
 def node_code(state: IssueState) -> dict:
@@ -1068,9 +1310,20 @@ def node_code(state: IssueState) -> dict:
     )
     # Rebuilt every attempt: the previous attempt's own files are part of the
     # repository now, and a retry must see them rather than re-inventing them.
+    # A retry also quotes the existing files its failure names (a red existing
+    # test), so they are corrected in place instead of rewritten from memory.
     previous_files = state.get("written_files") or []
+    # The formatted failure, not the raw output: raw sandbox output wraps paths in
+    # ANSI colour codes, which hide "at tests/Feature/X.php:26" from the match.
+    failure = ""
+    if attempt > 1:
+        layer, last_output = _last_failure_output(state)
+        failure = _store.format_test_failure(last_output, layer)
+    inventory_text = haystack + "\n" + failure
+    skeletons: list[str] | None = [] if code_skeleton.enabled() else None
     repo_context = _repo_inventory(
-        state.get("repo_path", ""), scope, haystack, previous_files, state.get("layout")
+        state.get("repo_path", ""), state["layout"], scope, inventory_text, previous_files,
+        domain=state.get("domain"), skeletons=skeletons,
     )
 
     # memory.  A narrow scope filters the doc search from the first
@@ -1089,6 +1342,7 @@ def node_code(state: IssueState) -> dict:
         layer, last_output = _last_failure_output(state)
         rc = tool_memory_recall_failures(
             issue_id,
+            state["run_id"],
             f"{layer} failure: {condense(last_output, _EPISODE_QUERY_CHARS)}",
             attempt=attempt,
             limit=2,
@@ -1117,6 +1371,8 @@ def node_code(state: IssueState) -> dict:
         recalled_failures=recalled,
         scope=scope,
         layout=_prompt_layout(state),
+        domain=state.get("domain"),
+        app_facts=state.get("app_facts", ""),
         metrics=metrics,
     )
     base_user_chars = len(user_prompt)
@@ -1131,12 +1387,11 @@ def node_code(state: IssueState) -> dict:
     change_set_chars = len(user_prompt) - base_user_chars
     feedback = ""
     if attempt > 1:
-        layer, last_output = _last_failure_output(state)
-        feedback = "\n\n## Latest failure\n" + _store.format_test_failure(last_output, layer)
+        feedback = "\n\n## Latest failure\n" + failure
         user_prompt += feedback
     metrics.update(
         change_set_chars=change_set_chars, latest_failure_chars=len(feedback),
-        user_chars=len(user_prompt),
+        user_chars=len(user_prompt), skeleton_files=len(skeletons or []),
     )
     memory_counts["retrieved_chunks"] = metrics["rag_rendered"]
     logger.info("Context code · issue #%s · attempt %d · %s", issue_id, attempt, metrics)
@@ -1173,7 +1428,7 @@ def node_code(state: IssueState) -> dict:
     # Static file application needs neither a Docker client nor a container.
     apply_error = ""
     try:
-        files_written, written = DockerRunner.write_files(code_response, state["repo_path"])
+        files_written, written = DockerRunner.write_files(code_response, state["repo_path"], skeletons or ())
     except ValueError as exc:
         files_written, written = False, []
         apply_error = f"File changes rejected: {exc}"
@@ -1226,9 +1481,13 @@ def node_detect_stack(state: IssueState) -> dict:
 
     # route_after_code admits only responses with accepted file operations.
 
-    layout = state.get("layout") or _INTEGRATED_LAYOUT
+    layout = state["layout"]
+    written = state.get("written_files")
+    # A scaffold/starter-kit bootstrap is part of the change: its files gate the
+    # layers too (top-up wiring never does — node_bootstrap returns [] for it).
     result = tool_detect_stack(
-        state["repo_path"], state.get("written_files"),
+        state["repo_path"],
+        None if written is None else [*written, *state.get("bootstrap_files", [])],
         backend_dir=layout["backend"], frontend_dir=layout["frontend"] or "",
     )
     if not result["success"]:
@@ -1272,22 +1531,13 @@ def node_detect_stack(state: IssueState) -> dict:
     }
 
 
-def _log_layer_verdict(
-    layer: str,
-    passed: bool,
-    state: IssueState,
-    reason: str = "",
-    *,
-    blocked: bool = False,
-) -> None:
+def _log_layer_verdict(layer: str, passed: bool, state: IssueState, reason: str = "") -> None:
     """Emit the one-line verdict for a test layer.
 
     Exactly one line per layer run, green or red, always carrying the GitLab
     issue number and the provider/model/billing that produced the code — this
     is the line an operator greps for in `docker-compose logs`. Green goes to
     INFO, red to ERROR so a failure stays visible at any sane log level.
-    ``blocked`` (INFO) says the suite never started because fixture
-    preparation stopped first — neither a pass nor a failed browser run.
 
     The attribution comes from IssueState, written by node_code from the coder
     that actually answered: the chain head moves under escalation and would
@@ -1298,7 +1548,7 @@ def _log_layer_verdict(
         "model: %s · %s" + (" · reason: %s" if reason else "")
     )
     args = [
-        "BLOCKED" if blocked else ("PASSED" if passed else "FAILED"),
+        "PASSED" if passed else "FAILED",
         state.get("issue_id", "?"),
         state.get("attempt", 0),
         state.get("max_attempts", _ENV_MAX_ATTEMPTS),
@@ -1308,7 +1558,7 @@ def _log_layer_verdict(
     ]
     if reason:
         args.append(reason)
-    (logger.info if passed or blocked else logger.error)(message, *args)
+    (logger.info if passed else logger.error)(message, *args)
 
 
 def node_test(state: IssueState) -> dict:
@@ -1337,17 +1587,22 @@ def node_openapi_test(state: IssueState) -> dict:
 
     Reached only when route_after_phpunit saw ``run_openapi`` True, so there is
     deliberately no guard here: routing decides whether this layer applies.
+    The HEAD route list an unprefixed project needs is exported at most once
+    per issue run and cached in ``openapi_baseline_routes``.
     """
     logger.debug("→ node_openapi_test")
     logger.info("Exporting OpenAPI document (attempt %d) …", state.get("attempt", 0))
 
-    result = tool_openapi_export(_layer_path(state, "backend"))
+    cached = state.get("openapi_baseline_routes")
+    result = tool_openapi_export(_layer_path(state, "backend"), cached)
+    baseline = cached
     if result["success"]:
         detail = result["result"]
         passed = detail.get("passed", False)
         output = detail.get("output", "")
         paths = detail.get("paths", [])
         undocumented = detail.get("undocumented", [])
+        baseline = detail.get("baseline_routes", cached)
     else:
         passed, output, paths, undocumented = False, result["error"], [], []
 
@@ -1367,6 +1622,7 @@ def node_openapi_test(state: IssueState) -> dict:
         "openapi_passed": passed,
         "openapi_output": output,
         "openapi_paths": paths,
+        "openapi_baseline_routes": baseline,
     }
 
 
@@ -1390,117 +1646,22 @@ def node_vitest_test(state: IssueState) -> dict:
 
 
 def node_playwright_test(state: IssueState) -> dict:
-    """
-    Run Playwright E2E tests in the browser sandbox.
-
-    ``fixture_request`` is set only when the sandbox verified that a declared
-    fixture's seeder class and file are both absent and stopped before the
-    browser started; that run logs BLOCKED rather than FAILED, and
-    route_after_playwright hands it to node_pause_dependency.
-    """
+    """Run Playwright E2E tests in the browser sandbox."""
     logger.debug("→ node_playwright_test")
     logger.info("Running Playwright E2E tests (attempt %d) …", state.get("attempt", 0))
 
     result = tool_playwright_run_tests(_layer_path(state, "frontend"))
-    detail = result.get("result", {}) if result["success"] else {}
-    passed = bool(detail.get("passed", False))
-    output = detail.get("output", "") if result["success"] else result.get("error", "")
-    fixture_request = None if passed else detail.get("fixture_request")
+    passed = result.get("result", {}).get("passed", False) if result["success"] else False
+    output = (
+        result.get("result", {}).get("output", "")
+        if result["success"]
+        else result.get("error", "")
+    )
 
-    if fixture_request:
-        _log_layer_verdict(
-            "Playwright", False, state,
-            reason=(
-                f"fixture GET {fixture_request['endpoint']} needs "
-                f"{fixture_request['seeder']}, whose class and file are absent; "
-                "the browser suite did not start"
-            ),
-            blocked=True,
-        )
-    else:
-        _log_layer_verdict("Playwright", passed, state)
+    _log_layer_verdict("Playwright", passed, state)
 
     logger.debug("← node_playwright_test (passed=%s)", passed)
-    return {
-        "playwright_passed": passed,
-        "playwright_output": output,
-        "fixture_request": fixture_request,
-    }
-
-
-def node_pause_dependency(state: IssueState) -> dict:
-    """
-    Turn a verified missing-seeder fixture into a durable dependency.
-
-    No planner, coder, escalation, quota check, commit or reopen happens here:
-
-    • paused     – GitLab holds the durable record, the issue carries the
-                   pause label and the backend child exists (or its creation
-                   is held for an operator).  The conversation and episodes are
-                   dropped only now, after the intent is durable, so the
-                   resumed run starts fresh.  → cleanup
-    • ineligible – the prerequisite belongs to this change's own backend work;
-                   the explanation is appended to the Playwright output and the
-                   shared retry budget decides (on_layer_failure / failure).
-    • error      – a transport or transition failure: alert, try a plain
-                   pause, and stop (→ cleanup) without node_failure, whose
-                   reopen would undo the hold.
-    """
-    logger.debug("→ node_pause_dependency")
-    issue_id = state["issue_id"]
-    subject = state.get("subject", f"issue-{issue_id}")
-    requirement = state.get("fixture_request") or {}
-
-    result = tool_issue_pause_for_fixture(
-        issue_id, state["repo_path"], requirement, list(state.get("written_files") or [])
-    )
-    detail = result["result"] if result["success"] else {}
-    status = detail.get("status")
-
-    if status == "paused":
-        _store.delete(issue_id)
-        forgot = tool_memory_forget_episodes(issue_id)
-        if not forgot["success"]:
-            logger.warning("Failed to drop the episodes of issue #%s: %s", issue_id, forgot["error"])
-        logger.info("Issue #%s paused: %s", issue_id, detail.get("reason", ""))
-        logger.debug("← node_pause_dependency (paused)")
-        return {"dependency_status": "paused", "failure_reason": detail.get("reason", "")}
-
-    if status == "ineligible":
-        reason = detail.get("reason", "")
-        logger.info("Issue #%s: fixture dependency ineligible – %s", issue_id, reason)
-        logger.debug("← node_pause_dependency (ineligible)")
-        return {
-            "dependency_status": "ineligible",
-            "fixture_request": None,
-            "playwright_output": f"{state.get('playwright_output', '')}\n\n{reason}".strip(),
-        }
-
-    error = detail.get("reason") if result["success"] else result["error"]
-    error = error or f"unexpected dependency status {status!r}"
-    held = tool_issue_set_status(
-        issue_id, "paused",
-        note=f"Nesti: handling this issue's fixture dependency failed ({error}); "
-             "holding it for an operator.",
-    )
-    if held["success"]:
-        message = f"Fixture dependency handling failed and the issue is held (paused): {error}"
-    else:
-        message = (
-            f"Fixture dependency handling failed ({error}) and the pause could not be "
-            f"applied ({held['error']}): the issue may keep its stale in-progress lock. "
-            "Operator recovery: stop the poller, confirm no dependency issue was created, "
-            "then resume the issue and clear its conversation and episodes (README, "
-            "'Fixture dependencies'). Reconciliation cannot recreate a record that was "
-            "never saved."
-        )
-    logger.error("Issue #%s: %s", issue_id, message)
-    telegram_notify(
-        f"⚠️ Fixture dependency handling failed for issue <b>#{issue_id}</b> – "
-        f"<i>{subject}</i>\n<code>{message}</code>"
-    )
-    logger.debug("← node_pause_dependency (error)")
-    return {"dependency_status": "error", "failure_reason": message}
+    return {"playwright_passed": passed, "playwright_output": output}
 
 
 def node_on_layer_failure(state: IssueState) -> dict:
@@ -1562,7 +1723,7 @@ def node_on_layer_failure(state: IssueState) -> dict:
     # After the conversation append on purpose: a memory outage must never cost
     # the pipeline its primary corrective feedback.
     stored = tool_memory_remember_failure(
-        state["issue_id"], state.get("attempt", 0), layer, failure_output
+        state["issue_id"], state["run_id"], state.get("attempt", 0), layer, failure_output
     )
     if not stored["success"]:
         logger.warning("Failed to store episodic memory: %s", stored["error"])
@@ -1665,7 +1826,7 @@ def node_commit(state: IssueState) -> dict:
         )
     elif remembered["result"].get("stored"):
         logger.info("Solution of issue #%s stored in the solution cache.", issue_id)
-    tool_memory_forget_episodes(issue_id)
+    tool_memory_forget_episodes(issue_id, state["run_id"])
     # Work is done – drop the conversation history for this issue.
     _store.delete(issue_id)
     logger.debug("← node_commit (mr=%s)", mr_url)
@@ -1704,13 +1865,19 @@ def node_failure(state: IssueState) -> dict:
             f"❌ Issue <b>#{issue_id}</b> – <i>{subject}</i>\n"
             f"All code generation attempts exhausted. Reopening."
         )
+        # Exhausted coder providers are transient quota, like a failed plan: no marker, retry next poll.
+        if state.get("base_sha") and (state.get("code_response") or not state.get("error")):
+            issue = state.get("issue") or {}
+            note += "\n\n" + failed_run_marker(
+                issue.get("subject", "") or "", issue.get("description", "") or "", state["base_sha"]
+            )
         logger.error("%s failed after %d attempt(s). Reopening issue #%s.", layer, attempts, issue_id)
 
     tool_issue_set_status(issue_id, "new", note=note)
 
     # Every reopened issue starts fresh, including failures before coding.
     _store.delete(issue_id)
-    tool_memory_forget_episodes(issue_id)
+    tool_memory_forget_episodes(issue_id, state["run_id"])
 
     logger.debug("← node_failure (%s)", reason)
     return {"failure_reason": reason}

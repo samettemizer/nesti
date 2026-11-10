@@ -35,9 +35,11 @@ from abc import ABC, abstractmethod
 import anthropic
 import requests
 
+from prompt_builder import CACHE_BREAK
 from scripts.oauth import (
     OPENROUTER_API_BASE, PROVIDERS, TokenStore, configured_model,
 )
+import stats
 from telegram_notifier import notify as telegram_notify
 
 logger = logging.getLogger(__name__)
@@ -91,6 +93,52 @@ def _log_usage(provider: str, usage: dict | None) -> None:
             if type(value) is int and value >= 0:
                 counters[key] = value
     logger.info("LLM usage provider=%s observed_tokens=%s", provider, counters or "unavailable")
+    stats.usage(usage)
+
+
+def _anthropic_text(provider: str, data: dict) -> str:
+    """Join the text blocks of a Messages API response; thinking/tool blocks carry no answer."""
+    blocks = data.get("content") or []
+    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    if not text:
+        raise RuntimeError(
+            f"{provider} returned no text (stop_reason={data.get('stop_reason')!r}, "
+            f"blocks={[b.get('type') for b in blocks]})"
+        )
+    return text
+
+
+def _without_cache_break(
+    user_prompt: str, messages: list[dict] | None
+) -> tuple[str, list[dict] | None]:
+    """*user_prompt* and *messages* without CACHE_BREAK; *messages* is returned as-is when no message carries it."""
+    if messages and any(isinstance(m.get("content"), str) and CACHE_BREAK in m["content"] for m in messages):
+        messages = [
+            {**m, "content": m["content"].replace(CACHE_BREAK, "")} if isinstance(m.get("content"), str) else m
+            for m in messages
+        ]
+    return user_prompt.replace(CACHE_BREAK, ""), messages
+
+
+def _cache_marked(messages: list[dict]) -> list[dict]:
+    """Split the last user message at CACHE_BREAK into a cached prefix block and the rest."""
+    marked = [dict(m) for m in messages]
+    last = next((i for i in range(len(marked) - 1, -1, -1) if marked[i].get("role") == "user"
+                 and isinstance(marked[i].get("content"), str) and CACHE_BREAK in marked[i]["content"]), None)
+    for i, message in enumerate(marked):
+        if i == last or not isinstance(message.get("content"), str):
+            continue
+        message["content"] = message["content"].replace(CACHE_BREAK, "")
+    if last is not None:
+        head, tail = marked[last]["content"].split(CACHE_BREAK, 1)
+        tail = tail.replace(CACHE_BREAK, "")
+        blocks = []
+        if head:
+            blocks.append({"type": "text", "text": head, "cache_control": {"type": "ephemeral"}})
+        if tail:
+            blocks.append({"type": "text", "text": tail})
+        marked[last]["content"] = blocks
+    return marked
 
 
 def _post_json(provider: str, url: str, **kwargs) -> requests.Response:
@@ -124,6 +172,8 @@ class BaseLLMClient(ABC):
     # or by a per-token API bill.
     billing: str = "platform API"
     model: str = ""
+    # True when the provider turns prompt_builder.CACHE_BREAK into a prompt-cache breakpoint.
+    caches_user_prefix: bool = False
 
     @property
     def label(self) -> str:
@@ -476,6 +526,7 @@ class AnthropicLLMClient(BaseLLMClient):
     """
 
     name = "Claude Sonnet (API key)"
+    caches_user_prefix = True
 
     def __init__(self) -> None:
         self.model: str = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
@@ -504,12 +555,12 @@ class AnthropicLLMClient(BaseLLMClient):
         # Anthropic keeps the system prompt separate and rejects system-role
         # entries inside the messages array, so strip any that were carried in
         # the shared history.
-        msg_list = [m for m in msg_list if m.get("role") != "system"]
+        msg_list = _cache_marked([m for m in msg_list if m.get("role") != "system"])
 
         payload = {
             "model": self.model,
             "max_tokens": _DEFAULT_MAX_TOKENS,
-            "system": system_prompt,
+            "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
             "messages": msg_list,
         }
         client = anthropic.Anthropic(
@@ -525,7 +576,7 @@ class AnthropicLLMClient(BaseLLMClient):
             raise
         usage = getattr(message, "usage", None)
         _log_usage(self.name, usage.model_dump() if usage is not None else None)
-        return message.content[0].text
+        return _anthropic_text(self.name, message.model_dump())
 
     def generate_plan(
         self,
@@ -657,13 +708,15 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
 
     Anthropic accepts a consumer OAuth token only when the request looks like
     Claude Code's own traffic: `Authorization: Bearer` (not the `x-api-key`
-    the anthropic SDK sends), the `oauth-2025-04-20` beta header, and a system
-    prompt that identifies as Claude Code. That is why this is a raw requests
-    call instead of reusing AnthropicLLMClient's SDK path. The accepted-risk
-    decision it implements is recorded in the scripts/oauth.py docstring.
+    the anthropic SDK sends), the `oauth-2025-04-20` beta header, and a first
+    system block that is exactly the Claude Code identity string. That is why
+    this is a raw requests call instead of reusing AnthropicLLMClient's SDK
+    path. The accepted-risk decision it implements is recorded in the
+    scripts/oauth.py docstring.
     """
 
     name = "Claude Pro/Max (consumer)"
+    caches_user_prefix = True
     provider_key = "claude"
     _API_URL = "https://api.anthropic.com/v1/messages"
     _SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -683,9 +736,14 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
     ) -> str:
         token = self._credentials()["access_token"]
         # Anthropic rejects system-role entries inside `messages`.
-        msg_list = [
+        msg_list = _cache_marked([
             m for m in self._history(user_prompt, messages) if m.get("role") != "system"
-        ]
+        ])
+        # The OAuth token is accepted only when the first block is the bare identity string (anything appended → 429).
+        # Breakpoints: the system prompt, plus the user prompt's attempt-stable prefix (prompt_builder.CACHE_BREAK).
+        system = [{"type": "text", "text": self._SYSTEM_PREFIX}]
+        if system_prompt:  # Anthropic rejects empty text blocks
+            system.append({"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}})
         resp = _post_json(
             self.name, self._API_URL,
             headers={
@@ -697,7 +755,7 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
             json={
                 "model": self.model,
                 "max_tokens": _DEFAULT_MAX_TOKENS,
-                "system": f"{self._SYSTEM_PREFIX}\n\n{system_prompt}",
+                "system": system,
                 "messages": msg_list,
             },
             timeout=self.timeout,
@@ -708,7 +766,7 @@ class ClaudeConsumerClient(_ConsumerLLMBase):
             )
         data = resp.json()
         _log_usage(self.name, data.get("usage"))
-        return data["content"][0]["text"]
+        return _anthropic_text(self.name, data)
 
 
 class ChatGPTConsumerClient(_ConsumerLLMBase):
@@ -722,7 +780,9 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
     login, which is why a session stored before this tier existed must log in
     again), `store: false`, and `stream: true` — it only answers as an SSE
     stream, so the text is reassembled from `response.output_text.delta`
-    events here.
+    events here. `session-id` (the Codex backend's cache-affinity key) and
+    `prompt_cache_key` carry one UUID per client instance, so consecutive
+    requests and runs reuse the cached prompt prefix.
     """
 
     name = "ChatGPT Plus (consumer)"
@@ -733,6 +793,8 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
     def __init__(self) -> None:
         super().__init__()
         self.model: str = os.environ.get("NESTI_CHATGPT_MODEL", "gpt-6.1-sol")
+        # one cache affinity per process: runs follow each other within minutes, so they share the cached prompt prefix
+        self._session_id = str(uuid.uuid4())
 
     def _call(
         self,
@@ -779,6 +841,7 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
             "store": False,
             "stream": True,
             "include": [],
+            "prompt_cache_key": self._session_id,
         }
         headers = {
             "Content-Type": "application/json",
@@ -787,7 +850,7 @@ class ChatGPTConsumerClient(_ConsumerLLMBase):
             "chatgpt-account-id": account_id,
             "OpenAI-Beta": "responses=experimental",
             "originator": self._ORIGINATOR,
-            "session-id": str(uuid.uuid4()),
+            "session-id": self._session_id,
         }
         with _post_json(
             self.name, self._API_URL, headers=headers, json=payload, timeout=self.timeout, stream=True
@@ -1117,11 +1180,11 @@ class LLMClient:
         self._planners: list[BaseLLMClient] = [*consumers]
         if hermes.available:
             self._planners.append(hermes)
-        else:
-            logger.warning(
-                "Hermes-3 not enabled (HERMES3_LLM_URL / HERMES3_LLM_MODEL missing) "
-                "– excluded from planner chain."
-            )
+        # else:
+        #     logger.warning(
+        #         "Hermes-3 not enabled (HERMES3_LLM_URL / HERMES3_LLM_MODEL missing) "
+        #         "– excluded from planner chain."
+        #     )
         # Keep paid tiers even when disabled: available is re-checked before
         # every call, so a flag change cannot strand a constructed client.
         self._planners.extend((openrouter, deepseek, claude))
@@ -1130,11 +1193,11 @@ class LLMClient:
         self._coders: list[BaseLLMClient] = [*consumers]
         if qwen.available:
             self._coders.append(qwen)
-        else:
-            logger.warning(
-                "Qwen3 not enabled (LOCAL_LLM_URL / LOCAL_LLM_MODEL missing) "
-                "– excluded from coder chain."
-            )
+        # else:
+        #    logger.warning(
+        #         "Qwen3 not enabled (LOCAL_LLM_URL / LOCAL_LLM_MODEL missing) "
+        #         "– excluded from coder chain."
+        #     )
         self._coders.extend((openrouter, deepseek, claude))
 
         # Minimum coder tier; raised by escalate_coder() after test failures
@@ -1184,7 +1247,10 @@ class LLMClient:
                 logger.debug("Planner %s skipped – unavailable.", provider.name)
                 continue
             try:
-                result = provider.generate_plan(system_prompt, user_prompt, messages)
+                user, history = (user_prompt, messages) if provider.caches_user_prefix \
+                    else _without_cache_break(user_prompt, messages)
+                with stats.llm_request("plan", provider):
+                    result = provider.generate_plan(system_prompt, user, history)
                 self._last_planner = provider
                 if idx > 0:
                     logger.info(
@@ -1231,7 +1297,10 @@ class LLMClient:
         for idx in self._coder_order():
             provider = self._coders[idx]
             try:
-                result = provider.generate_code(system_prompt, user_prompt, messages)
+                user, history = (user_prompt, messages) if provider.caches_user_prefix \
+                    else _without_cache_break(user_prompt, messages)
+                with stats.llm_request("code", provider):
+                    result = provider.generate_code(system_prompt, user, history)
                 self._last_coder = provider
                 if idx > self._min_coder_tier:
                     logger.info(

@@ -26,7 +26,7 @@ def detect_stack(
     workspace_path: str,
     written_files: list[str] | None = None,
     backend_dir: str = ".",
-    frontend_dir: str = ".",
+    frontend_dir: str = "",
 ) -> dict:
     """
     Detect which test layers apply to the code at workspace_path.
@@ -40,8 +40,8 @@ def detect_stack(
     written_files yields the conservative answer: every layer the repository
     supports runs.
     Call this first to decide which of the run tools below to use.
-    backend_dir/frontend_dir name a separated layout's folders ("." = root,
-    frontend_dir "" = no SPA).
+    backend_dir '.' = repository root; frontend_dir '' = no SPA, else e.g.
+    '.frontend' or 'frontend'.
     """
     return tool_detect_stack(workspace_path, written_files, backend_dir, frontend_dir)
 
@@ -69,15 +69,11 @@ def docker_run_vitest(workspace_path: str) -> dict:
 @app.tool()
 def docker_run_playwright(workspace_path: str) -> dict:
     """
-    Run Playwright E2E tests against workspace_path in a headless Chromium
-    sandbox. Installs dependencies; for a Laravel app runs the migrations,
-    DatabaseSeeder and the fixtures declared in e2e/nesti-fixtures.json; builds
-    the app; and serves it via the webServer entry in playwright.config.js.
-    Returns passed: bool, output: str and fixture_request: dict | None.
-    fixture_request ({endpoint, model, seeder, table}) is set only when the
-    sandbox verified that a declared fixture's seeder class and file are both
-    absent and stopped before the browser started; any other failure is an
-    ordinary test failure with fixture_request None.
+    Run Playwright E2E tests against the SPA at workspace_path in a headless
+    Chromium sandbox. Installs dependencies, builds the SPA and serves it via
+    the webServer entry in playwright.config.js; the Laravel API does not run,
+    so specs stub every request.
+    Returns passed: bool and output: str.
     """
     return tool_playwright_run_tests(workspace_path)
 
@@ -98,14 +94,16 @@ def openapi_export(workspace_path: str) -> dict:
 @app.tool()
 def laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
     """
-    Ensure repo_path is a Laravel 13 + Scramble + PrimeVue application.
+    Ensure repo_path is a Laravel 13 API with Scramble.
     Three outcomes: a greenfield directory (no artisan, no composer.json) is
-    scaffolded (mode "scaffold"); an existing Laravel app (artisan present) is
-    topped up with only the missing configs and Scramble wiring (mode "top-up");
-    a non-Laravel PHP project (composer.json without artisan) is refused with
-    success=False rather than scaffolded over.
+    scaffolded as an API-only Laravel app — Sanctum, Scramble and
+    spatie/laravel-permission, no Vue (mode "scaffold"); an existing Laravel
+    app (artisan present) is topped up with only the missing configs and
+    Scramble wiring (mode "top-up"); a non-Laravel PHP project (composer.json
+    without artisan) is refused with success=False rather than scaffolded over.
     Returns created: bool, mode: str, reason: str, and output: str.
     spa_path (separated layout, repo_path = the Laravel API folder) tops up
     that Vue SPA folder with the Vitest/Playwright configs and package.json keys.
+    The SPA starter kit is not exposed over MCP.
     """
     return tool_laravel_bootstrap(repo_path, spa_path)

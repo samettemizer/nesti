@@ -1,5 +1,7 @@
 anthropic>=0.25.0
 requests>=2.31.0
+# Exclude compromised emSign trust roots (GHSA-6q48-6c7w-9gw2).
+certifi>=2026.10.19
 python-dotenv>=1.0.0
 docker>=7.0.0
 gitpython>=3.1.40
@@ -10,7 +12,7 @@ langchain-core>=0.3.0
 # Pinned below 2.0: the MCP SDK renamed FastMCP → MCPServer in 2.x and changed
 # the decorator API. mcp_server/server.py builds on FastMCP, and its import
 # order plus the __main__ delegation guard are load-bearing invariants, so the boring fix is to stay on the 1.x line.
-mcp>=1.0.0,<2
+mcp>=1.30,<2
 # vector memory. The Qdrant client and the nesti-qdrant image
 # (docker-compose.yml, qdrant/qdrant:v1.19.1) are one coupled setting: the
 # client warns on every connection when its minor version drifts more than one
@@ -21,3 +23,6 @@ qdrant-client>=1.19,<1.20
 # baked into both images at build time (see Dockerfile).
 fastembed>=0.5,<1
 plotly>=7.1,<8
+# PHP skeletons for the coding prompt (code_skeleton.py). Pinned exactly: the
+# Dockerfile bakes the grammar into a cache path keyed by this version.
+tree-sitter-language-pack==1.25.0

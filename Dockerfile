@@ -15,6 +15,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY requirements-reranker.txt .
 RUN pip install --no-cache-dir -r requirements-reranker.txt && pip check
 
+# Bake the PHP grammar for code skeletons (NESTI_TREE_SITTER_ENABLED); nothing downloads at run time.
+ENV TREE_SITTER_LANGUAGE_PACK_CACHE_DIR=/opt/tree-sitter
+RUN python -c "import tree_sitter_language_pack as t; t.download(['php']); assert 'php' in t.downloaded_languages()"
+
 # bake the ~65 MB ONNX embedding model into the image so the first
 # issue of a fresh deployment never stalls on a silent download in node_plan.
 ENV FASTEMBED_CACHE_PATH=/opt/fastembed

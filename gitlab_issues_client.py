@@ -5,11 +5,9 @@ Replaces the former Redmine intake. Responsibilities:
 - Fetch the oldest pending issue from the configured GitLab project.
 - Lock it so another worker cannot pick it up.
 - Close it on success and return it to the pending pool on failure.
-- Pause and resume an issue that waits on a backend fixture dependency.
-- Store the durable dependency record (a trusted issue note) that holds a
-  paused issue until its dependency MR merges.
-- Create issues: fixture-dependency children and the operator scripts
-  (``scripts/seed_live_issues.py``, ``scripts/preflight.py``) reuse it.
+- Pause and resume an issue (the domain question holds it with the pause label).
+- Create issues: the operator scripts (``scripts/seed_live_issues.py``,
+  ``scripts/preflight.py``) reuse it.
 
 Why GitLab Issues have no "in progress" state
 ─────────────────────────────────────────────
@@ -18,13 +16,15 @@ labels:
 
     <label>                    the opt-in marker a developer adds ("nesti")
     <label>::in-progress       the lock Nesti owns
-    <label>::pause             the hold while a dependency is outstanding
+    <label>::pause             the hold while Nesti waits on a human answer
 
-    pending      = opened, has <label>, has neither control label, and no
-                   active (or malformed) trusted dependency record
+    pending      = opened, has <label>, has neither control label
     in progress  = opened, has <label>::in-progress
-    paused       = opened, has <label>::pause or an active dependency record
+    paused       = opened, has <label>::pause
     done         = closed
+
+A pending issue whose latest trusted failed-run marker matches its current
+title, description and target-branch HEAD is skipped: nothing changed since.
 
 ``<label>`` comes from GITLAB_ISSUE_LABEL (default "nesti"), so Nesti never
 touches an issue a human opened for discussion: intake is opt-in.
@@ -32,31 +32,23 @@ touches an issue a human opened for discussion: intake is opt-in.
 Scoped labels (the ``::`` form) are mutually exclusive within their scope in
 GitLab, which is what makes the lock single-valued.
 
-The dependency record is the latest non-system note whose first line is
-``NESTI_FIXTURE_DEPENDENCIES_V1`` and whose author is the token's own user;
-foreign-author markers are ignored. A lost label update therefore never
-releases a held issue: the record alone keeps it out of the queue.
-
 Every mutation is verified by an independent read-back. The Redmine intake
 this replaces trusted the HTTP status and silently stranded issues when a
 workflow rule dropped the change; a lock or unlock that did not apply must be
 loud.
 """
 
+import hashlib
+import json
 import logging
 import os
+import re
 from urllib.parse import quote
 from collections.abc import Iterator
 
 import requests
 
-from e2e_fixtures import (
-    active_dependency,
-    format_dependency_note,
-    is_dependency_note,
-    parse_dependency_note,
-    validate_dependency_state,
-)
+import gitlab_project
 
 logger = logging.getLogger(__name__)
 
@@ -64,22 +56,30 @@ _DEFAULT_ISSUE_LABEL = "nesti"
 _IN_PROGRESS_SUFFIX = "::in-progress"
 _PAUSE_SUFFIX = "::pause"
 _REQUEST_TIMEOUT = 15
+_POLL_HEARTBEAT_VARIABLE = "NESTI_POLL_HEARTBEAT"
 _PER_PAGE = 100
 _MAX_PAGES = 1000
 _ISSUE_STATES = ("opened", "closed", "all")
+_FAILED_RUN_RE = re.compile(r"^<!-- NESTI_FAILED_RUN_V1 [0-9a-f]{64} -->$", re.M)
 
 
 def _normalise_text(text: str | None) -> str:
     return (text or "").replace("\r\n", "\n").strip()
 
 
+def failed_run_marker(subject: str, description: str, head_sha: str) -> str:
+    """The hidden note line fingerprinting a failed run's title, description and target HEAD."""
+    digest = hashlib.sha256(json.dumps([subject, description, head_sha]).encode()).hexdigest()
+    return f"<!-- NESTI_FAILED_RUN_V1 {digest} -->"
+
+
 class GitLabIssuesClient:
-    """Issue intake, lifecycle and dependency records against the GitLab API."""
+    """Issue intake and lifecycle against the GitLab API."""
 
     def __init__(self) -> None:
         self.base_url = os.environ["GITLAB_URL"].rstrip("/")
         self.token = os.environ["GITLAB_TOKEN"]
-        self.project_path = os.environ["GITLAB_PROJECT_PATH"]
+        self.project_path = gitlab_project.path()
         self.issue_label = (
             os.environ.get("GITLAB_ISSUE_LABEL", _DEFAULT_ISSUE_LABEL).strip()
             or _DEFAULT_ISSUE_LABEL
@@ -87,7 +87,6 @@ class GitLabIssuesClient:
         self.in_progress_label = f"{self.issue_label}{_IN_PROGRESS_SUFFIX}"
         self.pause_label = f"{self.issue_label}{_PAUSE_SUFFIX}"
         self._user_id: int | None = None
-        self._fixture_snapshots: dict[int, str | None] = {}
 
         self.session = requests.Session()
         self.session.headers.update(
@@ -206,19 +205,29 @@ class GitLabIssuesClient:
             return f"it carries {self.in_progress_label!r}"
         if self.pause_label in labels:
             return f"it carries {self.pause_label!r}"
-        return self._record_hold_reason(issue["iid"])
-
-    def _record_hold_reason(self, iid: int) -> str | None:
-        """Why the dependency record holds *iid*, or None when it does not."""
-        try:
-            state = self.get_fixture_state(iid)
-        except ValueError as exc:
-            return f"its dependency record is malformed: {exc}"
-        except Exception as exc:  # pylint: disable=broad-except
-            return f"its dependency record could not be read: {exc}"
-        if active_dependency(state):
-            return "it waits on an unresolved fixture dependency"
         return None
+
+    def _target_head(self) -> str | None:
+        """The target branch's HEAD sha, or None when the branch does not exist (404)."""
+        branch = quote(gitlab_project.default_branch(), safe="")
+        response = self.session.get(
+            f"{self._project_api}/repository/branches/{branch}", timeout=_REQUEST_TIMEOUT
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()["commit"]["id"]
+
+    def _failed_run(self, iid: int) -> str | None:
+        """The latest trusted failed-run marker on *iid* (highest note id), or None."""
+        user_id = self.current_user_id()
+        latest: tuple[int, str] | None = None
+        for note in self._paginate(f"{self._project_api}/issues/{iid}/notes"):
+            if (not note.get("system") and (note.get("author") or {}).get("id") == user_id
+                    and (match := _FAILED_RUN_RE.search(note.get("body") or ""))
+                    and (latest is None or note.get("id", 0) > latest[0])):
+                latest = (note.get("id", 0), match.group(0))
+        return latest[1] if latest else None
 
     # ------------------------------------------------------------------
     # Public API
@@ -247,11 +256,13 @@ class GitLabIssuesClient:
         Return up to *limit* pending issues, oldest first.
 
         GitLab cannot express "has label A but none of B, C" in one query, so
-        the opt-in label is filtered server-side, control labels client-side,
-        and the dependency record per remaining candidate. Pages are followed
-        until enough issues are found, so a page of locked or paused issues
-        never starves eligible work. A metadata error excludes only that
-        issue; a failed issue-list call raises.
+        the opt-in label is filtered server-side and control labels client-side.
+        Pages are followed until enough issues are found, so a page of locked
+        or paused issues never starves eligible work. A metadata error excludes
+        only that issue; a failed issue-list or target-HEAD call raises. An
+        issue whose last failed run saw the same title, description and target
+        HEAD is skipped (see ``failed_run_marker``) and does not count toward
+        *limit*.
         """
         url = f"{self._project_api}/issues"
         query = {
@@ -261,6 +272,8 @@ class GitLabIssuesClient:
             "sort": "asc",
         }
         pending: list[dict] = []
+        head: str | None = None
+        head_read = False
         if limit <= 0:
             return pending
         for page in self._pages(url, query):
@@ -270,11 +283,24 @@ class GitLabIssuesClient:
                         or self.issue_label not in labels
                         or issue.get("state") != "opened"):
                     continue
-                reason = self._record_hold_reason(issue["iid"])
-                if reason:
-                    logger.info("Issue #%s is not pending: %s.", issue["iid"], reason)
+                try:
+                    marker = self._failed_run(issue["iid"])
+                except Exception as exc:  # pylint: disable=broad-except
+                    logger.info("Issue #%s is not pending: its notes could not be read: %s.",
+                                issue["iid"], exc)
                     continue
-                pending.append(self._normalise(issue))
+                normalised = self._normalise(issue)
+                if marker:
+                    if not head_read:
+                        head, head_read = self._target_head(), True
+                    if head is not None and marker == failed_run_marker(
+                            normalised["subject"], normalised["description"], head):
+                        logger.info(
+                            "Issue #%s is not pending: its last failed run saw the same "
+                            "title, description and target-branch HEAD.", issue["iid"],
+                        )
+                        continue
+                pending.append(normalised)
                 if len(pending) >= limit:
                     return pending
         return pending
@@ -379,20 +405,34 @@ class GitLabIssuesClient:
         """Non-system notes of issue *iid*, oldest first."""
         return [
             {"id": n.get("id"), "author": (n.get("author") or {}).get("username"),
+             "author_id": (n.get("author") or {}).get("id"),
              "created_at": n.get("created_at"), "body": n.get("body")}
             for n in self._paginate(f"{self._project_api}/issues/{iid}/notes",
                                     {"sort": "asc", "order_by": "created_at"})
             if not n.get("system")
         ]
 
+    def post_note(self, iid: int, body: str) -> int:
+        """Post one note and verify it by an independent GET; return its id. Raises RuntimeError."""
+        notes_url = f"{self._project_api}/issues/{iid}/notes"
+        response = self.session.post(notes_url, json={"body": body}, timeout=_REQUEST_TIMEOUT)
+        if not 200 <= response.status_code < 300:
+            raise RuntimeError(f"Note on issue #{iid} failed: HTTP {response.status_code}")
+        note_id = response.json().get("id")
+        if not isinstance(note_id, int) or isinstance(note_id, bool) or note_id <= 0:
+            raise RuntimeError(f"Note on issue #{iid} returned no id")
+        check = self.session.get(f"{notes_url}/{note_id}", timeout=_REQUEST_TIMEOUT)
+        check.raise_for_status()
+        if check.json().get("body") != body:
+            raise RuntimeError(f"Note {note_id} on issue #{iid} did not read back")
+        return note_id
+
     def reopen_issue(self, iid: int, note: str = "") -> bool:
         """
         Return the issue to the pending pool after a failed run.
 
         Only a still-open opted-in issue is unlocked; a human closure or
-        opt-out is never reversed. A pause or an active, malformed or
-        unreadable dependency record is refused, so a crash handler cannot
-        undo a dependency hold.
+        opt-out is never reversed. A pause is refused.
         """
         try:
             current = self._get_raw(iid)
@@ -406,10 +446,6 @@ class GitLabIssuesClient:
             logger.warning(
                 "Refusing to reopen issue #%s: it carries %r.", iid, self.pause_label
             )
-            return False
-        hold = self._record_hold_reason(iid)
-        if hold:
-            logger.warning("Refusing to reopen issue #%s: %s.", iid, hold)
             return False
 
         if note:
@@ -513,93 +549,6 @@ class GitLabIssuesClient:
             self._user_id = user_id
         return self._user_id
 
-    def get_fixture_state(self, iid: int) -> dict | None:
-        """
-        Return the latest trusted dependency record of issue *iid*, or None.
-
-        Trusted = non-system note by the token's user whose first line is the
-        record marker; the highest note id wins. A malformed latest trusted
-        record raises ValueError (fail closed); HTTP errors propagate.
-        """
-        user_id = self.current_user_id()
-        latest: dict | None = None
-        for note in self._paginate(f"{self._project_api}/issues/{iid}/notes"):
-            if note.get("system") or not is_dependency_note(note.get("body") or ""):
-                continue
-            if (note.get("author") or {}).get("id") != user_id:
-                logger.warning(
-                    "Ignoring dependency marker note %s on issue #%s by foreign "
-                    "author %r.",
-                    note.get("id"), iid, (note.get("author") or {}).get("username"),
-                )
-                continue
-            if latest is None or note.get("id", 0) > latest.get("id", 0):
-                latest = note
-        state = parse_dependency_note(latest["body"], parent_iid=iid) if latest is not None else None
-        self._fixture_snapshots[iid] = format_dependency_note(state) if state is not None else None
-        return state
-
-    def save_fixture_state(self, iid: int, state: dict) -> None:
-        """
-        Persist *state* as a new trusted record note when it changed.
-
-        The note is verified by an independent GET. An unknown POST outcome is
-        resolved by re-reading the latest record — never by a second POST.
-        Raises RuntimeError when the record cannot be confirmed.
-        """
-        intended = validate_dependency_state(state, parent_iid=iid)
-        body = format_dependency_note(intended)
-        observed = iid in self._fixture_snapshots
-        expected = self._fixture_snapshots.get(iid)
-        current = self.get_fixture_state(iid)
-        if current == intended:
-            return
-        actual = self._fixture_snapshots[iid]
-        if (observed and actual != expected) or (not observed and current is not None):
-            raise RuntimeError(
-                f"Dependency record on issue #{iid} changed since it was read; refusing a stale write"
-            )
-        notes_url = f"{self._project_api}/issues/{iid}/notes"
-        try:
-            response = self.session.post(
-                notes_url, json={"body": body}, timeout=_REQUEST_TIMEOUT
-            )
-            posted = 200 <= response.status_code < 300
-            note_id = response.json().get("id") if posted else None
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("Dependency record POST on issue #%s: %s", iid, exc)
-            posted, note_id = False, None
-
-        if not posted:
-            try:
-                current = self.get_fixture_state(iid)
-            except Exception as exc:  # pylint: disable=broad-except
-                raise RuntimeError(
-                    f"Dependency record on issue #{iid} unconfirmed: {exc}"
-                ) from exc
-            if current != intended:
-                raise RuntimeError(
-                    f"Dependency record on issue #{iid} was not stored"
-                )
-            return
-
-        if type(note_id) is not int or note_id <= 0:
-            raise RuntimeError(f"Dependency record POST on issue #{iid} returned no id")
-        check = self.session.get(f"{notes_url}/{note_id}", timeout=_REQUEST_TIMEOUT)
-        check.raise_for_status()
-        note = check.json()
-        stored_body = note.get("body")
-        if (note.get("system")
-                or (note.get("author") or {}).get("id") != self.current_user_id()
-                or stored_body != body
-                or parse_dependency_note(stored_body, parent_iid=iid) != intended):
-            raise RuntimeError(
-                f"Dependency record note {note_id} on issue #{iid} did not read back"
-            )
-        if self.get_fixture_state(iid) != intended:
-            raise RuntimeError(f"Dependency record on issue #{iid} was superseded during its write")
-        logger.info("Dependency record saved on issue #%s (note %s).", iid, note_id)
-
     def create_issue(
         self, title: str, description: str, labels: list[str] | None = None
     ) -> dict:
@@ -634,16 +583,24 @@ class GitLabIssuesClient:
         logger.info("Created issue #%s: %s", iid, title)
         return issue
 
-    def get_related_merge_requests(self, iid: int) -> list[dict]:
-        """Every merge request GitLab relates to issue *iid* (raw dicts)."""
-        return self._paginate(
-            f"{self._project_api}/issues/{iid}/related_merge_requests"
-        )
+    def swap_poll_heartbeat(self, value: str) -> str | None:
+        """
+        Write *value* to the project's poll-heartbeat CI/CD variable; return the previous value.
 
-    def get_merge_request(self, iid: int) -> dict:
-        """One project-scoped merge request by iid (raw dict)."""
-        response = self.session.get(
-            f"{self._project_api}/merge_requests/{iid}", timeout=_REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        return response.json()
+        Needs Maintainer. Every orchestrator polling the project writes here, so a
+        foreign value reveals a second poller even on another machine.
+        """
+        url = f"{self._project_api}/variables/{_POLL_HEARTBEAT_VARIABLE}"
+        current = self.session.get(url, timeout=_REQUEST_TIMEOUT)
+        if current.status_code == 404:
+            self.session.post(
+                f"{self._project_api}/variables",
+                json={"key": _POLL_HEARTBEAT_VARIABLE, "value": value,
+                      "protected": False, "masked": False},
+                timeout=_REQUEST_TIMEOUT,
+            ).raise_for_status()
+            return None
+        current.raise_for_status()
+        previous = current.json().get("value")
+        self.session.put(url, json={"value": value}, timeout=_REQUEST_TIMEOUT).raise_for_status()
+        return previous

@@ -3,7 +3,7 @@ task_engine.py – thin wrapper around the LangGraph pipeline.
 
 All flow control now lives in graph/builder.py:
 
-    setup → bootstrap → load_skills → plan → code → detect_stack ⇄ phpunit /
+    setup → detect_domain → bootstrap → load_skills → plan → code → detect_stack ⇄ phpunit /
                                               ↑                    openapi /
                                               │                    vitest /
                                               │                    playwright
@@ -21,38 +21,82 @@ frontend-only change never runs PHPUnit, and a change that did not touch the
 API surface never pays for a Scramble export.
 
 TaskEngine only:
-  1. Reconciles fixture dependencies (graph.tools): paused issues whose
-     backend dependency MR has merged are resumed BEFORE pending selection,
-     even when the queue would otherwise be empty.
-  2. Polls GitLab Issues for the next pending issue (via graph.tools – no
+  1. Polls GitLab Issues for the next pending issue (via graph.tools – no
      direct GitLabIssuesClient / GitLabClient / DockerRunner imports here).
-  3. Seeds the initial IssueState and invokes the compiled graph.
-  4. Acts as the crash net: if the graph itself raises, the issue is
-     reopened and a Telegram alert is sent (a paused or dependency-held issue
-     refuses that reopen, so a crash never undoes a hold).
+  2. Seeds the initial IssueState and invokes the compiled graph.
+  3. Acts as the crash net: if the graph itself raises, the issue is
+     reopened and a Telegram alert is sent (a paused issue refuses that
+     reopen, so a crash never undoes a hold).
+  4. In loop mode, swaps the project's poll heartbeat (a GitLab CI/CD
+     variable) first and alerts when another instance polls the same project.
 
-main.py is unchanged: it still constructs TaskEngine() and calls run_once().
+main.py constructs TaskEngine(poll_interval=…) and calls run_once().
 """
 
+import html
+import json
 import logging
 import os
+import secrets
+import socket
+import time
 
 from graph.builder import graph
 from graph.state import IssueState
 from graph.tools import (
     tool_issue_list_pending,
-    tool_issue_reconcile_dependencies,
     tool_issue_set_status,
+    tool_issue_reconcile_domain_questions,
+    tool_issue_swap_poll_heartbeat,
 )
+import gitlab_project
+import stats
 from telegram_notifier import notify as telegram_notify
 
 logger = logging.getLogger(__name__)
 
+# One foreign heartbeat can be a restarted predecessor; two in a row are a live second poller.
+_FOREIGN_POLLS_TO_WARN = 2
+
 
 class TaskEngine:
-    def __init__(self) -> None:
-        # All clients live behind graph/tools.py now; nothing to construct.
-        pass
+    def __init__(self, poll_interval: int = 0) -> None:
+        self.poll_interval = poll_interval  # 0 = single run, no duplicate-poller check
+        self._instance = f"{socket.gethostname()}-{secrets.token_hex(3)}"
+        self._foreign_polls = 0
+        self._heartbeat_failing = False
+
+    def _check_other_pollers(self) -> None:
+        """Swap the project's poll heartbeat; warn once per streak of another live poller."""
+        now = time.time()
+        swapped = tool_issue_swap_poll_heartbeat(json.dumps({"instance": self._instance, "t": now}))
+        if not swapped["success"]:
+            if not self._heartbeat_failing:
+                logger.warning(
+                    "Poll heartbeat unavailable; a second Nesti on this project cannot be "
+                    "detected: %s", swapped["error"],
+                )
+            self._heartbeat_failing = True
+            return
+        self._heartbeat_failing = False
+        try:
+            previous = json.loads(swapped["result"]["previous"] or "null")
+            other, seen = previous["instance"], float(previous["t"])
+        except (TypeError, ValueError, KeyError):
+            other, seen = self._instance, 0.0
+        self._foreign_polls = (
+            self._foreign_polls + 1
+            if other != self._instance and now - seen < self.poll_interval
+            else 0
+        )
+        if self._foreign_polls == _FOREIGN_POLLS_TO_WARN:
+            message = (
+                f"Multiple Nesti instances are running for the same project "
+                f"{gitlab_project.identity()}: this instance {self._instance}, "
+                f"other instance {other}."
+            )
+            logger.warning(message)
+            telegram_notify(f"⚠️ {html.escape(message)}")
 
     def run_once(self) -> bool:
         """
@@ -60,20 +104,15 @@ class TaskEngine:
 
         Returns True if a Merge Request was successfully opened, False otherwise.
         """
-        # ── 1. Reconcile fixture dependencies ─────────────────────────────
-        # Before selection on purpose: a parent released here is eligible in
-        # this very poll, and an unreadable issue list aborts the poll rather
-        # than selecting work against an unknown dependency state.
-        reconciled = tool_issue_reconcile_dependencies()
-        if not reconciled["success"]:
-            logger.error("Fixture dependency reconciliation failed: %s", reconciled["error"])
-            return False
-        summary = reconciled["result"]
-        if summary["resumed"] or summary["waiting"] or summary["errors"]:
-            logger.info(
-                "Fixture dependencies: resumed %s, waiting %s, errors %s",
-                summary["resumed"], summary["waiting"], summary["errors"],
-            )
+        if self.poll_interval:
+            self._check_other_pollers()
+        questions = tool_issue_reconcile_domain_questions()
+        if not questions["success"]:
+            logger.error("Domain question reconciliation failed: %s", questions["error"])
+        elif any(questions["result"].values()):
+            r = questions["result"]
+            logger.info("Domain questions: resumed %s, asked again %s, waiting %s, errors %s",
+                        r["resumed"], r["asked"], r["waiting"], r["errors"])
 
         # ── 2. Fetch next pending issue ───────────────────────────────────
         listing = tool_issue_list_pending()
@@ -103,8 +142,11 @@ class TaskEngine:
             "scope":          "fullstack",
             "code_response":  "",
             "repo_path":      "",
+            "base_sha":       "",
             "branch_name":    "",
             "workspace":      "",
+            "domain":         None,
+            "app_facts":      "",
             "messages":       [],
             "attempt":        0,
             "max_attempts":   max_attempts,
@@ -116,6 +158,7 @@ class TaskEngine:
             "run_frontend":   False,
             "is_laravel":        False,
             "bootstrapped":      False,
+            "bootstrap_files":   [],
             "has_api_routes":    False,
             "run_openapi":       False,
             "test_output":    "",
@@ -123,30 +166,31 @@ class TaskEngine:
             "openapi_passed":    False,
             "openapi_output":    "",
             "openapi_paths":     [],
+            "openapi_baseline_routes": None,
             "vitest_passed":     False,
             "vitest_output":     "",
             "playwright_passed": False,
             "playwright_output": "",
-            "fixture_request":   None,
-            "dependency_status": "",
             "retrieved_chunks":  0,
             "past_solutions":    0,
             "recalled_failures": 0,
+            "run_id":            secrets.token_hex(6),
             "mr_url":         "",
             "failure_reason": "",
             "error":          "",
         }
 
         # ── 4. Run the graph ──────────────────────────────────────────────
+        stats.begin(issue_id, subject)
         try:
-            # A fullstack retry cycle traverses up to 8 nodes (on_layer_failure →
+            # A fullstack retry cycle traverses up to 7 nodes (on_layer_failure →
             # code → detect_stack → phpunit_test → openapi_test → vitest_test →
-            # playwright_test → pause_dependency), and setup → bootstrap →
-            # load_skills → plan adds a fixed prologue; size the recursion limit
+            # playwright_test), and setup → detect_domain →
+            # bootstrap → load_skills → plan adds a fixed prologue; size the recursion limit
             # so large MAX_CODE_RETRIES values never trip LangGraph's default of 25.
             final_state = graph.invoke(
                 initial_state,
-                config={"recursion_limit": max(25, 16 + 9 * max_attempts)},
+                config={"recursion_limit": max(25, 17 + 9 * max_attempts)},
             )
             if final_state.get("mr_url"):
                 logger.info("Issue #%s done – MR: %s", issue_id, final_state["mr_url"])
@@ -165,3 +209,5 @@ class TaskEngine:
             )
             tool_issue_set_status(issue_id, "new", note=f"AI Developer crashed: {exc}")
             return False
+        finally:
+            stats.end()

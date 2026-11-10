@@ -29,32 +29,39 @@ Notes
   spec) consumes them by attribute.  When these tools are exposed over MCP,
   serialise with ``dataclasses.asdict`` at the transport boundary.
 
-• tool_laravel_bootstrap is the only tool that *writes* into the repository
-  besides DockerRunner.write_files.  It applies the templates shipped in
-  ``templates/laravel/`` and is the reason a greenfield GitLab repository can
-  become a Laravel 13 + PrimeVue application inside a single run.
+• tool_laravel_bootstrap and tool_starter_kit are the only tools that *write*
+  into the repository besides DockerRunner.write_files.  They apply the
+  templates shipped in ``templates/laravel/`` and ``templates/starter/``: a
+  greenfield GitLab repository becomes a Laravel 13 API in ``webservice/``, and
+  a SPA-less Laravel API gains a Sakai PrimeVue SPA, inside a single run.
 """
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import git
 
-from docker_runner import DockerRunner
+from docker_runner import _PG_IDENTIFIER, APP_FACTS_MARK, DockerRunner, _pgsql_settings
 from frontend_runner import FrontendRunner
 from gitlab_client import GitLabClient
 from gitlab_issues_client import GitLabIssuesClient
-from issue_dependencies import FixtureDependencies
+import gitlab_project
 from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
+import issue_domain
+from layer_output import condense
 import project_layout
 from skill_catalog import catalog_status, select_skills
 from skill_loader import load_skills
+import stats
+import starter_kit
 from vector_store import get_document_memory
 
 logger = logging.getLogger(__name__)
@@ -63,10 +70,9 @@ _ISSUE_LIST_LIMIT = 25
 _REQUEST_TIMEOUT = 15  # seconds, matches the clients' own timeouts
 
 # Directories never treated as project source during stack detection.
-# ``node_modules`` is the load-bearing entry: the Vitest sandbox mounts the
-# workspace read-write, so from the second attempt onward the tree contains
-# installed dependencies — and Vue component libraries ship thousands of .vue
-# files.  Without pruning, every retry would report has_vue=True and the walk
+# ``node_modules`` is the load-bearing entry: MCP callers may pass host projects
+# with installed dependencies — and Vue component libraries ship thousands of .vue
+# files.  Without pruning, every scan would report has_vue=True and the walk
 # would crawl the whole dependency tree.
 _STACK_SCAN_PRUNE = frozenset({
     ".git", "node_modules", "vendor", "dist", "build", ".next", "out",
@@ -82,31 +88,13 @@ _PHP_PROJECT_FILES = ("composer.json", "composer.lock")
 _LARAVEL_MARKER = "artisan"
 _API_ROUTES_FILE = "routes/api.php"
 
-# A written path under one of these makes the OpenAPI layer applicable.  A
-# pure .vue or migration change must not pay for a Scramble export.
-_API_TOUCH_PREFIXES = (
-    "app/Http/Controllers/",
-    "app/Http/Resources/",
-    "app/Http/Requests/",
+# A written path matching this makes the OpenAPI layer applicable.  A pure
+# .vue or migration change must not pay for a Scramble export.  A route file
+# under routes/<dir>/ counts (api.php loads such files; a web subdir only
+# costs one export), and so do the Http layers inside a domain.
+_API_TOUCH_RE = re.compile(
+    r"^(?:routes/api\.php$|routes/.+/[^/]+\.php$|app/(?:[^/]+/)*Http/(?:Controllers|Resources|Requests)/)"
 )
-
-# Written paths that change what the browser loads: the Vitest and Playwright
-# layers apply to them (in a repository that has Vue).  A pure PHP change in a
-# repository that merely contains .vue files must not pay for two Node
-# containers, and a pure .vue change cannot alter what PHPUnit executes.
-_FRONTEND_SUFFIXES = (
-    ".vue", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx",
-    ".css", ".scss", ".sass", ".less", ".html", ".svg",
-)
-_FRONTEND_PREFIXES = ("resources/js/", "resources/css/", "e2e/")
-_FRONTEND_FILES = frozenset({
-    "package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
-})
-# Blade views and web routes are PHP that serves pages: they count for both sides.
-_SHARED_SUFFIXES = (".blade.php",)
-_SHARED_FILES = frozenset({"routes/web.php"})
-# Besides .php sources, what PHPUnit's run depends on.
-_BACKEND_FILES = frozenset({"composer.json", "composer.lock", "artisan", "phpunit.xml", ".env.example"})
 
 # Written by the openapi recipe; storage/app is git-ignored by Laravel, so the
 # route dump never lands in the Merge Request.
@@ -117,35 +105,27 @@ _IMPLICIT_METHODS = frozenset({"HEAD", "OPTIONS"})
 
 # Bootstrap templates shipped with Nesti, keyed by their repo-relative
 # destination.  Scaffold mode writes all of them over the skeleton Nesti just
-# created; top-up mode writes only _TOPUP_TEMPLATES, and only when absent.
+# created; top-up mode writes only the OpenAPI test, and only when absent.
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "laravel"
 _SPA_TEMPLATES_DIR = _TEMPLATES_DIR.parent / "spa"
 
 _SCAFFOLD_TEMPLATES = (
-    "vite.config.js",
-    "vitest.config.js",
-    "playwright.config.js",
-    "resources/js/app.js",
-    "resources/views/app.blade.php",
-    "routes/web.php",
     "routes/api.php",
-    # Overrides the skeleton's own TestCase: it disables Vite so the PHP
-    # sandbox, which never runs `npm run build`, can render Blade views.
-    "tests/TestCase.php",
     "tests/Feature/OpenApiDocumentationTest.php",
+    # API-only welcome page: no @vite, so the skeleton's GET / test passes without a build.
+    "resources/views/welcome.blade.php",
+    "database/seeders/DatabaseSeeder.php",
 )
 
-_TOPUP_TEMPLATES = (
-    "vitest.config.js",
-    "playwright.config.js",
-    "tests/Feature/OpenApiDocumentationTest.php",
-)
+_SPA_TOPUP_TEMPLATES = ("vitest.config.js", "vitest.setup.js", "playwright.config.js")
+# sha256 of SPA vitest.config.js versions Nesti shipped earlier; an unmodified copy is upgraded in place.
+_SUPERSEDED_SPA_VITEST_CONFIGS = frozenset({"f4c1fb28348a6682d655e8ed89421e76fd55c50624ae735b49625fc9e1e29f54"})
 
 _PACKAGE_DEPENDENCIES = {
     "vue": "^3.5.0",
     "primevue": "^5.0.0",
     # @primevue/themes is deprecated; @primeuix/themes is the PrimeVue 5 home
-    # of the Aura preset referenced by resources/js/app.js.
+    # of the Aura preset an SPA's src/main.* registers.
     "@primeuix/themes": "^3.0.0",
     "primeicons": "^8.0.0",
 }
@@ -211,9 +191,8 @@ def tool_issue_list_pending() -> dict:
     List pending issues for the configured project, oldest first.
     result: list of issue dicts (possibly empty).
 
-    Pending means: open, carrying the opt-in GITLAB_ISSUE_LABEL, carrying
-    neither the ``<label>::in-progress`` lock nor the ``<label>::pause`` hold,
-    and not held by an unresolved (or malformed) fixture-dependency record.
+    Pending means: open, carrying the opt-in GITLAB_ISSUE_LABEL and carrying
+    neither the ``<label>::in-progress`` lock nor the ``<label>::pause`` hold.
     """
     try:
         return _ok(GitLabIssuesClient().list_pending(limit=_ISSUE_LIST_LIMIT))
@@ -234,8 +213,7 @@ def tool_issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
       closed      → remove <label>::in-progress, close, comment
       new         → remove <label>::in-progress, reopen, comment (back to the
                     pending pool, which is what makes a failed issue retryable);
-                    refused for a paused issue or one an unresolved dependency
-                    record holds, so a crash handler cannot undo the hold
+                    refused for a paused issue, so a crash handler cannot undo the hold
       paused      → add    <label>::pause, remove <label>::in-progress (manual
                     hold; refused for a closed or opted-out issue)
     """
@@ -265,6 +243,13 @@ def tool_project_layout() -> dict:
         record = project_layout.load_layout()
         if record is None:
             return _err("layout.json not found: run nesti /arch on the orchestrator")
+        identity = gitlab_project.identity()
+        if record.get("gitlab_project") != identity:
+            return _err(
+                f"layout.json describes {record.get('gitlab_project') or 'an unrecorded project'}, "
+                f"not {identity}: only the orchestrator configured for {identity} records its layout "
+                "(nesti /arch)."
+            )
         return _ok(record)
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_project_layout() failed: %s", exc)
@@ -331,7 +316,7 @@ def tool_issue_handoff(issue_id: int, report: str) -> dict:
 
 
 def tool_issue_notes(issue_id: int) -> dict:
-    """Non-system notes of an issue, oldest first: [{"id","author","created_at","body"}]."""
+    """Non-system notes of an issue, oldest first: [{"id","author","author_id","created_at","body"}]."""
     try:
         return _ok(GitLabIssuesClient().list_notes(issue_id))
     except Exception as exc:  # pylint: disable=broad-except
@@ -339,45 +324,56 @@ def tool_issue_notes(issue_id: int) -> dict:
         return _err(exc)
 
 
-def _fixture_dependencies() -> FixtureDependencies:
-    """The dependency manager over the configured project and MR target branch."""
-    return FixtureDependencies(GitLabIssuesClient(), GitLabClient().default_branch)
-
-
-def tool_issue_pause_for_fixture(
-    issue_id: int, repo_path: str, requirement: dict, written_files: list[str]
-) -> dict:
+def tool_issue_domain_answer(issue_id: int, options: list[str]) -> dict:
     """
-    Pause *issue_id* on a verified missing-seeder fixture and open its backend
-    dependency issue once.  Graph-internal: deliberately not exposed over MCP,
-    where a second process would become a second dependency writer and could
-    hand in caller-invented evidence.
-
-    result: {"status": "paused", "child_iid": int | None, "reason": str}
-          | {"status": "ineligible" | "error", "reason": str}
+    The domains a human named in reply to Nesti's latest domain question on
+    *issue_id*.  Graph-internal.  result: list[str], [] = no answer.
     """
     try:
-        return _ok(_fixture_dependencies().pause_for_fixture(
-            issue_id, repo_path, requirement, written_files
-        ))
+        client = GitLabIssuesClient()
+        return _ok(issue_domain.answer(client.list_notes(issue_id), client.current_user_id(), options))
     except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("tool_issue_pause_for_fixture(%s) failed: %s", issue_id, exc)
+        logger.warning("tool_issue_domain_answer(%s) failed: %s", issue_id, exc)
         return _err(exc)
 
 
-def tool_issue_reconcile_dependencies() -> dict:
+def tool_issue_ask_domain(issue_id: int, options: list[str]) -> dict:
     """
-    Advance every open opted-in issue's fixture dependency record: link or
-    create children, observe merged MRs, resume released parents.  Runs before
-    every pending-issue selection; graph-internal like the pause tool.
-
-    result: {"resumed": [iid], "waiting": [iid], "errors": [{"issue_id", "error"}]}
-    success=False only when the issues could not be listed at all.
+    Post the domain question on *issue_id* and pause it, both verified.
+    Graph-internal.  result: {"issue_id": int, "options": list[str]}.
     """
     try:
-        return _ok(_fixture_dependencies().reconcile())
+        issue_domain.ask(GitLabIssuesClient(), issue_id, options)
+        return _ok({"issue_id": issue_id, "options": options})
     except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("tool_issue_reconcile_dependencies() failed: %s", exc)
+        logger.warning("tool_issue_ask_domain(%s) failed: %s", issue_id, exc)
+        return _err(exc)
+
+
+def tool_issue_reconcile_domain_questions() -> dict:
+    """
+    Resume answered domain questions and re-ask unmatched replies.  Graph-internal.
+
+    result: {"resumed": [iid], "asked": [iid], "waiting": [iid], "errors": [{"issue_id", "error"}]}
+    success=False only when the issues or the token user could not be read.
+    """
+    try:
+        return _ok(issue_domain.reconcile(GitLabIssuesClient()))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_reconcile_domain_questions() failed: %s", exc)
+        return _err(exc)
+
+
+def tool_issue_swap_poll_heartbeat(value: str) -> dict:
+    """
+    Write this poller's heartbeat to the project and return the previous one.  Graph-internal.
+
+    result: {"previous": str | None}
+    """
+    try:
+        return _ok({"previous": GitLabIssuesClient().swap_poll_heartbeat(value)})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_issue_swap_poll_heartbeat() failed: %s", exc)
         return _err(exc)
 
 
@@ -386,10 +382,10 @@ def tool_issue_reconcile_dependencies() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tool_gitlab_clone(target_path: str) -> dict:
-    """Clone the configured repository into target_path.  result: {"repo_path": str}."""
+    """Clone the configured repository into target_path.  result: {"repo_path": str, "head_sha": str}."""
     try:
-        GitLabClient().clone(target_path)
-        return _ok({"repo_path": target_path})
+        repo = GitLabClient().clone(target_path)
+        return _ok({"repo_path": target_path, "head_sha": repo.head.commit.hexsha})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_gitlab_clone(%s) failed: %s", target_path, exc)
         return _err(exc)
@@ -502,34 +498,9 @@ def _touches_api(written_files: "list[str] | None") -> bool:
         return True
     for raw in written_files:
         path = raw.replace("\\", "/").lstrip("./")
-        if path == _API_ROUTES_FILE or path.startswith(_API_TOUCH_PREFIXES):
+        if _API_TOUCH_RE.match(path):
             return True
     return False
-
-
-def _change_sides(written_files: "list[str] | None") -> tuple[bool, bool]:
-    """
-    ``(touches_backend, touches_frontend)`` for the paths the last attempt wrote.
-
-    ``None`` means "caller does not know" and touches both — the conservative
-    answer, as in ``_touches_api``.  A path on neither side (README.md,
-    .gitignore, openapi.json) touches neither: the PHPUnit fallback in
-    ``tool_detect_stack`` then keeps the change from reaching commit untested.
-    """
-    if written_files is None:
-        return True, True
-    backend = frontend = False
-    for raw in written_files:
-        path = raw.replace("\\", "/").removeprefix("./")
-        name = path.rsplit("/", 1)[-1]
-        if path.endswith(_SHARED_SUFFIXES) or path in _SHARED_FILES:
-            backend = frontend = True
-        elif path.endswith(".php") or name in _BACKEND_FILES:
-            backend = True
-        elif (path.endswith(_FRONTEND_SUFFIXES) or path.startswith(_FRONTEND_PREFIXES)
-              or name in _FRONTEND_FILES):
-            frontend = True
-    return backend, frontend
 
 
 def _under(files: "list[str] | None", folder: str) -> "list[str] | None":
@@ -543,59 +514,11 @@ def _under(files: "list[str] | None", folder: str) -> "list[str] | None":
     ]
 
 
-def _detect_separated(
-    workspace_path: str, written_files: "list[str] | None", backend_dir: str, frontend_dir: str
-) -> dict:
-    """``tool_detect_stack`` for a separated layout: each side gated on its own folder."""
-    root = Path(workspace_path)
-    backend = root / backend_dir
-    is_laravel = (backend / _LARAVEL_MARKER).is_file()
-    has_api_routes = (backend / _API_ROUTES_FILE).is_file()
-    backend_files = _under(written_files, backend_dir)
-    frontend_files = _under(written_files, frontend_dir) if frontend_dir else []
-    run_openapi = is_laravel and has_api_routes and _touches_api(backend_files)
-
-    override = os.environ.get("NESTI_STACK", "auto").strip().lower()
-    if override in _VALID_STACKS:
-        stack, source, vue_files = override, "override", []
-        has_vue = stack in ("vue", "fullstack")
-        has_php = stack in ("php", "fullstack")
-    elif override not in ("", "auto"):
-        return _err(
-            f"Invalid NESTI_STACK={override!r} – expected 'auto' or one of {_VALID_STACKS}."
-        )
-    else:
-        _, has_php = _scan_workspace(str(backend))
-        vue_files = [
-            f"{frontend_dir}/{f}" for f in _scan_workspace(str(root / frontend_dir))[0]
-        ] if frontend_dir else []
-        has_vue = bool(vue_files)
-        stack = ("fullstack" if has_php else "vue") if has_vue else ("php" if has_php else "unknown")
-        source = "auto"
-
-    touches_backend = written_files is None or bool(backend_files)
-    touches_frontend = bool(frontend_dir) and (written_files is None or bool(frontend_files))
-    run_frontend = has_vue and touches_frontend
-    run_phpunit = touches_backend or not run_frontend
-    return _ok({
-        "stack": stack,
-        "has_vue": has_vue,
-        "has_php": has_php,
-        "run_phpunit": run_phpunit,
-        "run_frontend": run_frontend,
-        "vue_files": vue_files,
-        "source": source,
-        "is_laravel": is_laravel,
-        "has_api_routes": has_api_routes,
-        "run_openapi": run_openapi,
-    })
-
-
 def tool_detect_stack(
     workspace_path: str,
     written_files: "list[str] | None" = None,
     backend_dir: str = ".",
-    frontend_dir: str = ".",
+    frontend_dir: str = "",
 ) -> dict:
     """
     Determine which test layers apply to the code in workspace_path.
@@ -607,28 +530,20 @@ def tool_detect_stack(
 
     ``stack`` is one of:
       "php"       – PHP sources or a Composer project, no .vue files
-      "vue"       – .vue files and no PHP whatsoever (frontend-only repository)
+      "vue"       – .vue files in the SPA and no PHP in the backend folder
       "fullstack" – both layers present
       "unknown"   – neither detected (empty or non-code change)
 
     ``stack`` describes the repository; the three ``run_*`` gates describe
     *this change* (*written_files*, the paths the last attempt wrote):
 
-    ``run_frontend`` gates Vitest → Playwright.  It needs Vue in the
-    repository and a change that touched the frontend (.vue, JavaScript, CSS,
-    Blade views, routes/web.php, package.json, e2e/); a "vue" stack always
-    runs it, since it is that stack's only gate.  A backend change in a
-    repository that merely contains .vue files no longer starts two Node
-    containers.
+    ``run_frontend`` gates Vitest → Playwright: the SPA has Vue and the change
+    touched the SPA folder.  A backend change in a repository that merely
+    contains .vue files never starts two Node containers.
 
-    ``run_phpunit`` gates the PHP layer.  It is False for the "vue" stack — a
-    frontend-only workspace has no composer.json and no phpunit binary, so
-    running the PHP layer there would fail on every attempt and drive the
-    issue to permanent failure — and for a change that touched only frontend
-    files while the frontend layers run: a .vue, CSS or JavaScript change
-    cannot alter what PHPUnit executes.  Whenever the frontend layers do not
-    run, PHPUnit does, so no change — "unknown" stack, README-only, a JS
-    change in a repository without Vue — ever reaches commit untested.
+    ``run_phpunit`` gates the PHP layer: the change touched the backend folder,
+    or the frontend layers do not run — so no change (README-only, a change in
+    a repository without Vue) ever reaches commit untested.
 
     ``run_openapi`` is the same kind of gate for the Scramble layer and needs
     all three of: a Laravel app (``artisan``), a registered API surface
@@ -639,8 +554,8 @@ def tool_detect_stack(
     Omitting *written_files* (MCP callers) yields the conservative answer for
     all three gates: every layer the repository supports runs.
 
-    *backend_dir*/*frontend_dir* name the layout's folders ("." = root,
-    frontend "" = no SPA); anything but "."/"." gates each side on its folder.
+    *backend_dir* is the Laravel folder ("." = root); *frontend_dir* the SPA
+    folder ("" = no SPA). A frontend inside the Laravel app is refused.
 
     Detection is automatic; set NESTI_STACK to php / vue / fullstack to pin the
     *stack* when a repository's layout misleads the scan.  NESTI_STACK never
@@ -648,41 +563,42 @@ def tool_detect_stack(
     be misled.
     """
     try:
-        if (backend_dir, frontend_dir) != (".", "."):
-            return _detect_separated(workspace_path, written_files, backend_dir, frontend_dir)
+        if frontend_dir in (".", "./"):
+            return _err("frontend_dir '.' (a frontend inside the Laravel app) is not supported")
         root = Path(workspace_path)
-        is_laravel = (root / _LARAVEL_MARKER).is_file()
-        has_api_routes = (root / _API_ROUTES_FILE).is_file()
-        run_openapi = is_laravel and has_api_routes and _touches_api(written_files)
+        backend = root / backend_dir
+        is_laravel = (backend / _LARAVEL_MARKER).is_file()
+        has_api_routes = (backend / _API_ROUTES_FILE).is_file()
+        backend_files = _under(written_files, backend_dir)
+        if backend_dir == "." and frontend_dir and backend_files is not None:
+            # A root backend's SPA (.frontend/) is the frontend side, never a backend change.
+            backend_files = [f for f in backend_files
+                             if not f.replace("\\", "/").removeprefix("./").startswith(frontend_dir + "/")]
+        frontend_files = _under(written_files, frontend_dir) if frontend_dir else []
+        run_openapi = is_laravel and has_api_routes and _touches_api(backend_files)
 
         override = os.environ.get("NESTI_STACK", "auto").strip().lower()
         if override in _VALID_STACKS:
-            stack = override
-            source = "override"
+            stack, source, vue_files = override, "override", []
             has_vue = stack in ("vue", "fullstack")
             has_php = stack in ("php", "fullstack")
-            vue_files = []
         elif override not in ("", "auto"):
             return _err(
                 f"Invalid NESTI_STACK={override!r} – expected 'auto' or one of {_VALID_STACKS}."
             )
         else:
-            vue_files, has_php = _scan_workspace(workspace_path)
+            _, has_php = _scan_workspace(str(backend))
+            vue_files = [
+                f"{frontend_dir}/{f}" for f in _scan_workspace(str(root / frontend_dir))[0]
+            ] if frontend_dir else []
             has_vue = bool(vue_files)
-            if has_vue and has_php:
-                stack = "fullstack"
-            elif has_vue:
-                stack = "vue"
-            elif has_php:
-                stack = "php"
-            else:
-                stack = "unknown"
+            stack = ("fullstack" if has_php else "vue") if has_vue else ("php" if has_php else "unknown")
             source = "auto"
 
-        touches_backend, touches_frontend = _change_sides(written_files)
-        run_frontend = stack == "vue" or (has_vue and touches_frontend)
-        run_phpunit = stack != "vue" and (touches_backend or not run_frontend)
-
+        touches_backend = written_files is None or bool(backend_files)
+        touches_frontend = bool(frontend_dir) and (written_files is None or bool(frontend_files))
+        run_frontend = has_vue and touches_frontend
+        run_phpunit = touches_backend or not run_frontend
         return _ok({
             "stack": stack,
             "has_vue": has_vue,
@@ -735,14 +651,13 @@ def _apply_templates(
     return applied
 
 
-def _merge_package_json(repo_path: str, overwrite: bool) -> list[str]:
+def _merge_package_json(repo_path: str) -> list[str]:
     """
     Merge Nesti's frontend dependencies into the repository's package.json.
 
-    Merging, never replacing: the Laravel skeleton's own ``vite``,
-    ``laravel-vite-plugin``, ``tailwindcss`` and ``@tailwindcss/vite`` entries
-    must survive, and a foreign repository's dependencies must not be touched.
-    With *overwrite* False (top-up mode) only absent keys are added.
+    Merging, never replacing: only absent keys are added, so the Laravel
+    skeleton's own ``vite``/``laravel-vite-plugin``/``tailwindcss`` entries and
+    a foreign repository's dependencies are never touched.
     """
     path = Path(repo_path, "package.json")
     data: dict = {}
@@ -757,20 +672,15 @@ def _merge_package_json(repo_path: str, overwrite: bool) -> list[str]:
         if match := re.search(r"\n( +)\"", raw):
             indent = len(match.group(1))
 
-    changed: list[str] = []
-    if overwrite:
-        if data.get("type") != "module":
-            data["type"] = "module"
-            changed.append("type=module")
-        data.setdefault("private", True)
-    elif data.get("type") != "module":
-        # Adding "type": "module" to a foreign repository would reinterpret
-        # every existing .js file, so top-up mode only warns.
+    if data.get("type") != "module":
+        # Adding "type": "module" to a foreign SPA would reinterpret every
+        # existing .js file, so the SPA top-up only warns.
         logger.warning(
             'package.json has no "type": "module" – the ESM vitest/playwright '
-            "configs added by top-up mode may fail to load."
+            "configs added by the SPA top-up may fail to load."
         )
 
+    changed: list[str] = []
     for section, wanted in (
         ("dependencies", _PACKAGE_DEPENDENCIES),
         ("devDependencies", _PACKAGE_DEV_DEPENDENCIES),
@@ -778,12 +688,9 @@ def _merge_package_json(repo_path: str, overwrite: bool) -> list[str]:
     ):
         bucket = data.setdefault(section, {})
         for key, value in wanted.items():
-            if key in bucket and not overwrite:
-                continue
-            if bucket.get(key) == value:
-                continue
-            bucket[key] = value
-            changed.append(f"{section}.{key}")
+            if key not in bucket:
+                bucket[key] = value
+                changed.append(f"{section}.{key}")
 
     path.write_text(json.dumps(data, indent=indent, ensure_ascii=False) + "\n", encoding="utf-8")
     return changed
@@ -802,34 +709,104 @@ def _append_gitignore(repo_path: str) -> list[str]:
     return missing
 
 
+def _env_value(text: str, key: str) -> str | None:
+    """The first uncommented ``KEY=`` value of a dotenv *text*, quotes and inline comment stripped."""
+    match = re.search(rf"^[ \t]*{key}[ \t]*=(.*)$", text, re.MULTILINE)
+    if not match:
+        return None
+    return re.sub(r"\s+#.*$", "", match.group(1)).strip().strip("'\"")
+
+
+def _set_phpunit_env(text: str, key: str, value: str) -> str:
+    """*text* with its uncommented ``<env name="key">`` set to *value*; added inside ``<php>`` when absent."""
+    comments = [m.span() for m in re.finditer(r"<!--.*?-->", text, re.DOTALL)]
+
+    def live(pattern: str, flags: int = 0) -> "re.Match | None":
+        return next((m for m in re.finditer(pattern, text, flags)
+                     if not any(start <= m.start() < end for start, end in comments)), None)
+
+    entry = live(rf'(<env\s+name="{key}"\s+value=")[^"]*"')
+    if entry:
+        return text[:entry.end(1)] + value + text[entry.end() - 1:]
+    line = f'<env name="{key}" value="{value}"/>'
+    closing = live(r"^([ \t]*)</php>", re.MULTILINE)
+    if closing:
+        return text[:closing.start()] + f"{closing.group(1)}    {line}\n" + text[closing.start():]
+    root = live(r"^([ \t]*)</phpunit>", re.MULTILINE)
+    if not root:
+        return text
+    indent = root.group(1)
+    block = f"{indent}    <php>\n{indent}        {line}\n{indent}    </php>\n"
+    return text[:root.start()] + block + text[root.start():]
+
+
+def _align_phpunit_database(app_root: Path) -> str:
+    """
+    Point phpunit.xml at a separate PostgreSQL database when the app runs on pgsql.
+
+    The driver is ``.env.example``'s DB_CONNECTION (else config/database.php's
+    default); mysql/mariadb/sqlite apps are left alone because the PHPUnit
+    sandbox forces sqlite for them.  A phpunit.xml already on pgsql is never
+    touched.  The database is ``<DB_DATABASE>_test`` (else ``testing``), served
+    by docker_runner's postgres sidecar.  Text edits only, formatting kept.
+    Returns the database name set, or "" when nothing changed.
+    """
+    env_file = app_root / ".env.example"
+    env = env_file.read_text(encoding="utf-8", errors="replace") if env_file.is_file() else ""
+    driver = _env_value(env, "DB_CONNECTION")
+    if driver is None:
+        config = app_root / "config" / "database.php"
+        found = re.search(r"env\(\s*['\"]DB_CONNECTION['\"]\s*,\s*['\"]([^'\"]+)['\"]",
+                          config.read_text(encoding="utf-8", errors="replace")) if config.is_file() else None
+        driver = found.group(1) if found else ""
+    if driver != "pgsql":
+        return ""
+    target = next((app_root / name for name in ("phpunit.xml", "phpunit.xml.dist")
+                   if (app_root / name).is_file()), None)
+    if target is None or _pgsql_settings(str(app_root)) is not None:
+        return ""
+    base = _env_value(env, "DB_DATABASE") or ""
+    database = f"{base}_test" if base and _PG_IDENTIFIER.fullmatch(f"{base}_test") else "testing"
+    original = target.read_text(encoding="utf-8")
+    text = _set_phpunit_env(_set_phpunit_env(original, "DB_CONNECTION", "pgsql"), "DB_DATABASE", database)
+    if text == original:
+        return ""
+    target.write_text(text, encoding="utf-8")
+    return database
+
+
 def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
     """
-    Make *repo_path* a Laravel 13 + Scramble + PrimeVue application.
+    Make *repo_path* a Laravel 13 API with Scramble (plus the test-runner wiring
+    of its frontend, when it has one).
 
     result: {"created": bool, "mode": str, "reason": str, "output": str}
 
     Exactly three outcomes:
 
-    • greenfield (no artisan, no composer.json) → mode "scaffold".
-      Runs ``composer create-project laravel/laravel`` + ``install:api`` +
-      ``composer require dedoc/scramble`` in the PHP sandbox, then writes every
-      template over the skeleton (Nesti created those files seconds earlier, so
-      overwriting is safe), merges package.json and appends .gitignore.
+    • greenfield (no artisan, no composer.json) → mode "scaffold".  Creates
+      *repo_path*, runs ``composer create-project laravel/laravel`` +
+      ``install:api`` (Sanctum) + ``composer require dedoc/scramble
+      spatie/laravel-permission`` in the PHP sandbox, then writes the API
+      templates and the spatie seed data over the skeleton (Nesti created those
+      files seconds earlier, so overwriting is safe), a README.md when absent,
+      the HasApiTokens/HasRoles traits on User, and appends .gitignore.  No Vue:
+      the skeleton's own package.json/vite.config.js stay as they are.
 
     • existing Laravel app (artisan present) → mode "top-up".  Never overwrites
-      a file the repository already has: installs Scramble only when absent,
-      writes only the missing test-runner configs and the Scramble wiring test,
-      and adds only missing package.json keys.  vite.config.js,
-      resources/js/app.js, resources/views/** and routes/** are never touched.
+      a file the repository already has: installs Scramble only when absent and
+      writes the Scramble wiring test when absent.  routes/** is never touched.
+      A pgsql app's phpunit.xml is pointed at a separate test database.
 
     • non-Laravel PHP project (composer.json without artisan) → success=False.
       Scaffolding a Laravel skeleton over a foreign application would destroy
       it, so this is reported as the configuration error it is.
 
-    *spa_path* (separated layout: *repo_path* is the Laravel API folder) tops
-    up the SPA folder instead: it skips the vite.config.js guard, writes only
-    the Scramble wiring test into the backend and the absent
-    vitest/playwright configs plus missing package.json keys into the SPA.
+    *spa_path* (*repo_path* is the Laravel API folder) also tops up the SPA
+    folder with the absent vitest.config.js, vitest.setup.js (jsdom polyfills
+    for matchMedia/ResizeObserver) and playwright.config.js plus missing
+    package.json keys; an unmodified vitest.config.js an earlier Nesti wrote
+    is upgraded in place so it loads the setup file.
     """
     try:
         root = Path(repo_path)
@@ -843,6 +820,7 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
             )
 
         if not has_artisan and not spa_path:
+            root.mkdir(parents=True, exist_ok=True)
             passed, output = DockerRunner().run_bootstrap(repo_path)
             if not passed:
                 return _err(f"Laravel skeleton bootstrap failed:\n{output}")
@@ -852,30 +830,22 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
                     f"the repository:\n{output}"
                 )
             applied = _apply_templates(repo_path, _SCAFFOLD_TEMPLATES, overwrite=True)
-            package = _merge_package_json(repo_path, overwrite=True)
+            applied += _apply_templates(repo_path, starter_kit.DATA_FILES, overwrite=True,
+                                        source_dir=starter_kit.BACKEND_TEMPLATES / "spatie")
+            applied += _apply_templates(repo_path, ("README.md",), overwrite=False)
+            starter_kit.add_model_traits(root / "app/Models/User.php", starter_kit.MODEL_TRAITS["spatie"])
             ignored = _append_gitignore(repo_path)
             return _ok({
                 "created": True,
                 "mode": "scaffold",
                 "reason": (
-                    f"Laravel skeleton + Scramble scaffolded; {len(applied)} template(s), "
-                    f"{len(package)} package.json key(s), {len(ignored)} .gitignore line(s)"
+                    "Laravel API skeleton with Sanctum, Scramble and spatie/laravel-permission "
+                    f"scaffolded; {len(applied)} template(s), {len(ignored)} .gitignore line(s)"
                 ),
                 "output": output,
             })
 
         # ── top-up: an existing Laravel application ──────────────────────────
-        vite_config = root / "vite.config.js"
-        if not spa_path and vite_config.is_file():
-            vite_source = vite_config.read_text(encoding="utf-8", errors="replace")
-            if "@vitejs/plugin-vue" not in vite_source:
-                # Generating .vue files a repository cannot compile would burn
-                # every retry on infrastructure the model cannot fix.
-                return _err(
-                    "existing vite.config.js has no @vitejs/plugin-vue — add Vue "
-                    "support to the repository before running frontend issues"
-                )
-
         notes: list[str] = []
         output = ""
         if not _has_scramble(root):
@@ -884,28 +854,32 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
                 return _err(f"dedoc/scramble installation failed:\n{output}")
             notes.append("installed dedoc/scramble")
 
+        package: list[str] = []
+        applied = _apply_templates(
+            repo_path, ("tests/Feature/OpenApiDocumentationTest.php",), overwrite=False
+        )
         if spa_path:
-            applied = _apply_templates(
-                repo_path, ("tests/Feature/OpenApiDocumentationTest.php",), overwrite=False
-            )
-            ignored = _append_gitignore(repo_path)
+            vitest_config = Path(spa_path, "vitest.config.js")
+            if (vitest_config.is_file() and hashlib.sha256(vitest_config.read_bytes()).hexdigest()
+                    in _SUPERSEDED_SPA_VITEST_CONFIGS):
+                shutil.copyfile(_SPA_TEMPLATES_DIR / "vitest.config.js", vitest_config)
+                applied.append(f"{Path(spa_path).name}/vitest.config.js")
             applied += [
                 f"{Path(spa_path).name}/{rel}" for rel in _apply_templates(
-                    spa_path, ("vitest.config.js", "playwright.config.js"),
-                    overwrite=False, source_dir=_SPA_TEMPLATES_DIR,
+                    spa_path, _SPA_TOPUP_TEMPLATES, overwrite=False, source_dir=_SPA_TEMPLATES_DIR,
                 )
             ]
-            package = _merge_package_json(spa_path, overwrite=False)
-        else:
-            applied = _apply_templates(repo_path, _TOPUP_TEMPLATES, overwrite=False)
-            package = _merge_package_json(repo_path, overwrite=False)
-            ignored = _append_gitignore(repo_path)
+            package = _merge_package_json(spa_path)
+        ignored = _append_gitignore(repo_path)
+        database = _align_phpunit_database(root)
         if applied:
             notes.append("added " + ", ".join(applied))
         if package:
             notes.append(f"added {len(package)} package.json key(s)")
         if ignored:
             notes.append("extended .gitignore")
+        if database:
+            notes.append(f"phpunit.xml switched to the PostgreSQL test database {database}")
 
         return _ok({
             "created": False,
@@ -915,6 +889,218 @@ def tool_laravel_bootstrap(repo_path: str, spa_path: str = "") -> dict:
         })
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_laravel_bootstrap(%s) failed: %s", repo_path, exc)
+        return _err(exc)
+
+
+def _composer_requires(app: Path, package: str) -> bool:
+    """True when *app*'s composer.json requires *package* (require or require-dev)."""
+    try:
+        composer = json.loads((app / "composer.json").read_text(encoding="utf-8"))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.debug("Unreadable composer.json in %s: %s", app, exc)
+        return False
+    return any(package in (composer.get(key) or {}) for key in ("require", "require-dev"))
+
+
+_MAX_APP_FACTS_CHARS = 12000
+# Laravel's own tables: noise in a schema summary meant for feature work.
+_FRAMEWORK_TABLES = frozenset({
+    "migrations", "cache", "cache_locks", "jobs", "job_batches", "failed_jobs", "sessions",
+    "password_reset_tokens", "personal_access_tokens",
+})
+
+
+def _boost_payload(segment: str) -> dict:
+    """The payload of one ``boost:execute-tool`` result printed in *segment*; ValueError when unusable."""
+    start, end = segment.find("{"), segment.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("no JSON result")
+    result = json.loads(segment[start:end + 1])
+    if not isinstance(result, dict):
+        raise ValueError("the result is not a JSON object")
+    content = result.get("content") or []
+    first = content[0] if content and isinstance(content[0], dict) else None
+    if result.get("isError"):
+        raise ValueError((first or {}).get("text") or "Boost reported an error")
+    if first is None:
+        raise ValueError("the result has no content")
+    if not isinstance(first.get("text"), str):
+        return first
+    payload = json.loads(first["text"])
+    if not isinstance(payload, dict):
+        raise ValueError("the result text is not a JSON object")
+    return payload
+
+
+def _render_app_facts(info: dict, schema: dict) -> tuple[str, int]:
+    """Versions, packages and the application tables, within _MAX_APP_FACTS_CHARS; returns (text, tables rendered)."""
+    engine = info.get("database_engine") or schema.get("engine") or "unknown"
+    lines = [f"PHP {info.get('php_version', '?')} · Laravel {info.get('laravel_version', '?')} · database {engine}"]
+    packages = ", ".join(
+        f"{p.get('package_name') or p.get('roster_name')} {p.get('version', '')}".strip()
+        for p in info.get("packages") or [] if isinstance(p, dict)
+    )
+    if packages:
+        lines.append(f"Packages: {packages}")
+    lines.append("Tables (column type):")
+    text = "\n".join(lines)
+    raw_tables = schema.get("tables")
+    tables = {
+        name: columns for name, columns in (raw_tables.items() if isinstance(raw_tables, dict) else ())
+        if name not in _FRAMEWORK_TABLES and isinstance(columns, dict) and "error" not in columns
+    }
+    names = sorted(tables)
+    for index, name in enumerate(names):
+        line = f"- {name}: " + ", ".join(f"{column} {kind}" for column, kind in tables[name].items())
+        omitted = f"\n- … {len(names) - index} more table(s) omitted"
+        rest = omitted if index < len(names) - 1 else ""
+        if len(text) + 1 + len(line) + len(rest) > _MAX_APP_FACTS_CHARS:
+            return text + omitted, index
+        text += "\n" + line
+    return text, len(names)
+
+
+def tool_app_facts(backend_path: str) -> dict:
+    """
+    Laravel Boost ApplicationInfo + DatabaseSchema summary of *backend_path* at
+    its current checkout, for the prompts.
+    result: {"facts": str, "tables": int, "reason": str}.
+
+    Skips (success, empty facts) without artisan or without laravel/boost in
+    composer.json; never installs Boost. Packages are limited to the ones
+    composer.json requires directly (Boost lists every installed package).
+    """
+    try:
+        app = Path(backend_path)
+        if not (app / _LARAVEL_MARKER).is_file():
+            return _ok({"facts": "", "tables": 0, "reason": "no Laravel app"})
+        if not _composer_requires(app, "laravel/boost"):
+            return _ok({"facts": "", "tables": 0, "reason": "laravel/boost is not a dependency"})
+        passed, output = DockerRunner().run_app_facts(backend_path)
+        if not passed:
+            return _err(f"app facts export failed:\n{condense(output, 2000)}")
+        parts = output.split(APP_FACTS_MARK)
+        if len(parts) < 4:
+            return _err("app facts output carries no Boost results")
+        try:
+            info = _boost_payload(parts[1])
+            composer = json.loads((app / "composer.json").read_text(encoding="utf-8"))
+            direct = {name for key in ("require", "require-dev") for name in composer.get(key) or {}}
+            info["packages"] = [p for p in info.get("packages") or []
+                                if isinstance(p, dict) and p.get("package_name") in direct]
+            text, count = _render_app_facts(info, _boost_payload(parts[2]))
+        except ValueError as exc:
+            return _err(f"Boost result unreadable: {exc}")
+        return _ok({"facts": text, "tables": count, "reason": f"{count} table(s)"})
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_app_facts(%s) failed: %s", backend_path, exc)
+        return _err(exc)
+
+
+def tool_starter_kit(repo_path: str, backend_dir: str, spa_dir: str) -> dict:
+    """
+    Add Nesti's starter kit to the Laravel API *backend_dir* of *repo_path*:
+    a sign-in + administration API (Sanctum login/logout, users, and roles /
+    permissions when the app has a role schema) with seeders and tests, plus a
+    Sakai PrimeVue SPA in the absent *spa_dir*.  Graph-internal.
+
+    Validates everything before writing anything: the SPA folder must be
+    absent, no starter contract file may exist, User must be editable and, when
+    seed data is written, DatabaseSeeder must accept the calls.  Sanctum and
+    the permission migrations are installed in the PHP sandbox only when missing.
+
+    result: {"variant": "spatie"|"custom"|"none", "files": [repo-relative paths], "reason": str}
+    """
+    try:
+        repo = Path(repo_path)
+        app = repo / backend_dir
+        spa = repo / spa_dir
+        if spa.exists():
+            return _err(f"{spa_dir}/ already exists; the starter kit only fills an absent SPA folder")
+
+        variant = starter_kit.role_schema(app)
+        overlays = starter_kit.backend_overlays(variant)
+        files = starter_kit.overlay_files(starter_kit.BACKEND_TEMPLATES, overlays)
+        stub = starter_kit.routes_stub(starter_kit.BACKEND_TEMPLATES, overlays)
+        spa_files = starter_kit.overlay_files(
+            starter_kit.SPA_TEMPLATES, ["base"] if variant == "none" else ["base", "roles"])
+        if stub is None:
+            return _err(f"starter kit template missing: routes.stub for {overlays}")
+        data = {rel: src for rel, src in files.items() if rel in starter_kit.DATA_FILES}
+        contract = {rel: src for rel, src in files.items() if rel not in starter_kit.DATA_FILES}
+        routes = app / _API_ROUTES_FILE
+        had_routes = routes.is_file()
+        conflicts = [rel for rel in contract if (app / rel).exists()]
+        if had_routes and "// Nesti starter kit" in routes.read_text(encoding="utf-8", errors="replace"):
+            conflicts.append(_API_ROUTES_FILE)
+        if conflicts:
+            return _err("starter kit files already exist: " + ", ".join(conflicts))
+
+        notes: list[str] = []
+        present = [rel for rel in data if (app / rel).exists()]
+        write_data = not present
+        if present:
+            notes.append(f"kept existing seed data ({', '.join(present)}); demo accounts may differ")
+        user = app / "app/Models/User.php"
+        seeder = app / "database/seeders/DatabaseSeeder.php"
+        if not user.is_file():
+            return _err("app/Models/User.php is missing")
+        try:
+            starter_kit.model_with_traits(user.read_text(encoding="utf-8"), starter_kit.MODEL_TRAITS[variant])
+            if write_data and seeder.is_file():
+                starter_kit.seeder_with_calls(seeder.read_text(encoding="utf-8"),
+                                              starter_kit.seeder_classes(variant))
+        except ValueError as exc:
+            return _err(exc)
+
+        migrations = app / "database" / "migrations"
+        install_api = not _composer_requires(app, "laravel/sanctum") or not had_routes
+        publish_sanctum = not install_api and not any(
+            migrations.glob("*_create_personal_access_tokens_table.php"))
+        publish_permission = variant == "spatie" and not any(
+            migrations.glob("*_create_permission_tables.php"))
+        if install_api or publish_sanctum or publish_permission:
+            passed, output = DockerRunner().run_starter_install(
+                str(app), install_api=install_api, publish_sanctum=publish_sanctum,
+                publish_permission=publish_permission,
+            )
+            if not passed:
+                return _err(f"starter kit install failed:\n{condense(output, 4000)}")
+            notes.append("installed " + ", ".join(name for name, flag in (
+                ("Sanctum (install:api)", install_api), ("the Sanctum migration", publish_sanctum),
+                ("the spatie/laravel-permission migration", publish_permission)) if flag))
+        if not routes.is_file() or not _composer_requires(app, "laravel/sanctum"):
+            return _err("starter kit install left no routes/api.php or no laravel/sanctum requirement")
+
+        if not had_routes:
+            # Drops install:api's /user closure stub: the starter's routes are the whole surface.
+            shutil.copyfile(_TEMPLATES_DIR / _API_ROUTES_FILE, routes)
+        starter_kit.append_routes(routes, stub)
+        written = [_API_ROUTES_FILE]
+        for rel, source in [*contract.items(), *(data.items() if write_data else ())]:
+            (app / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, app / rel)
+            written.append(rel)
+        if write_data and starter_kit.register_seeders(seeder, starter_kit.seeder_classes(variant)):
+            written.append("database/seeders/DatabaseSeeder.php")
+        if starter_kit.add_model_traits(user, starter_kit.MODEL_TRAITS[variant]):
+            written.append("app/Models/User.php")
+        changed = [(Path(backend_dir) / rel).as_posix() for rel in written]
+        for rel, source in spa_files.items():
+            (spa / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, spa / rel)
+            changed.append(f"{spa_dir}/{rel}")
+        return _ok({
+            "variant": variant,
+            "files": changed,
+            "reason": "; ".join([
+                f"starter kit ({variant} roles): {len(written)} backend file(s), "
+                f"Sakai SPA in {spa_dir}/ ({len(spa_files)} file(s))",
+                *notes,
+            ]),
+        })
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_starter_kit(%s) failed: %s", repo_path, exc)
         return _err(exc)
 
 
@@ -991,12 +1177,76 @@ def _expected_api_routes(routes: list) -> list[tuple[str, list[str]]]:
     return expected
 
 
-def tool_openapi_export(workspace_path: str) -> dict:
+def _is_prefixed(routes: list) -> bool:
+    """True when any registered URI lives under /api (the conventional apiPrefix)."""
+    for entry in routes:
+        uri = str(entry.get("uri") or "").strip().strip("/") if isinstance(entry, dict) else ""
+        if uri == "api" or uri.startswith("api/"):
+            return True
+    return False
+
+
+def _route_keys(routes: list) -> set[str]:
+    """``"METHOD uri"`` for every explicit verb of every route-list entry."""
+    keys: set[str] = set()
+    for entry in routes:
+        if isinstance(entry, dict):
+            uri = str(entry.get("uri") or "").strip().strip("/")
+            keys.update(f"{method} {uri}" for method in str(entry.get("method") or "").split("|")
+                        if method and method not in _IMPLICIT_METHODS)
+    return keys
+
+
+def _new_api_group_routes(routes: list, baseline: list[str]) -> list[tuple[str, list[str]]]:
+    """``(openapi_path, methods)`` for ``api``-group routes absent from the HEAD route list."""
+    known = set(baseline)
+    expected: list[tuple[str, list[str]]] = []
+    for entry in routes:
+        if not isinstance(entry, dict) or "api" not in (entry.get("middleware") or []):
+            continue
+        uri = str(entry.get("uri") or "").strip().strip("/")
+        methods = [
+            method for method in str(entry.get("method") or "").split("|")
+            if method and method not in _IMPLICIT_METHODS and f"{method} {uri}" not in known
+        ]
+        if methods:
+            expected.append(("/" + uri.replace("?}", "}"), methods))
+    return expected
+
+
+def _head_route_list(workspace_path: str) -> list[str]:
     """
-    Export the OpenAPI document and verify every /api route is documented.
+    Export the clone's HEAD route list as sorted ``"METHOD uri"`` strings.
+
+    A detached worktree of HEAD under /tmp (host-identical, like every sandbox
+    mount) gets its own route:list run; the clone itself is never touched and
+    the worktree is removed in ``finally``. Raises when the list cannot be
+    produced — the caller fails closed.
+    """
+    repo = git.Repo(workspace_path, search_parent_directories=True)
+    relative = Path(workspace_path).resolve().relative_to(Path(repo.working_tree_dir).resolve())
+    with tempfile.TemporaryDirectory(prefix="nesti-head-", dir="/tmp", ignore_cleanup_errors=True) as tmp:
+        head = Path(tmp, "head")
+        repo.git.worktree("add", "--detach", str(head), "HEAD")
+        try:
+            ok, output = DockerRunner().run_route_list(str(head / relative))
+            dump = head / relative / _ROUTE_DUMP_REL
+            if not ok or not dump.is_file():
+                raise RuntimeError(f"route:list failed at HEAD:\n{output[-2000:]}")
+            routes = _load_json_document(dump.read_text(encoding="utf-8"))
+        finally:
+            repo.git.worktree("remove", "--force", str(head))
+            repo.git.worktree("prune")
+    return sorted(_route_keys(routes if isinstance(routes, list) else []))
+
+
+def tool_openapi_export(workspace_path: str, baseline_routes: list[str] | None = None) -> dict:
+    """
+    Export the OpenAPI document and verify the API routes are documented.
 
     result: {"passed": bool, "output": str, "paths": list[str],
-             "undocumented": list[str]}
+             "undocumented": list[str], "baseline_routes": list[str]}
+             (``baseline_routes`` only for an unprefixed project)
 
     This is the gate: ``php artisan scramble:export`` writes ``openapi.json``
     and ``php artisan route:list --json`` writes the registered surface, then
@@ -1004,6 +1254,13 @@ def tool_openapi_export(workspace_path: str) -> dict:
     container — it exits non-zero on any unresolved type anywhere in the
     application, including pre-existing code, so gating on it would strand
     every issue.  Its output still reaches the model through ``output``.
+
+    A project with routes under /api must document every one of them. A
+    project whose ``apiPrefix`` is not ``api`` must document every ``api``-group
+    route the change added: routes absent from the HEAD route list
+    (*baseline_routes*, exported via ``_head_route_list`` when not supplied
+    and returned for the caller to cache). Routes already registered at HEAD
+    are not re-checked; a failed HEAD export fails the gate.
 
     A failing comparison appends the undocumented routes to ``output`` so the
     retry prompt names exactly what to fix.
@@ -1060,17 +1317,38 @@ def tool_openapi_export(workspace_path: str) -> dict:
                 "undocumented": [],
             })
 
-        expected = _expected_api_routes(routes if isinstance(routes, list) else [])
-        if not expected:
-            return _ok({
-                "passed": False,
-                "output": (
-                    f"{output}\n\nThe change touches API code but no route under "
-                    "/api is registered."
-                ),
-                "paths": full_paths,
-                "undocumented": [],
-            })
+        route_list = routes if isinstance(routes, list) else []
+        extra: dict = {}
+        if _is_prefixed(route_list):
+            expected = _expected_api_routes(route_list)
+            if not expected:
+                return _ok({
+                    "passed": False,
+                    "output": (
+                        f"{output}\n\nThe change touches API code but no route under "
+                        "/api is registered."
+                    ),
+                    "paths": full_paths,
+                    "undocumented": [],
+                })
+        else:
+            try:
+                if baseline_routes is None:
+                    baseline_routes = _head_route_list(workspace_path)
+            except Exception as exc:  # pylint: disable=broad-except
+                return _ok({
+                    "passed": False,
+                    "output": (
+                        f"{output}\n\nCould not export the HEAD route list to find the "
+                        f"routes this change added: {exc}"
+                    ),
+                    "paths": full_paths,
+                    "undocumented": [],
+                })
+            extra = {"baseline_routes": baseline_routes}
+            expected = _new_api_group_routes(route_list, baseline_routes)
+            if not expected:
+                output += "\n\nNo new API route; routes registered at HEAD are not re-checked."
 
         undocumented: list[str] = []
         for path, methods in expected:
@@ -1090,6 +1368,7 @@ def tool_openapi_export(workspace_path: str) -> dict:
             "output": output,
             "paths": full_paths,
             "undocumented": undocumented,
+            **extra,
         })
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_openapi_export(%s) failed: %s", workspace_path, exc)
@@ -1119,17 +1398,15 @@ def tool_vitest_run_tests(workspace_path: str) -> dict:
 def tool_playwright_run_tests(workspace_path: str) -> dict:
     """
     Run Playwright E2E tests in the browser sandbox.
-    result: {"passed": bool, "output": str, "fixture_request": dict | None}.
+    result: {"passed": bool, "output": str}.
 
-    The sandbox prepares a Laravel app's database and the fixtures declared in
-    e2e/nesti-fixtures.json, builds the app, and Playwright's webServer config
-    serves it; no server needs to be running beforehand.  ``fixture_request``
-    is the declared requirement (endpoint, model, seeder, table) whose seeder
-    class and file are both absent — set only when the helper verified that
-    and stopped before the browser started; None for every other outcome.
+    The sandbox builds the SPA and Playwright's webServer config serves it;
+    no server needs to be running beforehand.  Same semantics as
+    tool_vitest_run_tests.
     """
     try:
-        return _ok(FrontendRunner().run_playwright(workspace_path))
+        passed, output = FrontendRunner().run_playwright(workspace_path)
+        return _ok({"passed": passed, "output": output})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_playwright_run_tests(%s) failed: %s", workspace_path, exc)
         return _err(exc)
@@ -1211,6 +1488,8 @@ def tool_skill_catalog_status() -> dict:
 # importing this module performs no network I/O.
 
 _MEMORY_UNAVAILABLE = {"stored": False, "reason": "memory unavailable"}
+_RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_RUN_ID_ERROR = "run_id must be 1-64 characters from A-Z a-z 0-9 _ -"
 
 
 def tool_memory_search_docs(text: str, stack: str = "", limit: int = 6) -> dict:
@@ -1234,15 +1513,16 @@ def tool_memory_search_docs(text: str, stack: str = "", limit: int = 6) -> dict:
 
 def tool_memory_find_similar(text: str, limit: int = 2) -> dict:
     """
-    Previously merged issues similar to *text* (Redis solution cache).
+    Previously merged issues of this project similar to *text* (Redis solution cache).
     result: [{"issue_id", "subject", "plan", "mr_url", "stack", "similarity"},
              ...] most similar first, above NESTI_SOLUTION_MIN_SCORE.
     """
     try:
+        project = gitlab_project.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok([])
-        return _ok(memory.find_similar_solutions(text, limit=limit))
+        return _ok(memory.find_similar_solutions(project, text, limit=limit))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_find_similar failed: %s", exc)
         return _err(exc)
@@ -1256,55 +1536,73 @@ def tool_memory_remember_solution(
     result: {"stored": bool} (plus "reason" when not stored).
     """
     try:
+        project = gitlab_project.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok(dict(_MEMORY_UNAVAILABLE))
-        stored = memory.remember_solution(issue_id, subject, description, plan, stack, mr_url)
+        stored = memory.remember_solution(
+            project, issue_id, subject, description, plan, stack, mr_url
+        )
         return _ok({"stored": True} if stored else {"stored": False, "reason": "write failed"})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_remember_solution(issue #%s) failed: %s", issue_id, exc)
         return _err(exc)
 
 
-def tool_memory_remember_failure(issue_id: int, attempt: int, layer: str, output: str) -> dict:
+def tool_memory_remember_failure(
+    issue_id: int, run_id: str, attempt: int, layer: str, output: str
+) -> dict:
     """
-    Store one failed attempt of an issue in episodic memory.
+    Store one failed attempt of an issue's run *run_id* in episodic memory.
     result: {"stored": bool} (plus "reason" when not stored).
     """
+    if not _RUN_ID.fullmatch(run_id or ""):
+        return _err(_RUN_ID_ERROR)
     try:
+        project = gitlab_project.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok(dict(_MEMORY_UNAVAILABLE))
-        stored = memory.remember_failure(issue_id, attempt, layer, output)
+        stored = memory.remember_failure(project, issue_id, run_id, attempt, layer, output)
         return _ok({"stored": True} if stored else {"stored": False, "reason": "write failed"})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_remember_failure(issue #%s) failed: %s", issue_id, exc)
         return _err(exc)
 
 
-def tool_memory_recall_failures(issue_id: int, text: str, attempt: int, limit: int = 2) -> dict:
+def tool_memory_recall_failures(
+    issue_id: int, run_id: str, text: str, attempt: int, limit: int = 2
+) -> dict:
     """
-    Older failed attempts of an issue similar to *text*.  ``attempt`` is the
+    Older failed attempts of an issue's run *run_id* similar to *text*.  ``attempt`` is the
     attempt about to run; the one that just failed (attempt - 1) is excluded
     because its output is already in the conversation history.
     result: [{"issue_id", "attempt", "layer", "summary", "similarity"}, ...].
     """
+    if not _RUN_ID.fullmatch(run_id or ""):
+        return _err(_RUN_ID_ERROR)
     try:
+        project = gitlab_project.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok([])
-        return _ok(memory.recall_failures(issue_id, text, attempt=attempt, limit=limit))
+        return _ok(
+            memory.recall_failures(project, issue_id, run_id, text, attempt=attempt, limit=limit)
+        )
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_recall_failures(issue #%s) failed: %s", issue_id, exc)
         return _err(exc)
 
 
-def tool_memory_forget_episodes(issue_id: int) -> dict:
+def tool_memory_forget_episodes(issue_id: int, run_id: str) -> dict:
     """
-    Drop every episodic-memory row of an issue.  result: {"deleted": int}.
+    Drop every episodic-memory row of an issue's run *run_id*.  result: {"deleted": int}.
     """
+    if not _RUN_ID.fullmatch(run_id or ""):
+        return _err(_RUN_ID_ERROR)
     try:
-        return _ok({"deleted": get_semantic_memory().forget_episodes(issue_id)})
+        project = gitlab_project.identity()
+        return _ok({"deleted": get_semantic_memory().forget_episodes(project, issue_id, run_id)})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_forget_episodes(issue #%s) failed: %s", issue_id, exc)
         return _err(exc)
@@ -1360,3 +1658,4 @@ def tool_quota_check() -> dict:
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_quota_check failed: %s", exc)
         return _err(exc)
+stats.instrument(globals())  # record tool_* runs for nesti /stats

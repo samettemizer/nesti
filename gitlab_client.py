@@ -19,6 +19,8 @@ import re
 import git
 import requests
 
+import gitlab_project
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,9 +31,13 @@ class GitLabClient:
     def __init__(self):
         self.gitlab_url = os.environ["GITLAB_URL"].rstrip("/")
         self.token = os.environ["GITLAB_TOKEN"]
-        self.project_path = os.environ.get("GITLAB_PROJECT_PATH", "ai/hello-world")
-        self.default_branch = os.environ.get("GITLAB_DEFAULT_BRANCH", "main")
-        self.use_ssh = os.environ.get("GITLAB_USE_SSH", "false").lower() == "true"
+        self.project_path = gitlab_project.path()
+        self.default_branch = gitlab_project.default_branch()
+        # GITLAB_REPO_SSH names the orchestrator's project; a bound MCP client clones its own over HTTPS.
+        self.use_ssh = (
+            os.environ.get("GITLAB_USE_SSH", "false").lower() == "true"
+            and not gitlab_project.client_bound()
+        )
         self.repo_url = (
             os.environ.get("GITLAB_REPO_SSH")
             if self.use_ssh
@@ -55,6 +61,9 @@ class GitLabClient:
         explicitly rather than the server's default HEAD: a merge request
         targets that branch, and a parent resumed after its fixture dependency
         merged must start from the branch that carries the merge.
+
+        An empty project (no branches) gets one empty commit pushed to the
+        default branch, so issue branches have a base to branch from and merge into.
         """
         clone_url = self.repo_url
         if not self.use_ssh:
@@ -62,9 +71,19 @@ class GitLabClient:
             clone_url = self._authenticated_https_url()
         # if gitlab is not in isolated environment; log will include access-token (clone-url)
         logger.info("Cloning %s (%s) into %s …", self.project_path, self.default_branch, target_path)
-        repo = git.Repo.clone_from(clone_url, target_path, branch=self.default_branch)
+        empty = not git.cmd.Git().ls_remote("--heads", clone_url).strip()
+        if empty:
+            repo = git.Repo.clone_from(clone_url, target_path)
+        else:
+            repo = git.Repo.clone_from(clone_url, target_path, branch=self.default_branch)
         repo.config_writer().set_value("user", "name", "AI Developer").release()
         repo.config_writer().set_value("user", "email", "nesti@yourdomain.com").release()
+        if empty:
+            repo.git.symbolic_ref("HEAD", f"refs/heads/{self.default_branch}")
+            repo.git.commit("--allow-empty", "-m", "Initial commit")
+            # raise_if_error: a refused push (protected branch) must stop the run, not branch off nothing.
+            repo.remote("origin").push(refspec=f"{self.default_branch}:{self.default_branch}").raise_if_error()
+            logger.info("Empty repository: pushed an empty initial commit to %s", self.default_branch)
         return repo
 
     def create_branch(self, repo: git.Repo, issue_id: int, subject: str) -> str:

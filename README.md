@@ -1,4 +1,4 @@
-# Nesti — autonomous developer
+# Nesti
 
 Nesti turns opted-in GitLab issues into Laravel 13 + PrimeVue 5 Merge Requests.
 It plans and generates code through an LLM cascade, then runs the applicable
@@ -26,11 +26,10 @@ Note: The local LLM tiers are disabled by default because they require dedicated
 Test gates run in order: **PHPUnit → OpenAPI → Vitest → Playwright**.
 Changed files, not the declared issue scope, determine which gates run:
 
-- PHP-only: PHPUnit, plus OpenAPI when the API surface changes.
-- Frontend-only in a Vue repository: Vitest and Playwright, even in Laravel.
-- Both sides (including Blade or `routes/web.php`): backend and frontend
-  gates; OpenAPI still depends on API changes.
-- Neither side: PHPUnit. Repositories without PHP use the frontend gates.
+- Backend folder only: PHPUnit, plus OpenAPI when the API surface changes.
+- SPA folder only: Vitest and Playwright.
+- Both folders: backend and frontend gates; OpenAPI still depends on API changes.
+- Neither folder: PHPUnit.
 
 Redis preserves each issue's conversation and failure output. Failed gates
 escalate the coder, with up to `MAX_CODE_RETRIES` extra attempts. Retries remove
@@ -51,20 +50,21 @@ request guidance. Issue numbers are project-scoped IIDs, such as `#7`.
 
 | State | Condition |
 |-------|-----------|
-| Pending | Open, opted in, no control label or unresolved dependency record |
+| Pending | Open, opted in, no control label, no failed-run marker |
 | In progress | `<label>::in-progress` |
-| Paused | `<label>::pause` or an active dependency record |
+| Paused | `<label>::pause` |
 | Done | Closed |
 
 Nesti verifies label changes by reading the issue back; a rejected claim
 stops before cloning. Success removes the lock and posts the MR URL
 (`Closes #<iid>`); exhausted retries remove the lock and post the failure.
-Human closures, opt-outs and manual pauses are not reversed. Unresolved or
-malformed dependency records block intake; do not bypass them by stripping labels.
+Human closures, opt-outs and manual pauses are not reversed.
 
 ---
 
 ## Laravel 13 + PrimeVue 5 Role
+
+Nesti works on projects whose frontend is a separate SPA and whose Laravel backend serves only an API. We do not recommend it for existing websites whose frontend lives inside the Laravel application (Blade pages, Inertia, Livewire, or Vue/React under resources/): Nesti refuses such a project at startup and never scaffolds one.
 
 Database work uses new reversible Schema-builder migrations and Faker-backed
 factories/seeders. Existing migrations are never edited, renamed or deleted;
@@ -76,8 +76,8 @@ Before planning, Nesti checks the target repository:
 
 | Repository state | Mode | Behaviour |
 |------------------|------|-----------|
-| No `artisan`, no `composer.json` | **scaffold** | `composer create-project` + `php artisan install:api` + `composer require dedoc/scramble`, then all templates from `templates/laravel/` |
-| `artisan` present | **top-up** | Writes only the missing `vitest.config.js`, `playwright.config.js`, `tests/Feature/OpenApiDocumentationTest.php` + missing `package.json` keys |
+| No `artisan`, no `composer.json` | **scaffold** | API-only Laravel in `webservice/`: `composer create-project` + `php artisan install:api` + `composer require dedoc/scramble`, then all templates from `templates/laravel/`; a starter SPA when the issue asks for UI |
+| `artisan` present | **top-up** | Backend: only a missing `tests/Feature/OpenApiDocumentationTest.php`. SPA: only the missing `vitest.config.js`, `vitest.setup.js`, `playwright.config.js` + missing `package.json` keys; an unmodified earlier Nesti `vitest.config.js` is upgraded in place |
 | `composer.json` without `artisan` | **refused** | Returns `success=False` — scaffolding over a foreign PHP app would destroy it |
 
 ---
@@ -141,94 +141,20 @@ startup. Changing the embedding model requires
 
 | Layer | Sandbox image | Runtime |
 |-------|---------------|---------|
-| PHPUnit | `nesti-sandbox-php` | PHP 8.3 + Composer |
+| PHPUnit | `nesti-sandbox-php` | PHP 8.4 + Composer |
 | Vitest + Vue Test Utils | `nesti-sandbox-node` | Node 22 |
-| Playwright | `nesti-sandbox-e2e` | Playwright 1.50.0 + Node 22 + PHP 8.3 |
+| Playwright | `nesti-sandbox-e2e` | Playwright 1.50.0 + Node 22 (no PHP) |
 
 Keep `@playwright/test` pinned exactly to the E2E image version.
 Exclude `e2e/**` from Vitest so it does not collect Playwright specs.
 
-Laravel E2E runs use `APP_ENV=testing` and a recreated workspace SQLite
-database. Migrations, default seeding and declared fixtures run before the
-build and browser tests, regardless of issue scope. Fixture models pointing
-to another database are refused.
+`vitest.setup.js` polyfills `matchMedia` and `ResizeObserver`, which PrimeVue
+needs under jsdom.
 
-### Served-page integration
-
-Verify the actual route → Blade → Vite → Vue entry chain, not just an isolated
-component. Preserve PrimeVue/Aura/plugins and the existing root architecture;
-register before mount and use explicit kebab-case closing tags in Blade.
-
-## Fixture dependencies
-
-An optional committed `e2e/nesti-fixtures.json` declares a hard nonempty
-real-data prerequisite for an existing unauthenticated GET collection:
-
-```json
-{"version":1,"fixtures":[{"endpoint":"/api/tasks","model":"App\\Models\\Task","seeder":"Database\\Seeders\\TaskSeeder"}]}
-```
-
-Use the manifest only for hard nonempty prerequisites, not valid empty states,
-mocks or specs that create their own data through existing UI/API routes.
-It accepts up to 16 unique requirements in 32 KiB, with exact fields and local
-`/api/...` paths. Retries must re-emit required fixtures or emit `fixtures: []`.
-
-After default seeding, the helper checks the endpoint. If already nonempty,
-it does nothing; otherwise it verifies an empty backing table and runs the
-declared seeder once. This does not modify production `DatabaseSeeder`.
-
-Only a missing seeder class **and** conventional PHP file can produce exit 78
-with the matching `/nesti-results/fixtures.json` report: `Playwright BLOCKED`.
-Timeouts, HTTP/auth/JSON errors, unverified model mappings, filtered-out rows
-and broken or ineffective seeders remain failures, not dependency requests.
-
-For an unchanged HEAD-backed API/model with no coder-authored backend changes,
-Nesti records intent, verifies the pause and opens one backend dependency.
-Declare a missing `<Model>Seeder` in JSON without creating or registering it
-in the frontend parent. New backend work must include its own factory/seeder.
-
-Trusted GitLab notes (`NESTI_FIXTURE_DEPENDENCIES_V1` and child ownership
-`NESTI_FIXTURE_CHILD_V1`), not Redis, bind the dependency to its project,
-parent, target branch and fixture. Foreign, malformed or stale records cannot
-release a parent.
-
-Polling reconciles dependencies before selecting work. Release requires all
-related MRs to start with `Closes #<child>` and be verified merged into the
-recorded project/target; closing a child or opening an MR is insufficient.
-The parent makes no LLM calls or retries while waiting. Reconciliation
-preserves later locks/manual pauses. A merged but still-unsatisfied fixture
-requires operator recovery, not a second child.
-
-### Operator recovery
-
-Stop the poller first (`docker-compose stop nesti-orchestrator`), restore
-GitLab access and use the same automation identity. Notes, labels, issue
-creation and related/detail MR reads must be permitted. A new token for the
-same user is safe; changing users requires explicit migration of trusted
-notes/child ownership, never a silent trust fallback.
-
-- **Unknown child POST outcome:** enumerate all issues, including closed and
-  unlabelled, and check trusted exact-key ownership markers. Reconcile one
-  found child. Only after establishing no request remains in flight and no
-  child exists may an operator read `get_fixture_state`, reset that item's
-  `creation_submitted=false`, `state="creating"`, `reason=""`, and write it
-  with `save_fixture_state`. The next poll makes one POST; elapsed time alone
-  is not evidence that creation failed.
-- **Blocked existing child corrected by a later MR:** explicitly set its
-  item to `waiting` and clear its reason through the verified state methods.
-  Normal MR merge verification still applies. Ambiguous ownership must be
-  resolved before changing state.
-- **Pause/stale lock with no durable record:** verify no child or open/merged
-  closing MR exists, then use `resume_issue` and clear only that parent's
-  conversation and episodes. Ordinary crash recovery refuses the hold;
-  reconciliation cannot reconstruct evidence never saved.
-- **Configured target changed:** keep the hold and explicitly migrate the
-  record after reviewing the target/MR. Do not manually strip labels to
-  bypass a durable record.
-
-Use a one-off application container with `--entrypoint python` while the
-poller is stopped; dependency mutations are deliberately not exposed by MCP.
-Restart only after independently verifying the intended note and labels.
+Playwright builds the SPA and serves it with `vite preview`; the Laravel API is
+not running. Specs sign in and stub every API request through
+`e2e/support/session.(js|ts)` (`signIn`, `stubApi`); an unstubbed request gets
+a logged 404.
 
 
 ---
@@ -239,19 +165,34 @@ Restart only after independently verifying the intended note and labels.
 |------|--------------|
 | Orchestration | `main.py`, `task_engine.py`, `graph/` (LangGraph) |
 | Providers and prompts | `llm_client.py`, `prompt_builder.py`, `issue_scope.py` |
-| GitLab and dependencies | `gitlab_issues_client.py`, `gitlab_client.py`, `issue_dependencies.py` |
-| Sandboxes and fixtures | `docker_runner.py`, `frontend_runner.py`, `e2e_fixtures.py` |
+| GitLab | `gitlab_issues_client.py`, `gitlab_client.py` |
+| Sandboxes | `docker_runner.py`, `frontend_runner.py` |
 | Context and memory | `skill_catalog.py`, `skill_loader.py`, `conversation_store.py`, `vector_store.py`, `semantic_cache.py` |
 | Interactive tools | `mcp_server/` (FastMCP), `scripts/oauth.py` (`nesti` CLI) |
+| Usage statistics | `stats/` (`nesti /stats` → live page `http://127.0.0.1:8790/`, served by `nesti-stats`) |
 
 [`docker-compose.yml`](docker-compose.yml) runs the orchestrator, MCP server,
-Redis and Qdrant; sandbox containers are created per test run and removed
+the `nesti-stats` page server, Redis and Qdrant; sandbox containers are created per test run and removed
 afterwards. Dependencies and image versions live in
 [`requirements.txt`](requirements.txt) and the Dockerfiles.
 
 ---
 
 ## Installation
+
+### install.sh
+
+The setup wizard checks the prerequisites (docker, git, curl, Python 3, Docker
+Compose), writes `.env` from prompts, verifies GitLab access, creates the
+opt-in label if missing, clones the project checkout when absent, builds and starts the
+containers, waits for readiness, offers consumer provider logins, installs the
+`nesti` launcher to `~/.local/bin` and optionally runs the preflight:
+```bash
+./install.sh            # interactive
+```
+`--help` lists the options.
+
+### Manual Installation
 
 Configure `.env`, then start:
 ```bash
@@ -276,19 +217,18 @@ docker exec nesti-orchestrator python scripts/preflight.py
 
 ## MCP Server
 
-`nesti-mcp` exposes the shared issue, GitLab, sandbox, skill, memory and quota
+`nesti-mcp` exposes the shared issue, GitLab, sandbox, skill, memory, quota and usage statistics
 tools over stdio. It runs alongside the orchestrator and makes no LLM calls.
 
 Connect Claude Code:
 
 ```bash
-claude mcp add nesti docker exec -i nesti-mcp python -m mcp_server.server
+claude mcp add nesti -- nesti mcp
 ```
 
 For VS Code, use [`.vscode/mcp.json.example`](.vscode/mcp.json.example).
-Other MCP clients can use the same `docker exec -i` command.
-Dependency mutations remain internal to the orchestrator to preserve a single
-polling writer.
+Other MCP clients run `nesti mcp` from the project's git checkout, or `nesti mcp <checkout>`:
+each connection acts on the GitLab project of that checkout's `origin` remote.
 
 ---
 
@@ -310,9 +250,31 @@ Available commands (prefix each with `nesti` inside the container):
 | `/provider models <name> [search]` | List text models and prices per million tokens |
 | `/provider model <name> [model-id\|--reset]` | View, persist or reset model selection (OpenRouter) |
 | `/usage` | Show authenticated consumer usage and quota |
+| `/stats` | Usage statistics page at `http://127.0.0.1:8790/` (`nesti-stats` service): requests, tokens, API-equivalent cost and errors per project, model and provider. A refresh shows current data; the selected range and project are kept |
+| `/arch [--json]` | Static architecture page `state/architecture.html`; `--json` prints the layout record instead |
 
 OpenRouter needs an explicit model via `OPENROUTER_MODEL` or
 `nesti /provider model openrouter <model-id>`.
+
+## Usage statistics
+
+`nesti /stats` prints the local page URL; the `nesti-stats` service serves it.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/stats-providers.png" width="100%" alt="Nesti Providers page with All selected, showing recorded provider and model usage and API-equivalent cost estimates" />
+      <br /><sub><b>Providers</b> — recorded provider and model usage, all retained activity</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/stats-traces.png" width="100%" alt="Nesti Traces page with a real issue run expanded to show its model and tool timeline, duration and estimated cost" />
+      <br /><sub><b>Traces</b> — issue-run timeline, duration and estimated cost</sub>
+    </td>
+  </tr>
+</table>
+
+*Illustrative live snapshot; totals vary. Costs are API-equivalent estimates, not
+subscription bills, and an unpriced model is not proof of zero cost.*
 
 ## Consumer Subscriptions & Quota
 

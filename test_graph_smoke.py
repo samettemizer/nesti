@@ -36,6 +36,8 @@ os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"   # unreachable → memory fal
 os.environ["MAX_CODE_RETRIES"] = "2"                 # → max_attempts = 3
 os.environ["NESTI_STACK"] = "auto"                   # exercise real detection
 os.environ["NESTI_RERANKER_ENABLED"] = "false"
+os.environ["GITLAB_URL"] = "https://gitlab.test"       # scopes Redis keys (gitlab_project.identity)
+os.environ["GITLAB_PROJECT_PATH"] = "ai/hello-world"
 os.environ.pop("TELEGRAM_BOT_TOKEN", None)
 os.environ.pop("TELEGRAM_CHAT_ID", None)
 os.environ.pop("DEEPSEEK_API_KEY", None)
@@ -52,6 +54,10 @@ from graph.edges import (                        # noqa: E402
 )
 from graph.tools import tool_detect_stack        # noqa: E402
 import skill_catalog                             # noqa: E402
+import project_layout                            # noqa: E402
+
+API_ONLY = {"backend": ".", "frontend": None}
+ROOT_SPA = {"backend": ".", "frontend": ".frontend"}
 
 PHP_CODE = (
     "Implementation below.\n\n"
@@ -60,10 +66,10 @@ PHP_CODE = (
 )
 VUE_CODE = (
     "Implementation below.\n\n"
-    "### FILE: package.json\n```json\n{\"name\": \"app\"}\n```\n\n"
-    "### FILE: src/components/FileTable.vue\n```vue\n<template><div/></template>\n```\n\n"
-    "### FILE: src/components/__tests__/FileTable.test.js\n```js\n// vitest\n```\n\n"
-    "### FILE: e2e/file-table.spec.js\n```js\n// playwright\n```\n"
+    "### FILE: .frontend/package.json\n```json\n{\"name\": \"app\"}\n```\n\n"
+    "### FILE: .frontend/src/components/FileTable.vue\n```vue\n<template><div/></template>\n```\n\n"
+    "### FILE: .frontend/src/components/__tests__/FileTable.test.js\n```js\n// vitest\n```\n\n"
+    "### FILE: .frontend/e2e/file-table.spec.js\n```js\n// playwright\n```\n"
 )
 FULLSTACK_CODE = PHP_CODE + "\n" + VUE_CODE
 
@@ -80,10 +86,10 @@ LARAVEL_CODE = (
 )
 LARAVEL_VUE_CODE = LARAVEL_CODE + (
     "\n"
-    "### FILE: resources/js/components/TaskTable.vue\n"
+    "### FILE: .frontend/src/components/TaskTable.vue\n"
     "```vue\n<template><div/></template>\n```\n\n"
-    "### FILE: resources/js/components/__tests__/TaskTable.test.js\n```js\n// vitest\n```\n\n"
-    "### FILE: e2e/tasks.spec.js\n```js\n// playwright\n```\n"
+    "### FILE: .frontend/src/components/__tests__/TaskTable.test.js\n```js\n// vitest\n```\n\n"
+    "### FILE: .frontend/e2e/tasks.spec.js\n```js\n// playwright\n```\n"
 )
 GOOD_CODE = PHP_CODE
 NO_BLOCKS = "Here is a prose description of the change instead of files."
@@ -96,7 +102,7 @@ def reset_calls(issue_id: int) -> None:
     calls.update({
         "issue_id": issue_id, "issues": [], "docker": 0, "escalate": 0,
         "openapi": 0, "vitest": 0, "playwright": 0,
-        "bootstrap": [], "layers": [], "layer_paths": [],
+        "bootstrap": [], "starter": [], "layers": [], "layer_paths": [],
         "pushes": [], "mrs": [], "history_at_commit": None, "workspaces": [],
         "plan_prompts": [], "plan_systems": [], "code_prompts": [], "code_systems": [],
         "plan_messages": [], "code_messages": [],
@@ -110,7 +116,8 @@ def initial(issue_id: int, subject: str = "", description: str = "Implement the 
     return {
         "issue": {"id": issue_id, "subject": subject, "description": description},
         "issue_id": issue_id, "subject": subject,
-        "skills": [], "plan": "", "scope": "fullstack", "code_response": "", "repo_path": "",
+        "skills": [], "plan": "", "scope": "fullstack", "code_response": "", "repo_path": "", "base_sha": "",
+        "layout": dict(API_ONLY),
         "branch_name": "", "workspace": "", "messages": [],
         "attempt": 0, "max_attempts": 3,
         "files_written": False, "written_files": [],
@@ -121,8 +128,8 @@ def initial(issue_id: int, subject: str = "", description: str = "Implement the 
         "openapi_passed": False, "openapi_output": "", "openapi_paths": [],
         "vitest_passed": False, "vitest_output": "",
         "playwright_passed": False, "playwright_output": "",
-        "fixture_request": None, "dependency_status": "",
         "retrieved_chunks": 0, "past_solutions": 0, "recalled_failures": 0,
+        "run_id": f"test-{issue_id}",
         "mr_url": "", "failure_reason": "", "error": "",
     }
 
@@ -133,7 +140,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
                 laravel_repo: bool = False, bootstrap_created: bool = False,
                 vue_repo: bool = False, plan_text: str = "",
                 doc_chunks=(), similar_solutions=(), recalled=(),
-                memory_error: str = "", expanded_doc_chunks=None):
+                memory_error: str = "", expanded_doc_chunks=None, layout=API_ONLY):
     """
     Install fakes on graph.nodes (node functions resolve names at call time).
 
@@ -151,7 +158,14 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
     prove that a backend change in a repository WITH .vue files still skips
     the frontend layers.  ``plan_text`` replaces the fake planner's answer
     (e.g. to declare a scope on line 1).
+
+    ``layout`` pins the clone layout (default: API-only root app, the layout the
+    root-relative fake code assumes); ``None`` resolves it for real.
     """
+    if layout is None:
+        nodes.clone_layout = project_layout.clone_layout
+    else:
+        nodes.clone_layout = lambda clone: dict(layout)
 
     def fake_set_status(issue_id, status, note=""):
         calls["issues"].append((issue_id, status, note))
@@ -165,14 +179,13 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             # Real markers, so detection is not faked — only the repo is.
             open(os.path.join(target_path, "artisan"), "w").close()
             open(os.path.join(target_path, "composer.json"), "w").close()
-            # plugin-vue makes clone_layout resolve the integrated layout ("."/".").
-            with open(os.path.join(target_path, "vite.config.js"), "w") as handle:
-                handle.write("import vue from '@vitejs/plugin-vue';\n")
         if vue_repo:
-            os.makedirs(os.path.join(target_path, "resources", "js", "components"))
-            open(os.path.join(target_path, "resources", "js", "components",
-                              "Existing.vue"), "w").close()
-        return {"success": True, "result": {"repo_path": target_path}}
+            spa = os.path.join(target_path, ".frontend")
+            os.makedirs(os.path.join(spa, "src", "components"))
+            with open(os.path.join(spa, "package.json"), "w") as handle:
+                json.dump({"dependencies": {"vue": "^3.5.0"}}, handle)
+            open(os.path.join(spa, "src", "components", "Existing.vue"), "w").close()
+        return {"success": True, "result": {"repo_path": target_path, "head_sha": "b" * 40}}
     nodes.tool_gitlab_clone = fake_clone
 
     def fake_bootstrap(repo_path, spa_path=""):
@@ -185,6 +198,19 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             "output": "",
         }}
     nodes.tool_laravel_bootstrap = fake_bootstrap
+
+    def fake_starter(repo_path, backend_dir, spa_dir):
+        calls["starter"].append((repo_path, backend_dir, spa_dir))
+        spa = os.path.join(repo_path, spa_dir)
+        os.makedirs(os.path.join(spa, "src"), exist_ok=True)
+        with open(os.path.join(spa, "package.json"), "w") as handle:
+            json.dump({"dependencies": {"vue": "^3.5.0"}}, handle)
+        with open(os.path.join(spa, "src", "App.vue"), "w") as handle:
+            handle.write("<template><RouterView/></template>\n")
+        return {"success": True, "result": {
+            "variant": "spatie", "files": [f"{spa_dir}/package.json", f"{spa_dir}/src/App.vue"],
+            "reason": "starter kit (spatie roles)"}}
+    nodes.tool_starter_kit = fake_starter
 
     nodes.tool_gitlab_create_branch = lambda repo_path, issue_id, subject: {
         "success": True, "result": {"branch_name": f"feature/issue-{issue_id}-test"}}
@@ -215,10 +241,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             calls["layers"].append(key)
             calls["layer_paths"].append((key, workspace_path))
             passed = outcomes[min(calls[key] - 1, len(outcomes) - 1)]
-            result = {"passed": passed, "output": pass_out if passed else fail_out}
-            if key == "playwright":
-                result["fixture_request"] = None
-            return {"success": True, "result": result}
+            return {"success": True, "result": {"passed": passed, "output": pass_out if passed else fail_out}}
         return fake
 
     nodes.tool_docker_run_tests = _layered(
@@ -231,7 +254,7 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
         "playwright", playwright_outcomes,
         "1 passed (2.1s)", "1 failed\n  e2e/file-table.spec.js:4:1 › sorts rows")
 
-    def fake_openapi(workspace_path):
+    def fake_openapi(workspace_path, baseline_routes=None):
         calls["openapi"] += 1
         calls["layers"].append("openapi")
         calls["layer_paths"].append(("openapi", workspace_path))
@@ -258,12 +281,14 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
         list(expanded_doc_chunks if limit == 20 and expanded_doc_chunks is not None else doc_chunks))
     nodes.tool_memory_find_similar = lambda text, limit=2: _memory(
         "memory_similar", text, list(similar_solutions))
-    nodes.tool_memory_recall_failures = lambda issue_id, text, attempt, limit=2: _memory(
-        "memory_recall", {"issue_id": issue_id, "text": text, "attempt": attempt},
+    nodes.tool_memory_recall_failures = lambda issue_id, run_id, text, attempt, limit=2: _memory(
+        "memory_recall",
+        {"issue_id": issue_id, "run_id": run_id, "text": text, "attempt": attempt},
         list(recalled))
-    nodes.tool_memory_remember_failure = lambda issue_id, attempt, layer, output: _memory(
+    nodes.tool_memory_remember_failure = lambda issue_id, run_id, attempt, layer, output: _memory(
         "memory_remember_failure",
-        {"issue_id": issue_id, "attempt": attempt, "layer": layer, "output": output},
+        {"issue_id": issue_id, "run_id": run_id, "attempt": attempt, "layer": layer,
+         "output": output},
         {"stored": True})
     nodes.tool_memory_remember_solution = (
         lambda issue_id, subject, description, plan, stack, mr_url: _memory(
@@ -271,8 +296,8 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             {"issue_id": issue_id, "subject": subject, "plan": plan,
              "stack": stack, "mr_url": mr_url},
             {"stored": True}))
-    nodes.tool_memory_forget_episodes = lambda issue_id: _memory(
-        "memory_forget", issue_id, {"deleted": 0})
+    nodes.tool_memory_forget_episodes = lambda issue_id, run_id: _memory(
+        "memory_forget", (issue_id, run_id), {"deleted": 0})
 
     # LLM fakes (instance attributes shadow bound methods)
     if plan_exc:
@@ -298,6 +323,11 @@ def patch_tools(docker_outcomes, code_responses, plan_exc=None, code_exc_first=F
             raise RuntimeError("All coding providers exhausted.")
         return seq.pop(0) if len(seq) > 1 else seq[0]
     nodes._llm.generate_code = fake_code
+
+    def domain_tool_reached(*_args, **_kwargs):
+        raise AssertionError("domain tools reached on a default-structure repository")
+    nodes.tool_issue_domain_answer = domain_tool_reached
+    nodes.tool_issue_ask_domain = domain_tool_reached
     nodes._llm.escalate_coder = lambda: calls.__setitem__("escalate", calls["escalate"] + 1)
 
 
@@ -352,6 +382,9 @@ check("3 attempt(s)" in f["failure_reason"], "failure_reason set")
 reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
 check(len(reopen) == 1 and "failed to produce passing tests" in reopen[0][1]
       and "PHPUnit FAILURES!" in reopen[0][1], "issue reopened with failure note + test output")
+check(reopen[0][1].endswith(
+    "\n\n" + nodes.failed_run_marker("Test issue 102", "Implement the thing.", "b" * 40)),
+    "exhausted coding failure note carries the title/description/cloned-HEAD marker")
 check(nodes._store.load(102) == [], "history deleted after exhausted failure")
 check(all(messages == [{"role": "user", "content": prompt}]
           for messages, prompt in zip(calls["code_messages"], calls["code_prompts"])),
@@ -372,6 +405,7 @@ check(f["attempt"] == 0 and calls["docker"] == 0, "no code/test attempts made")
 reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
 check(len(reopen) == 1 and "planning providers failed" in reopen[0][1],
       "reopened with planning note")
+check("NESTI_FAILED_RUN_V1" not in reopen[0][1], "planning failure leaves no failed-run marker")
 check("All planning providers exhausted." in f["error"], "error field populated")
 check(not os.path.exists(calls["workspaces"][0]), "cleanup ran after plan failure")
 check(nodes._store.load(103) == [], "failed planning clears history before reopening")
@@ -391,6 +425,8 @@ check(calls["docker"] == 0, "no sandbox run for exhausted providers")
 reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
 check("All coding providers exhausted." in reopen[0][1],
       "reopen note carries provider-exhaustion reason")
+check("NESTI_FAILED_RUN_V1" not in reopen[0][1],
+      "exhausted coder providers (transient quota) leave no failed-run marker")
 check(not os.path.exists(calls["workspaces"][0]), "cleanup ran")
 
 # ═════ Scenario 5: PHP-only issue skips both frontend layers ═════
@@ -405,7 +441,7 @@ check(f["mr_url"] == "https://gitlab.example/mr/105", "went straight to commit")
 
 # ═════ Scenario 6: Vue-only issue skips PHPUnit ═════
 print("\n── Scenario 6: Vue-only issue → PHPUnit skipped ──")
-f = run(106, docker_outcomes=[False], code_responses=[VUE_CODE])
+f = run(106, docker_outcomes=[False], code_responses=[VUE_CODE], layout=ROOT_SPA)
 check(f["stack"] == "vue", "stack detected as vue (no PHP anywhere)")
 check(f["run_phpunit"] is False, "PHPUnit layer disabled for frontend-only repo")
 check(calls["docker"] == 0,
@@ -420,7 +456,7 @@ check("PHPUnit" not in calls["mrs"][0], "MR description omits the skipped layer"
 
 # ═════ Scenario 7: fullstack issue runs all three layers in order ═════
 print("\n── Scenario 7: fullstack issue → PHPUnit → Vitest → Playwright ──")
-f = run(107, docker_outcomes=[True], code_responses=[FULLSTACK_CODE])
+f = run(107, docker_outcomes=[True], code_responses=[FULLSTACK_CODE], layout=ROOT_SPA)
 check(f["stack"] == "fullstack", "stack detected as fullstack")
 check(f["run_phpunit"] is True and f["has_vue_files"] is True, "both layers enabled")
 check(calls["docker"] == 1 and calls["vitest"] == 1 and calls["playwright"] == 1,
@@ -431,7 +467,8 @@ check(all(k in calls["mrs"][0] for k in ("PHPUnit", "Vitest", "Playwright")),
 
 # ═════ Scenario 8: Vitest failure escalates and retries ═════
 print("\n── Scenario 8: Vitest failure → escalate → exhausted ──")
-f = run(108, docker_outcomes=[True], code_responses=[VUE_CODE], vitest_outcomes=[False])
+f = run(108, docker_outcomes=[True], code_responses=[VUE_CODE], vitest_outcomes=[False],
+        layout=ROOT_SPA)
 check(f["mr_url"] == "" and f["attempt"] == 3, "3 attempts then failure")
 check(calls["vitest"] == 3, "Vitest ran on every attempt")
 check(calls["playwright"] == 0, "Playwright never ran — Vitest gates it")
@@ -445,7 +482,8 @@ check(not os.path.exists(calls["workspaces"][0]), "cleanup ran on frontend failu
 
 # ═════ Scenario 9: Playwright failure escalates and retries ═════
 print("\n── Scenario 9: Playwright failure → escalate → exhausted ──")
-f = run(109, docker_outcomes=[True], code_responses=[VUE_CODE], playwright_outcomes=[False])
+f = run(109, docker_outcomes=[True], code_responses=[VUE_CODE], playwright_outcomes=[False],
+        layout=ROOT_SPA)
 check(f["mr_url"] == "" and f["attempt"] == 3, "3 attempts then failure")
 check(calls["vitest"] == 3 and calls["playwright"] == 3, "both layers ran each attempt")
 check(calls["escalate"] == 2, "coder escalated between attempts (2x)")
@@ -455,7 +493,7 @@ check("e2e/file-table.spec.js" in reopen[0][1], "reopen note carries the Playwri
 
 # ═════ Scenario 10: PHPUnit failure in a fullstack repo gates the frontend ═════
 print("\n── Scenario 10: fullstack, PHPUnit fails → frontend layers gated ──")
-f = run(110, docker_outcomes=[False], code_responses=[FULLSTACK_CODE])
+f = run(110, docker_outcomes=[False], code_responses=[FULLSTACK_CODE], layout=ROOT_SPA)
 check(calls["docker"] == 3, "PHPUnit ran on every attempt")
 check(calls["vitest"] == 0 and calls["playwright"] == 0,
       "frontend layers never reached while the backend layer is red")
@@ -467,21 +505,21 @@ probe = tempfile.mkdtemp(prefix="nesti-detect-")
 try:
     os.makedirs(os.path.join(probe, "src", "components"))
     open(os.path.join(probe, "src", "components", "Widget.vue"), "w").close()
-    r = tool_detect_stack(probe)["result"]
+    r = tool_detect_stack(probe, ["src/components/Widget.vue"], ".", "src")["result"]
     check(r["stack"] == "vue" and r["run_phpunit"] is False, "vue only → run_phpunit False")
     check(r["vue_files"] == [os.path.join("src", "components", "Widget.vue")],
           "vue_files lists repo-relative paths")
 
     open(os.path.join(probe, "composer.json"), "w").close()
-    r = tool_detect_stack(probe)["result"]
+    r = tool_detect_stack(probe, None, ".", "src")["result"]
     check(r["stack"] == "fullstack" and r["run_phpunit"] is True,
           "composer.json alone flips vue → fullstack")
 
-    # node_modules is populated by the Vitest sandbox from attempt 2 onward and
+    # MCP callers may pass host projects with installed node_modules, and
     # Vue component libraries ship .vue files — those must never be detected.
-    os.makedirs(os.path.join(probe, "node_modules", "primevue"))
-    open(os.path.join(probe, "node_modules", "primevue", "Vendor.vue"), "w").close()
-    r = tool_detect_stack(probe)["result"]
+    os.makedirs(os.path.join(probe, "src", "node_modules", "primevue"))
+    open(os.path.join(probe, "src", "node_modules", "primevue", "Vendor.vue"), "w").close()
+    r = tool_detect_stack(probe, None, ".", "src")["result"]
     check(len(r["vue_files"]) == 1, "node_modules pruned from the scan")
 
     vendored = tempfile.mkdtemp(prefix="nesti-detect-vendor-")
@@ -489,7 +527,7 @@ try:
     os.makedirs(os.path.join(vendored, "src"))
     open(os.path.join(vendored, "vendor", "acme", "Lib.php"), "w").close()
     open(os.path.join(vendored, "src", "App.vue"), "w").close()
-    r = tool_detect_stack(vendored)["result"]
+    r = tool_detect_stack(vendored, None, ".", "src")["result"]
     check(r["stack"] == "vue" and r["has_php"] is False,
           "vendor/ pruned — Composer leftovers do not force the PHP layer on")
     shutil.rmtree(vendored, ignore_errors=True)
@@ -501,11 +539,14 @@ try:
     shutil.rmtree(empty, ignore_errors=True)
 
     os.environ["NESTI_STACK"] = "php"
-    r = tool_detect_stack(probe)["result"]
+    r = tool_detect_stack(probe, None, ".", "src")["result"]
     check(r["stack"] == "php" and r["source"] == "override" and r["has_vue"] is False,
           "NESTI_STACK pins the stack and reports source=override")
     os.environ["NESTI_STACK"] = "bogus"
-    check(tool_detect_stack(probe)["success"] is False, "invalid NESTI_STACK rejected")
+    check(tool_detect_stack(probe, None, ".", "src")["success"] is False, "invalid NESTI_STACK rejected")
+    os.environ["NESTI_STACK"] = "auto"
+    check(tool_detect_stack(probe, None, ".", ".")["success"] is False,
+          "a frontend inside the Laravel app is refused by the stack detector")
 finally:
     os.environ["NESTI_STACK"] = "auto"
     shutil.rmtree(probe, ignore_errors=True)
@@ -529,6 +570,12 @@ try:
                     "app/Http/Requests/StoreTaskRequest.php"):
         r = tool_detect_stack(laravel_probe, [touched])["result"]
         check(r["run_openapi"] is True, f"{touched} touched → OpenAPI layer runs")
+
+    for touched, expected in (("app/Domains/Shop/Http/Controllers/OrderController.php", True),
+                              ("routes/domains/Shop.php", True),
+                              ("app/Domains/Shop/Models/Order.php", False)):
+        r = tool_detect_stack(laravel_probe, [touched])["result"]
+        check(r["run_openapi"] is expected, f"{touched} touched → OpenAPI layer runs: {expected}")
 
     r = tool_detect_stack(laravel_probe, ["resources/js/components/X.vue"])["result"]
     check(r["run_openapi"] is False,
@@ -648,7 +695,8 @@ check("Laravel: True" in calls["mrs"][0], "MR description reports the Laravel fl
 
 # ═════ Scenario 15: Laravel fullstack issue → all four layers ═════
 print("\n── Scenario 15: Laravel fullstack → PHPUnit → OpenAPI → Vitest → Playwright ──")
-f = run(115, docker_outcomes=[True], code_responses=[LARAVEL_VUE_CODE], laravel_repo=True)
+f = run(115, docker_outcomes=[True], code_responses=[LARAVEL_VUE_CODE], laravel_repo=True,
+        layout=ROOT_SPA)
 check(f["stack"] == "fullstack", "stack detected as fullstack")
 check(calls["layers"] == ["docker", "openapi", "vitest", "playwright"],
       f"all four layers ran in order (got {calls['layers']})")
@@ -689,7 +737,7 @@ check(f["is_laravel"] is True, "is_laravel set after a scaffold")
 print("\n── Scenario 18: bootstrap refusal → crash net, workspace removed ──")
 reset_calls(119)
 patch_tools(docker_outcomes=[True], code_responses=[LARAVEL_CODE])
-nodes.tool_laravel_bootstrap = lambda repo_path: {
+nodes.tool_laravel_bootstrap = lambda repo_path, spa_path="": {
     "success": False,
     "error": "repository has composer.json but no artisan: not a Laravel app "
              "and not greenfield"}
@@ -768,19 +816,19 @@ check(documentation_request("Add /api/tasks", "The OpenAPI documentation must li
 
 import prompt_builder as _scoped  # noqa: E402
 _button = {"id": 5, "subject": "Change the green button colour to orange", "description": ""}
-_plan_sys = {s: _scoped.build_plan_prompt(_button, scope=s)[0] for s in SCOPES}
-_plan_user = {s: _scoped.build_plan_prompt(_button, scope=s)[1] for s in SCOPES}
-_code_sys = {s: _scoped.build_code_prompt(_button, "plan", scope=s)[0] for s in SCOPES}
+_plan_sys = {s: _scoped.build_plan_prompt(_button, scope=s, layout=ROOT_SPA)[0] for s in SCOPES}
+_plan_user = {s: _scoped.build_plan_prompt(_button, scope=s, layout=ROOT_SPA)[1] for s in SCOPES}
+_code_sys = {s: _scoped.build_code_prompt(_button, "plan", scope=s, layout=ROOT_SPA)[0] for s in SCOPES}
 check(all(f"TASK SCOPE: {s}" in _plan_sys[s] and f"TASK SCOPE: {s}" in _code_sys[s]
           for s in SCOPES), "both system prompts carry the TASK SCOPE block of their scope")
 check(not any(section in _code_sys["frontend"] or section in _plan_sys["frontend"]
               for section in ("DATABASE POLICY", "LARAVEL BACKEND", "API DOCUMENTATION")),
       "a frontend issue gets no database policy and no Laravel/Scramble standards")
 check(not any(section in _code_sys["backend"]
-              for section in ("PRIMEVUE FRONTEND", "@playwright/test", "getByRole")),
+              for section in ("PRIMEVUE SPA", "@playwright/test", "getByRole")),
       "a backend issue gets no PrimeVue standards and no Playwright instructions")
 check(all(section in _code_sys["fullstack"]
-          for section in ("DATABASE POLICY", "LARAVEL BACKEND", "PRIMEVUE FRONTEND")),
+          for section in ("DATABASE POLICY", "LARAVEL BACKEND", "PRIMEVUE SPA")),
       "fullstack keeps both standards")
 check(all(f"Line 1 of the plan, alone: SCOPE: {s}" in _plan_user[s] for s in SCOPES),
       "the planner is asked to declare the scope on line 1")
@@ -789,7 +837,7 @@ check(all("Documentation is out of scope" in p and "README.md" in p
       "every prompt keeps README.md out of an issue that does not ask for it")
 _docs_sys = _scoped.build_code_prompt(
     {"id": 6, "subject": "Add /api/ping and describe it in the README", "description": ""},
-    "plan", scope="backend")[0]
+    "plan", scope="backend", layout=API_ONLY)[0]
 check("Documentation is out of scope" not in _docs_sys
       and 'asks for documentation ("readme")' in _docs_sys,
       "an issue that names the README gets it back in scope, limited to what it asks")
@@ -798,65 +846,60 @@ check("Documentation is out of scope" not in _docs_sys
 print("\n── Scenario 25: change-aware layer gates ──")
 _gate_repo = tempfile.mkdtemp(prefix="nesti-gates-")
 try:
-    os.makedirs(os.path.join(_gate_repo, "resources", "js", "components"))
+    os.makedirs(os.path.join(_gate_repo, ".frontend", "src", "components"))
     open(os.path.join(_gate_repo, "artisan"), "w").close()
     open(os.path.join(_gate_repo, "composer.json"), "w").close()
-    _existing_vue = os.path.join(_gate_repo, "resources", "js", "components", "TaskTable.vue")
+    _existing_vue = os.path.join(_gate_repo, ".frontend", "src", "components", "TaskTable.vue")
     open(_existing_vue, "w").close()
 
     def _gates(written):
-        r = tool_detect_stack(_gate_repo, written)["result"]
+        r = tool_detect_stack(_gate_repo, written, ".", ".frontend")["result"]
         return r["run_phpunit"], r["run_frontend"]
 
     check(_gates(["app/Http/Controllers/PingController.php", "routes/api.php",
                   "tests/Feature/PingTest.php"]) == (True, False),
           "a backend change in a repository WITH .vue files skips Vitest and Playwright")
-    check(_gates(["resources/js/components/TaskTable.vue",
-                  "resources/js/components/__tests__/TaskTable.test.js",
-                  "e2e/tasks.spec.js"]) == (False, True),
+    check(_gates([".frontend/src/components/TaskTable.vue",
+                  ".frontend/src/components/__tests__/TaskTable.test.js",
+                  ".frontend/e2e/tasks.spec.js"]) == (False, True),
           "a frontend-only change skips PHPUnit")
-    check(_gates(["resources/views/app.blade.php"]) == (True, True),
-          "a Blade view is PHP that serves a page: both sides run")
-    check(_gates(["app/Models/Task.php", "resources/js/components/TaskTable.vue"]) == (True, True),
+    check(_gates(["app/Models/Task.php", ".frontend/src/components/TaskTable.vue"]) == (True, True),
           "a change on both sides runs every layer")
     check(_gates(["README.md"]) == (True, False),
           "a change on neither side still runs PHPUnit — never commits untested")
     check(_gates(None) == (True, True), "written_files=None → every layer (MCP callers)")
     os.remove(_existing_vue)
-    check(_gates(["resources/js/app.js"]) == (True, False),
-          "a JavaScript change in a repository without Vue falls back to PHPUnit")
+    check(_gates([".frontend/src/main.js"]) == (True, False),
+          "a JavaScript change in an SPA without Vue falls back to PHPUnit")
 finally:
     shutil.rmtree(_gate_repo, ignore_errors=True)
 
 # ═════ Scenario 26: scope end-to-end — SCOPE line, prompts, layers, widening ═════
 print("\n── Scenario 26: scope through the graph ──")
 BUTTON_CODE = (
-    "### FILE: resources/js/components/SaveButton.vue\n"
+    "### FILE: .frontend/src/components/SaveButton.vue\n"
     "```vue\n<template><Button severity=\"warn\" label=\"Save\"/></template>\n```\n\n"
-    "### FILE: resources/js/components/__tests__/SaveButton.test.js\n```js\n// vitest\n```\n\n"
-    "### FILE: e2e/save-button.spec.js\n```js\n// playwright\n```\n"
-)
-BLADE_BUTTON_CODE = (
-    "### FILE: resources/views/app.blade.php\n```blade\n<div id=\"app\"><save-button/></div>\n```\n\n"
-    + BUTTON_CODE
+    "### FILE: .frontend/src/components/__tests__/SaveButton.test.js\n```js\n// vitest\n```\n\n"
+    "### FILE: .frontend/e2e/save-button.spec.js\n```js\n// playwright\n```\n"
 )
 
 
 class _ScopeLines(logging.Handler):
-    """Collects the graph.nodes SCOPE lines whatever LOG_LEVEL the run uses."""
+    """Collects the graph.nodes lines starting with *prefix* whatever LOG_LEVEL the run uses."""
 
-    def __init__(self):
+    def __init__(self, prefix="SCOPE:"):
         super().__init__(logging.INFO)
+        self.prefix = prefix
         self.lines = []
 
     def emit(self, record):
-        if record.getMessage().startswith("SCOPE:"):
+        if record.getMessage().startswith(self.prefix):
             self.lines.append(record.getMessage())
 
 
-def run_logged(issue_id, **kw):
-    """run() with the SCOPE lines of that run captured."""
-    handler, node_logger = _ScopeLines(), logging.getLogger("graph.nodes")
+def run_logged(issue_id, prefix="SCOPE:", **kw):
+    """run() with the *prefix* lines (default SCOPE) of that run captured."""
+    handler, node_logger = _ScopeLines(prefix), logging.getLogger("graph.nodes")
     previous_level = node_logger.level
     node_logger.addHandler(handler)
     node_logger.setLevel(logging.DEBUG if previous_level == logging.DEBUG else logging.INFO)
@@ -867,21 +910,51 @@ def run_logged(issue_id, **kw):
         node_logger.setLevel(previous_level)
 
 
+_FACTS = "PHP 8.4 · Laravel 13.0 · database sqlite\nTables (column type):\n- tasks: id integer"
+with patch.object(nodes, "tool_app_facts", lambda path: {"success": True, "result": {
+        "facts": _FACTS, "tables": 1, "reason": "1 table(s)"}}):
+    f, facts_lines = run_logged(
+        2610, prefix="APP FACTS:", subject="Add a /api/ping endpoint for uptime checks",
+        description="Return ok.", docker_outcomes=[False, True], code_responses=[LARAVEL_CODE],
+        laravel_repo=True)
+    check(facts_lines == ["APP FACTS: exported · GitLab issue #2610 · 1 table(s)"]
+          and "## Application Facts" in calls["plan_prompts"][0] and len(calls["code_prompts"]) == 2
+          and all("## Application Facts" in p and "- tasks: id integer" in p for p in calls["code_prompts"]),
+          f"a backend run logs one APP FACTS line and every prompt carries the facts ({facts_lines})")
+    f, facts_lines = run_logged(
+        2611, prefix="APP FACTS:", subject="Change the green button colour to orange", description="",
+        docker_outcomes=[True], code_responses=[BUTTON_CODE], laravel_repo=True, vue_repo=True,
+        layout=ROOT_SPA)
+    check(facts_lines == ["APP FACTS: skipped · GitLab issue #2611 · frontend scope"]
+          and not any("## Application Facts" in p for p in calls["plan_prompts"] + calls["code_prompts"]),
+          f"a frontend run skips the facts and its prompts carry none ({facts_lines})")
+from graph.tools import _render_app_facts  # noqa: E402
+_rendered, _count = _render_app_facts(
+    {"php_version": "8.4", "laravel_version": "13.0", "database_engine": "pgsql"},
+    {"tables": {"migrations": {"id": "integer"},
+                **{f"t{i:03}": {"id": "integer", "body": "x" * 200} for i in range(100)}}})
+check("migrations" not in _rendered and len(_rendered) <= 12000 and 0 < _count < 100
+      and _rendered.endswith(f"- … {100 - _count} more table(s) omitted"),
+      "facts drop framework tables and stop at the character cap with an omission line")
+
+
 f, scope_lines = run_logged(
     2601, subject="Add a /api/ping endpoint for uptime checks", description="Return ok.",
-    docker_outcomes=[True], code_responses=[LARAVEL_CODE], laravel_repo=True, vue_repo=True)
+    docker_outcomes=[True], code_responses=[LARAVEL_CODE], laravel_repo=True, vue_repo=True,
+    layout=ROOT_SPA)
 check(len(scope_lines) == 1 and scope_lines[0].startswith("SCOPE: backend · GitLab issue #2601 · "),
       f"exactly one SCOPE line per run, final scope and issue number first ({scope_lines})")
 check(calls["layers"] == ["docker", "openapi"],
       f"backend issue in a Vue repository: PHPUnit → OpenAPI only (got {calls['layers']})")
-check(f["scope"] == "backend" and not any("PRIMEVUE FRONTEND" in p for p in
+check(f["scope"] == "backend" and not any("PRIMEVUE SPA" in p for p in
                                           calls["plan_systems"] + calls["code_systems"]),
       "a backend issue's plan and code prompts carry no PrimeVue standards")
 check("scope: backend" in calls["mrs"][0], "the MR body reports the scope")
 
 f, scope_lines = run_logged(
     2602, subject="Change the green button colour to orange", description="",
-    docker_outcomes=[True], code_responses=[BUTTON_CODE], laravel_repo=True, vue_repo=True)
+    docker_outcomes=[True], code_responses=[BUTTON_CODE], laravel_repo=True, vue_repo=True,
+    layout=ROOT_SPA)
 check(f["scope"] == "frontend" and calls["layers"] == ["vitest", "playwright"],
       f"button colour change: frontend scope, Vitest → Playwright, no PHPUnit (got {calls['layers']})")
 check(not any("DATABASE POLICY" in p for p in calls["plan_systems"] + calls["code_systems"]),
@@ -891,24 +964,13 @@ check(f["mr_url"] == "https://gitlab.example/mr/2602", "frontend-only change rea
 f, scope_lines = run_logged(
     2603, subject="Change the green button colour to orange", description="",
     plan_text="**SCOPE:** fullstack\n1. Objective: orange button",
-    docker_outcomes=[True], code_responses=[BUTTON_CODE], laravel_repo=True, vue_repo=True)
+    docker_outcomes=[True], code_responses=[BUTTON_CODE], laravel_repo=True, vue_repo=True,
+    layout=ROOT_SPA)
 check(f["scope"] == "fullstack" and "LARAVEL BACKEND" in calls["code_systems"][0],
       "the coder follows the scope the planner declared")
 check(len(scope_lines) == 1 and scope_lines[0].startswith("SCOPE: fullstack · GitLab issue #2603")
       and "issue text: frontend" in scope_lines[0] and scope_lines[0].endswith("planner: fullstack"),
       f"the SCOPE line shows the final scope and both sources ({scope_lines})")
-
-f, _ = run_logged(
-    2604, subject="Change the green button colour to orange", description="",
-    plan_text="SCOPE: frontend\n1. Objective: orange button",
-    docker_outcomes=[False, True], code_responses=[BLADE_BUTTON_CODE],
-    laravel_repo=True, vue_repo=True)
-check(calls["layers"] == ["docker", "docker", "vitest", "playwright"],
-      f"a Blade view puts PHPUnit in front of the frontend layers (got {calls['layers']})")
-check("LARAVEL BACKEND" not in calls["code_systems"][0]
-      and "LARAVEL BACKEND" in calls["code_systems"][1] and f["scope"] == "fullstack",
-      "a red PHPUnit layer widens a frontend scope to fullstack for the retry")
-check(f["mr_url"] == "https://gitlab.example/mr/2604", "the widened retry reaches its MR")
 
 # The layer set changes between attempts (Vitest on attempt 1, PHPUnit on
 # attempt 2): attempt 2's red PHPUnit must be fed back as PHPUnit — not as the
@@ -917,7 +979,7 @@ check(f["mr_url"] == "https://gitlab.example/mr/2604", "the widened retry reache
 f = run(2605, subject="Change the green button colour to orange", description="",
         docker_outcomes=[False, True], vitest_outcomes=[False],
         code_responses=[BUTTON_CODE, LARAVEL_CODE, LARAVEL_CODE],
-        laravel_repo=True, vue_repo=True)
+        laravel_repo=True, vue_repo=True, layout=ROOT_SPA)
 check([(e["attempt"], e["layer"]) for e in calls["memory_remember_failure"]]
       == [(1, "Vitest (component tests)"), (2, "PHPUnit")],
       "each attempt's failure is reported as its own layer, never a stale earlier one")
@@ -934,7 +996,7 @@ check("FAIL  src/components" in calls["code_messages"][1][0]["content"]
 # reach the untouched clone's green baseline.
 f = run(2620, subject="Filter existing tasks", description="Scope: frontend",
         docker_outcomes=[True], code_responses=[NO_BLOCKS, BUTTON_CODE],
-        laravel_repo=True, vue_repo=True)
+        laravel_repo=True, vue_repo=True, layout=ROOT_SPA)
 check(calls["layers"] == ["vitest", "playwright"] and f["attempt"] == 2 and f["mr_url"],
       "an unapplied frontend attempt retries before running only its actual layers")
 check(calls["memory_remember_failure"][0]["layer"] == "Code generation"
@@ -942,7 +1004,7 @@ check(calls["memory_remember_failure"][0]["layer"] == "Code generation"
       "unapplied code is attributed to generation without widening frontend scope")
 f = run(2621, subject="Filter existing tasks", description="Scope: frontend",
         docker_outcomes=[True], code_responses=[NO_BLOCKS],
-        laravel_repo=True, vue_repo=True)
+        laravel_repo=True, vue_repo=True, layout=ROOT_SPA)
 check(not calls["layers"] and not calls["pushes"] and not f["mr_url"],
       "exhausted unapplied code cannot test the baseline, push or open an empty MR")
 check("Code generation" in f["failure_reason"]
@@ -991,7 +1053,11 @@ check(len(calls["memory_remember_solution"]) == 1
       and calls["memory_remember_solution"][0]["plan"] == f["plan"]
       and calls["memory_remember_solution"][0]["stack"] == "php",
       "the merged plan is written back to the solution cache with the real MR URL")
-check(calls["memory_forget"] == [1190], "episodes are dropped once the issue is done")
+check(calls["memory_forget"] == [(1190, "test-1190")],
+      "the run's episodes are dropped once the issue is done")
+check({e["run_id"] for e in calls["memory_remember_failure"] + calls["memory_recall"]}
+      == {"test-1190"},
+      "every episode write and recall carries the run's id")
 check(f["retrieved_chunks"] == 2 and f["past_solutions"] == 1 and f["recalled_failures"] == 1,
       "state counters report what reached the prompts")
 check("## Past Nesti Experience" in calls["plan_prompts"][0]
@@ -1183,7 +1249,7 @@ for _builder, _args in (
 ):
     _, _prompt = _builder(
         *_args, retrieved_chunks=[_oversized, _ranked[1], _ranked[2]],
-        catalog_skills=_budget_catalog,
+        catalog_skills=_budget_catalog, layout=API_ONLY,
     )
     check("oversized-" not in _prompt and "### Reranked practice" not in _prompt
           and "### Reranked PHP last" in _prompt,
@@ -1267,9 +1333,10 @@ finally:
 
 import semantic_cache as _sc  # noqa: E402
 _sm = _sc.SemanticMemory()   # REDIS_URL points at 127.0.0.1:1 (unreachable)
-check(_sm.available is False and _sm.find_similar_solutions("x") == []
-      and _sm.remember_solution(1, "s", "d", "p", "php", "u") is False
-      and _sm.recall_failures(1, "x", attempt=5) == [] and _sm.forget_episodes(1) == 0,
+check(_sm.available is False and _sm.find_similar_solutions("gitlab.test/a/b", "x") == []
+      and _sm.remember_solution("gitlab.test/a/b", 1, "s", "d", "p", "php", "u") is False
+      and _sm.recall_failures("gitlab.test/a/b", 1, "r", "x", attempt=5) == []
+      and _sm.forget_episodes("gitlab.test/a/b", 1, "r") == 0,
       "SemanticMemory degrades on an unreachable Redis: reads [], writes False")
 check(_sm.status()["solutions"] is None and _sm.status()["engine"] == "unavailable",
       "unreadable memory counts are None, never guessed")
@@ -1331,6 +1398,8 @@ from llm_client import LLMClient  # noqa: E402
 
 
 class _StubCoder:
+    caches_user_prefix = False
+
     def __init__(self, name, available=True, fail=False):
         self.name, self.label, self.available, self.fail = name, name, available, fail
 
@@ -1399,7 +1468,8 @@ with patch.dict(os.environ, {
     _deep_http.return_value.json.return_value = {
         "choices": [{"message": {"content": "deepseek answer"}}],
     }
-    _anthropic_sdk.return_value.messages.create.return_value.content[0].text = "anthropic answer"
+    _anthropic_sdk.return_value.messages.create.return_value.model_dump.return_value = {
+        "content": [{"type": "text", "text": "anthropic answer"}]}
     _gated = LLMClient()
     _consumer = _gated._coders[0]
     check(_gated.generate_plan("s", "u") == "plan from Consumer"
@@ -1824,11 +1894,34 @@ with tempfile.TemporaryDirectory(prefix="nesti-retry-context-") as root:
           "second retry excludes obsolete code and failure despite full diagnostic transcript")
     nodes._store.delete(3100)
 
+# A retry quotes the existing file its failure names, so it is fixed in place.
+with tempfile.TemporaryDirectory(prefix="nesti-retry-failure-file-") as root:
+    _put_retry = Path(root, "tests/Feature/ContractTest.php")
+    _put_retry.parent.mkdir(parents=True)
+    _put_retry.write_text("<?php\n// CONTRACT_TEST_BODY\n", encoding="utf-8")
+    _retry_code = "### FILE: app/X.php\n```php\n<?php\n```\n"
+    reset_calls(3101)
+    patch_tools(docker_outcomes=[True], code_responses=[_retry_code])
+    state = initial(3101)
+    state.update(repo_path=root, plan="Add the endpoint.", scope="backend")
+    state.update(nodes.node_code(state))
+    state["test_output"] = ("FAILED  Tests\\Feature\\ContractTest\n"
+                            "  at \x1b[32mtests/Feature/ContractTest.php\x1b[39m:26")
+    state.update(nodes.node_code(state))
+    check("CONTRACT_TEST_BODY" not in calls["code_prompts"][0]
+          and "Current tests/Feature/ContractTest.php (complete)" in calls["code_prompts"][1]
+          and "CONTRACT_TEST_BODY" in calls["code_prompts"][1],
+          "a retry quotes the existing test file its failure names (tests/Feature/X.php:26)")
+    check(any("never remove\n  or loosen its other assertions" in p
+              for p in (calls["code_systems"][1], calls["code_prompts"][1])),
+          "the coding prompt forbids loosening an existing test's other assertions")
+    nodes._store.delete(3101)
+
 # ═════ Scenario 12c: the coder must see what the repository already has ═════
 print("\n── Scenario 12c: _repo_inventory ──")
 inv_root = tempfile.mkdtemp(prefix="nesti-inv-")
 try:
-    check(nodes._repo_inventory(os.path.join(inv_root, "missing")) == "",
+    check(nodes._repo_inventory(os.path.join(inv_root, "missing"), API_ONLY) == "",
           "a missing workspace yields no section (never raises)")
 
     os.makedirs(os.path.join(inv_root, "database", "migrations"))
@@ -1840,7 +1933,7 @@ try:
     with open(os.path.join(inv_root, "routes", "api.php"), "w") as fh:
         fh.write("<?php\nRoute::get('/tasks', [TaskController::class, 'index']);\n")
 
-    inv = nodes._repo_inventory(inv_root)
+    inv = nodes._repo_inventory(inv_root, API_ONLY)
     check("2025_01_01_000000_create_tasks_table.php" in inv,
           "existing migrations are listed (duplicate create-table is unrecoverable)")
     check("Task.php" in inv, "existing models are listed")
@@ -1863,8 +1956,7 @@ from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 from urllib.parse import urlsplit
-import e2e_fixtures as ef
-from issue_dependencies import FixtureDependencies
+
 
 
 class _FakeResponse:
@@ -1888,15 +1980,10 @@ class _IssueHTTP:
     def __init__(self):
         self.issues = {}
         self.notes = {}
-        self.mrs = {}
-        self.related = {}
         self.requests = []
         self.apply_put = True
-        self.lost_child = ""
-        self.lost_note = False
-        self.failed_get = set()
         self.note_id = 0
-        self.child_posts = 0
+        self.head = "h1"
 
     def add_issue(self, iid, labels=None, state="opened", description=""):
         self.issues[iid] = {
@@ -1922,10 +2009,14 @@ class _IssueHTTP:
     def get(self, url, params=None, timeout=None):
         path = urlsplit(url).path
         self.requests.append(("GET", path, deepcopy(params)))
-        if path in self.failed_get:
-            return _FakeResponse({"error": "read unavailable"}, 503)
         if path.endswith("/user"):
             return _FakeResponse({"id": 15})
+        if "/repository/branches/" in path:
+            if self.head is None:
+                return _FakeResponse({"message": "404 Branch Not Found"}, 404)
+            if self.head == "error":
+                return _FakeResponse({"error": "down"}, 500)
+            return _FakeResponse({"commit": {"id": self.head}})
         suffix = path.split("/issues", 1)
         if len(suffix) == 2:
             parts = suffix[1].strip("/").split("/") if suffix[1].strip("/") else []
@@ -1944,10 +2035,6 @@ class _IssueHTTP:
                 if len(parts) == 3:
                     return _FakeResponse(next(n for n in notes if n["id"] == int(parts[2])))
                 return self._page(notes, params)
-            if parts[1] == "related_merge_requests":
-                return self._page([self.mrs[n] for n in self.related.get(iid, [])], params)
-        if "/merge_requests/" in path:
-            return _FakeResponse(self.mrs[int(path.rsplit("/", 1)[1])])
         raise AssertionError(f"Unexpected GET {url}")
 
     def put(self, url, json=None, timeout=None):
@@ -1981,22 +2068,13 @@ class _IssueHTTP:
         self.requests.append(("POST", path, deepcopy(json)))
         if path.endswith("/notes"):
             iid = int(path.split("/issues/")[1].split("/")[0])
-            note = self.add_note(iid, json["body"])
-            if self.lost_note:
-                self.lost_note = False
-                raise RuntimeError("accepted note response lost")
-            return _FakeResponse(note, 201)
+            return _FakeResponse(self.add_note(iid, json["body"]), 201)
         if path.endswith("/issues"):
-            self.child_posts += 1
-            if self.lost_child != "absent":
-                iid = max(self.issues, default=0) + 1
-                child = self.add_issue(iid, json.get("labels", "").split(","),
-                                       description=json["description"])
-                child["title"] = json["title"]
-            if self.lost_child:
-                self.lost_child = ""
-                raise RuntimeError("creation response lost")
-            return _FakeResponse(child, 201)
+            iid = max(self.issues, default=0) + 1
+            issue = self.add_issue(iid, [label for label in json.get("labels", "").split(",") if label],
+                                   description=json["description"])
+            issue["title"] = json["title"]
+            return _FakeResponse(issue, 201)
         raise AssertionError(f"Unexpected POST {url}")
 
 
@@ -2025,6 +2103,55 @@ http.issues[9]["state"] = "opened"
 http.issues[9]["labels"] = ["human"]
 check(not client.pause_issue(9) and not client.resume_issue(9) and not client.reopen_issue(9),
       "manual opt-out is never reversed")
+
+print("\n── Scenario 12d-rerun: an unchanged failed issue is not re-run ──")
+rerun = _IssueHTTP()
+rerun.add_issue(30, description="Do it.")
+rerun.add_issue(31)
+rerun.add_issue(32)
+rerun.issues[32]["description"] = None
+
+
+def _mark_failed(iid, author=15, head="h1"):
+    issue = rerun.issues[iid]
+    rerun.add_note(iid, "AI Developer failed to produce passing tests (PHPUnit).\n\n"
+                   + gic.failed_run_marker(issue["title"], issue["description"] or "", head),
+                   author=author)
+
+
+def _rerun_pending():
+    return [i["id"] for i in rerun.client().list_pending()]
+
+
+_mark_failed(30)
+_mark_failed(32)
+check([i["id"] for i in rerun.client().list_pending(1)] == [31],
+      "a stale-failed oldest issue is skipped and does not count toward the limit")
+rerun.requests.clear()
+check(_rerun_pending() == [31] and sum("/repository/branches/" in r[1] for r in rerun.requests) == 1,
+      "unchanged title/description/HEAD excludes failed issues; HEAD read once per poll")
+rerun.issues[30]["title"] = "Issue 30, clarified"
+check(_rerun_pending() == [30, 31], "an edited title makes the failed issue pending again")
+rerun.issues[30]["title"] = "Issue 30"
+rerun.issues[30]["description"] = "Do it properly."
+check(_rerun_pending() == [30, 31], "an edited description makes the failed issue pending again")
+rerun.issues[30]["description"] = "Do it."
+rerun.head = "h2"
+check(_rerun_pending() == [30, 31, 32], "a new target-branch commit makes failed issues pending again")
+rerun.head = None
+check(_rerun_pending() == [30, 31, 32], "a missing target branch (404) matches no marker")
+rerun.head = "error"
+try:
+    rerun.client().list_pending()
+    _head_raised = False
+except RuntimeError:
+    _head_raised = True
+check(_head_raised, "any other target-HEAD lookup error aborts the poll")
+rerun.head = "h1"
+_mark_failed(31, author=99)
+check(_rerun_pending() == [31], "a failed-run marker by a foreign author is ignored")
+_mark_failed(30, head="h0")
+check(_rerun_pending() == [30, 31], "the latest trusted marker decides, older markers do not")
 
 print("\n── Scenario 12d-omp: OMP escalation issue tools ──")
 import graph.tools as _issue_tools  # noqa: E402
@@ -2070,56 +2197,25 @@ check(not client.reopen_issue(10)
       "a manual pause arriving during unlock is preserved and cannot report pending")
 client.session.put = ordinary_put
 
-# Inventory consumes whole entry bodies, not basename-only or partial context.
-print("\n── Frontend inventory budgets and isolation ──")
+# Inventory lists nested paths relative to their directory and prunes dependency trees.
+print("\n── Inventory nested paths and pruning ──")
 with tempfile.TemporaryDirectory(prefix="nesti-inventory-") as root:
     def put_file(relative, body):
         file = Path(root, relative)
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(body, encoding="utf-8")
-    put_file("resources/js/app.js", "ENTRY_CHAIN_SENTINEL")
-    put_file("resources/views/app.blade.php", "SERVED_VIEW_SENTINEL")
-    put_file("resources/js/components/admin/Table.vue", "admin")
-    put_file("resources/js/components/public/Table.vue", "public")
-    put_file("resources/js/components/vendor/Hidden.vue", "hidden")
+    put_file(".frontend/src/components/admin/Table.vue", "admin")
+    put_file(".frontend/src/components/public/Table.vue", "public")
+    put_file(".frontend/src/node_modules/x/Hidden.vue", "hidden")
     put_file("database/seeders/nested/TaskSeeder.php", "seeder")
     put_file("database/factories/nested/TaskFactory.php", "factory")
-    backend = nodes._repo_inventory(root, "backend")
-    frontend = nodes._repo_inventory(root, "frontend")
-    check("ENTRY_CHAIN_SENTINEL" not in backend and "SERVED_VIEW_SENTINEL" not in backend,
-          "backend scope does not quote page entry bodies")
-    check(all(value in frontend for value in (
-        "ENTRY_CHAIN_SENTINEL", "SERVED_VIEW_SENTINEL", "admin/Table.vue", "public/Table.vue",
-        "nested/TaskSeeder.php", "nested/TaskFactory.php")) and "Hidden.vue" not in frontend,
-          "frontend context retains relative nested paths and prunes dependencies")
-    put_file("resources/js/app.js", "WHOLE_ENTRY_BODY\n \t\n")
-    check("WHOLE_ENTRY_BODY\n \t\n" in nodes._repo_inventory(root, "frontend"),
-          "quoted entry retains its complete body including trailing whitespace")
-    put_file("resources/js/app.js", "OVERSIZE_SENTINEL" + "é" * (nodes._MAX_QUOTED_FILE_CHARS + 1))
-    check("OVERSIZE_SENTINEL" not in nodes._repo_inventory(root, "frontend"),
-          "oversized multibyte entry body is omitted whole")
-    for relative, sentinel in (
-        ("resources/js/app.js", "BUDGET_FIRST"), ("resources/js/app.ts", "BUDGET_SECOND"),
-        ("resources/views/app.blade.php", "BUDGET_THIRD"), ("resources/js/App.vue", "BUDGET_FOURTH")):
-        put_file(relative, sentinel + "x" * (20000 - len(sentinel)))
-    inventory = nodes._repo_inventory(root, "fullstack")
-    check("BUDGET_FIRST" in inventory and "BUDGET_SECOND" in inventory
-          and "BUDGET_THIRD" not in inventory and "BUDGET_FOURTH" not in inventory,
-          "aggregate quote budget keeps priority complete bodies only")
-    check(len("\n\n".join(nodes._quoted_entry_files(Path(root)))) <= nodes._MAX_QUOTED_TOTAL_CHARS,
-          "inventory headings and bodies together stay within aggregate budget")
-    put_file("package.json", '{"name": "ONCE_ONLY"}')
-    check(nodes._repo_inventory(root, "frontend").count("ONCE_ONLY") == 1,
-          "a referenced fixed entry file is quoted once")
-    original_read = Path.read_text
-    def unreadable(path, *args, **kwargs):
-        if path == Path(root, "resources/js/app.js"):
-            raise OSError("simulated unreadable optional entry")
-        return original_read(path, *args, **kwargs)
-    with patch.object(Path, "read_text", unreadable):
-        inventory = nodes._repo_inventory(root, "frontend")
-    check("BUDGET_FIRST" not in inventory and "BUDGET_SECOND" in inventory
-          and "admin/Table.vue" in inventory, "one optional read error preserves other usable context")
+    backend = nodes._repo_inventory(root, API_ONLY, "backend")
+    frontend = nodes._repo_inventory(root, ROOT_SPA, "frontend")
+    check("nested/TaskSeeder.php" in backend and "nested/TaskFactory.php" in backend
+          and "Table.vue" not in backend, "backend inventory keeps relative nested paths, no SPA")
+    check(all(value in frontend for value in ("admin/Table.vue", "public/Table.vue"))
+          and "Hidden.vue" not in frontend,
+          "SPA context retains relative nested paths and prunes dependencies")
 
 with tempfile.TemporaryDirectory(prefix="nesti-task-context-") as root:
     def put_target(relative, body):
@@ -2128,38 +2224,54 @@ with tempfile.TemporaryDirectory(prefix="nesti-task-context-") as root:
         file.write_text(body, encoding="utf-8")
     target_body = '<template><p>Existing public task behaviour</p></template>\n'
     unrelated_body = '<template><p>Unrelated admin behaviour</p></template>\n'
-    put_target("resources/js/components/public/Table.vue", target_body)
-    put_target("resources/js/components/admin/Table.vue", unrelated_body)
+    put_target(".frontend/src/components/public/Table.vue", target_body)
+    put_target(".frontend/src/components/admin/Table.vue", unrelated_body)
     inventory = nodes._repo_inventory(
-        root, "frontend", "Filter resources/js/components/public/Table.vue")
+        root, ROOT_SPA, "frontend", "Filter .frontend/src/components/public/Table.vue")
     check(target_body in inventory and unrelated_body not in inventory,
           "a named nested target supplies its complete source without a same-name sibling")
-    inventory = nodes._repo_inventory(root, "frontend", "Update Table.vue")
+    inventory = nodes._repo_inventory(root, ROOT_SPA, "frontend", "Update Table.vue")
     check(target_body in inventory and unrelated_body in inventory,
           "an ambiguous basename exposes both real candidates instead of guessing one")
     existing_test = "import Table from '../public/Table.vue';\nconst mountOptions = { plugins: ['PrimeVue'] };\n"
     unrelated_test = "import Table from '../admin/Table.vue';\nconst adminOnly = true;\n"
-    put_target("resources/js/components/__tests__/PublicFilters.test.js", existing_test)
-    put_target("resources/js/components/__tests__/AdminFilters.test.js", unrelated_test)
+    put_target(".frontend/src/components/__tests__/PublicFilters.test.js", existing_test)
+    put_target(".frontend/src/components/__tests__/AdminFilters.test.js", unrelated_test)
     e2e_test = "import { test } from '@playwright/test';\nawait page.goto('/table');\n"
-    put_target("e2e/table.spec.js", e2e_test)
-    put_target("package.json", '{"type":"module"}')
+    put_target(".frontend/e2e/table.spec.js", e2e_test)
+    put_target(".frontend/package.json", '{"type":"module"}')
     inventory = nodes._repo_inventory(
-        root, "frontend", "Filter resources/js/components/public/Table.vue")
+        root, ROOT_SPA, "frontend", "Filter .frontend/src/components/public/Table.vue")
     check(existing_test in inventory and unrelated_test not in inventory,
           "a component target brings its existing test setup even when the issue names no test")
     check(e2e_test in inventory and '{"type":"module"}' in inventory,
           "component context includes its conventional E2E setup and JavaScript module contract")
-    put_target("custom/retained.txt", "last valid attempt\n \t\n")
-    inventory = nodes._repo_inventory(root, "frontend", "Update Table.vue", ["custom/retained.txt"])
+    put_target(".frontend/custom/retained.txt", "last valid attempt\n \t\n")
+    inventory = nodes._repo_inventory(root, ROOT_SPA, "frontend", "Update Table.vue",
+                                      [".frontend/custom/retained.txt"])
     check("last valid attempt\n \t\n" in inventory,
           "retry includes complete prior changes even outside inventory directories")
-    put_target("resources/js/components/public/Table.vue",
+    put_target(".frontend/src/components/public/Table.vue",
                "TARGET_OVERSIZE" + "x" * nodes._MAX_QUOTED_FILE_CHARS)
     inventory = nodes._repo_inventory(
-        root, "frontend", "Update resources/js/components/public/Table.vue")
+        root, ROOT_SPA, "frontend", "Update .frontend/src/components/public/Table.vue")
     check("TARGET_OVERSIZE" not in inventory and "body omitted" in inventory,
           "task-target priority never turns an oversized source into a partial rewrite")
+
+with tempfile.TemporaryDirectory(prefix="nesti-session-context-") as root:
+    storage = "export const save = (t) => localStorage.setItem('app.token', t);\n"
+    Path(root, ".frontend/src/api").mkdir(parents=True)
+    Path(root, ".frontend/src/api/client.ts").write_text(storage)
+    Path(root, ".frontend/src/Plain.vue").write_text("<template><p>plain</p></template>\n")
+    inventory = nodes._repo_inventory(root, ROOT_SPA, "frontend", "Add a page")
+    check("Current .frontend/src/api/client.ts (complete)" in inventory and "<p>plain</p>" not in inventory,
+          "an SPA without e2e/support/session.* quotes the file that stores its session")
+    Path(root, ".frontend/e2e/support").mkdir(parents=True)
+    Path(root, ".frontend/e2e/support/session.js").write_text("export async function signIn() {}\n")
+    inventory = nodes._repo_inventory(root, ROOT_SPA, "frontend", "Add a page")
+    check("Current .frontend/e2e/support/session.js (complete)" in inventory
+          and "localStorage.setItem('app.token'" not in inventory,
+          "an existing session helper is quoted instead of the session storage source")
 
 with tempfile.TemporaryDirectory(prefix="nesti-api-context-") as root:
     def put_contract(relative, body):
@@ -2180,7 +2292,7 @@ with tempfile.TemporaryDirectory(prefix="nesti-api-context-") as root:
     put_contract("app/Services/TaskIndexService.php", service)
     put_contract("app/Http/Resources/TaskResource.php", resource)
     put_contract("app/Services/Unrelated.php", "<?php\nUNRELATED_SECRET;\n")
-    inventory = nodes._repo_inventory(root, "frontend", "Add task status radios")
+    inventory = nodes._repo_inventory(root, ROOT_SPA, "frontend", "Add task status radios")
     check(all(body in inventory for body in (controller, request, service, resource)),
           "frontend API context exposes accepted inputs, response fields and actual pagination order")
     check(inventory.count("Current app/Http/Controllers/TaskController.php (complete)") == 1
@@ -2193,20 +2305,14 @@ with tempfile.TemporaryDirectory(prefix="nesti-api-context-") as root:
         "Route::get('/currency', [CurrencyController::class, 'index']);\n"
     ))
     put_contract("app/Http/Controllers/CurrencyController.php", "<?php\nUNRELATED_CURRENCY_BODY;\n")
-    put_contract("resources/js/components/Table.vue",
-                 "<script setup>fetch('/api/tasks');</script><template><p>Task title</p></template>\n")
-    inventory = nodes._repo_inventory(root, "frontend", "Add TitleLength to Table.vue")
+    inventory = nodes._repo_inventory(root, ROOT_SPA, "frontend",
+                                      "Add TitleLength to Table.vue for GET /api/tasks")
     check(all(body in inventory for body in (controller, request, service, resource))
-          and "UNRELATED_CURRENCY_BODY" not in inventory,
-          "target SFC keeps its multiline aliased API contracts, excludes unrelated route bodies")
-    put_contract("resources/js/components/Table.vue", "<template><p>Local title</p></template>\n")
-    inventory = nodes._repo_inventory(root, "frontend", "Add TitleLength to Table.vue")
-    check(controller not in inventory and "UNRELATED_CURRENCY_BODY" not in inventory
-          and "Route::get('/currency'" in inventory,
-          "local-only frontend target retains route inventory without unrelated API bodies")
+          and "UNRELATED_CURRENCY_BODY" not in inventory and "Route::get('/currency'" in inventory,
+          "an /api route in the task keeps its multiline aliased contracts, excludes unrelated route bodies")
     put_contract("app/Services/TaskIndexService.php",
                  "<?php\nOVERSIZED_CONTRACT\n" + "x" * nodes._MAX_QUOTED_FILE_CHARS)
-    inventory = nodes._repo_inventory(root, "frontend")
+    inventory = nodes._repo_inventory(root, ROOT_SPA, "frontend")
     check("OVERSIZED_CONTRACT" not in inventory and request in inventory
           and "body omitted" in inventory,
           "oversized API source is omitted whole without losing other usable contracts")
@@ -2215,24 +2321,19 @@ with tempfile.TemporaryDirectory(prefix="nesti-api-context-") as root:
         external.write_text("<?php\nOUTSIDE_CONTRACT_SECRET;\n")
         Path(root, "app/Services/Outside.php").symlink_to(external)
         put_contract("routes/api.php", "<?php\nuse App\\Services\\Outside;\n")
-        check("OUTSIDE_CONTRACT_SECRET" not in nodes._repo_inventory(root, "frontend"),
+        check("OUTSIDE_CONTRACT_SECRET" not in nodes._repo_inventory(root, ROOT_SPA, "frontend"),
               "API reference discovery never quotes files outside the workspace")
 
-print("\n── Playwright report transport and container lifecycle ──")
+print("\n── Playwright container lifecycle ──")
 import frontend_runner as fr
 import requests
 import docker
-requirement = {"endpoint": "/api/tasks", "model": r"App\Models\Task",
-               "seeder": r"Database\Seeders\TaskSeeder", "table": "tasks"}
-declaration = {key: value for key, value in requirement.items() if key != "table"}
-blocked_report = {"version": 1, "status": "missing_seeder", "requirement": requirement}
-ready_report = {"version": 1, "status": "ready"}
 
 
-def runner_case(root, exit_code, report=None, logs="sandbox log", error=None, start_error=None):
-    """Run the real runner against a report-writing detached fake container."""
-    results = []
+def runner_case(root, exit_code, logs="sandbox log", error=None, start_error=None):
+    """Run the real runner against a detached fake container."""
     removed = []
+    names = []
     waits = []
     class Container:
         def wait(self, timeout):
@@ -2242,101 +2343,147 @@ def runner_case(root, exit_code, report=None, logs="sandbox log", error=None, st
             return {"StatusCode": exit_code}
         def logs(self, **kwargs):
             return logs.encode()
-        def remove(self, force):
-            removed.append(force)
+    class Created:
+        def __init__(self, name):
+            self.name = name
+        def remove(self, force, v):
+            removed.append((self.name, force, v))
     def start(**kwargs):
         check(kwargs["detach"] is True and kwargs["remove"] is False,
               "runner retains enforceable detached lifecycle")
-        directory = next(path for path, mount in kwargs["volumes"].items()
-                         if mount["bind"] == "/nesti-results")
-        results.append(directory)
-        check(not list(Path(directory).iterdir()), "each run starts with an empty report directory")
+        check(kwargs["name"].startswith("nesti-fe-"), "sandbox container carries a nesti- name")
+        names.append(kwargs["name"])
+        check([(m["Target"], m["Type"], m["Source"]) for m in kwargs["mounts"]]
+              == [("/app/node_modules", "volume", None)],
+              "node_modules installs into an anonymous container volume")
         if start_error:
             raise start_error
-        if report is not None:
-            Path(directory, "fixtures.json").write_text(
-                report if isinstance(report, str) else json.dumps(report), encoding="utf-8")
         return Container()
     with patch.object(fr.docker, "from_env",
-                      return_value=SimpleNamespace(containers=SimpleNamespace(run=start))):
+                      return_value=SimpleNamespace(containers=SimpleNamespace(run=start, get=Created))):
         runner = fr.FrontendRunner()
         result = runner.run_playwright(root)
-    check(all(not Path(directory).exists() for directory in results),
-          "result mount removed after outcome")
-    check(removed == ([] if start_error else [True]), "every started container removed forcibly")
+    # Even when run() raises (start failed after create), removal goes by name.
+    check(removed == [(names[0], True, True)],
+          "every created container removed forcibly by name with its anonymous volume")
     if not start_error:
         check(waits == [runner.timeout], "container waits with configured timeout")
     return result
 
 
 with tempfile.TemporaryDirectory(prefix="nesti-runner-") as root:
-    Path(root, "artisan").touch()
-    Path(root, "e2e").mkdir()
-    Path(root, ef.MANIFEST_PATH).write_text(json.dumps({"version": 1, "fixtures": [declaration]}))
-    result = runner_case(root, 78, blocked_report)
-    check(not result["passed"] and result["fixture_request"] == requirement,
-          "exit 78 with matching report carries verified prerequisite")
-    wrong = deepcopy(blocked_report)
-    wrong["requirement"]["endpoint"] = "/api/other"
-    for code, report, logs, error in (
-        (1, blocked_report, "setup error", None),
-        (1, ready_report, "browser suite failed", None),
-        (78, wrong, "wrong declaration", None),
-        (78, '{"version":1,"status":"ready"}', "stale ready report", None),
-        (78, "{" + "x" * 5000, "oversized forged report", None),
-        (78, None, json.dumps(blocked_report), None),
-        (1, None, "0 locators; timed out waiting for /api/tasks", None),
-        (0, None, "tests passed without fixture helper", None),
-        (1, None, "Could not open input file: /opt/nesti/e2e_fixtures.php", None),
-        (78, blocked_report, "partial log", requests.exceptions.ReadTimeout("timeout")),
-    ):
-        result = runner_case(root, code, report, logs, error)
-        check(not result["passed"] and result["fixture_request"] is None,
-              f"exit/report/log mismatch never invents dependency ({logs[:40]})")
-        check(logs in result["output"], "ordinary error preserves container logs")
-    check(runner_case(root, 0, ready_report)["passed"], "ready setup reaches ordinary green browser gate")
-    result = runner_case(root, 1, start_error=docker.errors.ImageNotFound("missing image"))
-    check(not result["passed"] and result["fixture_request"] is None, "missing image remains ordinary failure")
-    import builtins
-    original_open = builtins.open
-    def denied_report(path, mode="r", *args, **kwargs):
-        if Path(path).name == "fixtures.json" and mode == "rb":
-            raise OSError("report read denied")
-        return original_open(path, mode, *args, **kwargs)
-    with patch.object(builtins, "open", denied_report):
-        result = runner_case(root, 78, blocked_report)
-    check(result["fixture_request"] is None and not result["passed"], "report read error cannot request dependency")
+    check(runner_case(root, 0) == (True, "sandbox log"), "exit 0 is a green browser gate")
+    passed, output = runner_case(root, 1, "1 failed")
+    check(not passed and "1 failed" in output, "a failed suite keeps its container logs")
+    passed, output = runner_case(root, 1, "partial log", requests.exceptions.ReadTimeout("timeout"))
+    check(not passed and "partial log" in output and "timed out" in output,
+          "a timeout keeps the partial logs")
+    passed, output = runner_case(root, 1, start_error=docker.errors.ImageNotFound("missing image"))
+    check(not passed and "not found" in output, "missing image is an ordinary failure")
+    passed, _ = runner_case(root, 1, start_error=docker.errors.APIError("start failed after create"))
+    check(not passed, "start failure after create is an ordinary failure, container still removed")
 
-print("\n── Graph pause versus ordinary retry and rejected claim ──")
-for pause_status, attempts, expected_attempts in (("paused", 1, 1), ("ineligible", 2, 2)):
-    reset_calls(310)
-    patch_tools(docker_outcomes=[True], code_responses=[BUTTON_CODE],
-                laravel_repo=True, vue_repo=True, plan_text="SCOPE: frontend\nimplement button")
-    pauses = []
-    def pause_fixture(iid, repo, requested, written):
-        pauses.append((iid, requested, written))
-        return {"success": True, "result": {"status": pause_status, "child_iid": 311,
-                                           "reason": "backend prerequisite belongs to parent"}}
-    nodes.tool_issue_pause_for_fixture = pause_fixture
-    nodes.tool_playwright_run_tests = lambda repo: {
-        "success": True, "result": {"passed": False, "output": "fixture preparation stopped",
-                                   "fixture_request": requirement}}
-    state = initial(310, "Button", "Scope: frontend. Change button colour.")
-    state["max_attempts"] = attempts
-    final = compiled.invoke(state, config={"recursion_limit": 60})
-    check(final["attempt"] == expected_attempts and not calls["mrs"] and not calls["pushes"],
-          f"{pause_status} fixture result never commits untested change")
-    check(not any(Path(workspace).exists() for workspace in calls["workspaces"]),
-          f"{pause_status} fixture path cleans workspace")
-    if pause_status == "paused":
-        check(final["scope"] == "frontend" and final["dependency_status"] == "paused"
-              and len(calls["plan_prompts"]) == len(calls["code_prompts"]) == 1
-              and calls["escalate"] == 0 and not any(s == "new" for _, s, _ in calls["issues"]),
-              "verified frontend prerequisite pauses at last attempt without LLM escalation or reopen")
-    else:
-        check(calls["escalate"] == 1 and len(pauses) == 2
-              and any(s == "new" for _, s, _ in calls["issues"]),
-              "ineligible backend dependency spends shared retry budget then normal failure")
+print("\n── PHPUnit PostgreSQL sidecar lifecycle ──")
+import docker_runner as dr
+
+
+def phpunit_case(root, exit_code=0, ready=True, error=None, sidecar_error=None):
+    """Run the real run_tests against fake Docker; return (result, events, runs)."""
+    events, runs, created = [], [], set()
+    class Sandbox:
+        def wait(self, timeout):
+            if error:
+                raise error
+            return {"StatusCode": exit_code}
+        def logs(self, **kwargs):
+            return b"Tests: 3 passed"
+        def remove(self, force):
+            events.append(("sandbox-removed", force))
+    class Sidecar:
+        def exec_run(self, cmd):
+            events.append(("exec", cmd[0]))
+            return SimpleNamespace(exit_code=0 if ready or cmd[0] == "psql" else 2, output=b"")
+        def remove(self, force, v):
+            events.append(("pg-removed", force, v))
+    class Network:
+        def __init__(self, name):
+            self.name = name
+        def remove(self):
+            events.append(("net-removed", self.name))
+    def run(**kwargs):
+        runs.append(kwargs)
+        if kwargs["image"] != dr._POSTGRES_IMAGE:
+            return Sandbox()
+        created.add(kwargs["name"])
+        if sidecar_error:
+            raise sidecar_error
+        return Sidecar()
+    def get(name):
+        if name not in created:
+            raise docker.errors.NotFound(name)
+        return Sidecar()
+    def create(name, driver):
+        events.append(("net-created", name, driver))
+        return Network(name)
+    client = SimpleNamespace(containers=SimpleNamespace(run=run, get=get),
+                             networks=SimpleNamespace(create=create))
+    with patch.object(dr.docker, "from_env", return_value=client), \
+            patch.object(dr, "_PG_READY_TIMEOUT", 0):
+        return dr.DockerRunner().run_tests(root), events, runs
+
+
+_PG_XML = ('<phpunit><php><env name="DB_CONNECTION" value="pgsql" force="true"/>'
+           '<env name="DB_DATABASE" value="app_test"/><server name="DB_USERNAME" value="app_user"/></php></phpunit>')
+with tempfile.TemporaryDirectory(prefix="nesti-pg-") as root:
+    Path(root, "phpunit.xml").write_text(_PG_XML)
+    for code in (0, 1):
+        (ok, output), events, runs = phpunit_case(root, exit_code=code)
+        sidecar, sandbox = runs
+        network = events[0][1]
+        check(ok is (code == 0) and "Tests: 3 passed" in output, f"pgsql run follows sandbox exit {code}")
+        check(network.startswith("nesti-run-") and events[0][2] == "bridge"
+              and sidecar["name"] == network.replace("-run-", "-pg-") and sidecar["network"] == network,
+              "sidecar nesti-pg-* starts on its own nesti-run-* bridge network")
+        env = sandbox["environment"]
+        check(sandbox["network"] == network and sandbox["command"] == dr._TEST_COMMAND
+              and env["DB_CONNECTION"] == "pgsql" and env["DB_HOST"] == sidecar["name"]
+              and env["DB_PORT"] == "5432" and env["DB_DATABASE"] == "app_test"
+              and env["DB_USERNAME"] == "app_user" and len(env["DB_PASSWORD"]) == 32,
+              "sandbox joins the network with the phpunit.xml database settings")
+        check(events[-3:] == [("sandbox-removed", True), ("pg-removed", True, True), ("net-removed", network)],
+              "sandbox, sidecar (with its volume) and network removed")
+    (ok, output), events, runs = phpunit_case(root, error=requests.exceptions.ReadTimeout("t"))
+    check(not ok and "timed out" in output and events[-2:] == [("pg-removed", True, True), ("net-removed", events[0][1])],
+          "sandbox timeout still removes sidecar and network")
+    (ok, output), events, runs = phpunit_case(root, ready=False)
+    check(not ok and "not ready" in output and len(runs) == 1
+          and events[-2:] == [("pg-removed", True, True), ("net-removed", events[0][1])],
+          "readiness failure never starts the sandbox and removes sidecar and network")
+    (ok, output), events, runs = phpunit_case(root, sidecar_error=docker.errors.APIError("start failed"))
+    check(not ok and "PostgreSQL sidecar failed" in output and len(runs) == 1
+          and events[-2:] == [("pg-removed", True, True), ("net-removed", events[0][1])],
+          "sidecar start failure removes the created container by name and the network")
+with tempfile.TemporaryDirectory(prefix="nesti-pg-dist-") as root:
+    Path(root, "phpunit.xml.dist").write_text('<phpunit><php><env name="DB_CONNECTION" value="pgsql"/></php></phpunit>')
+    (ok, _), _, runs = phpunit_case(root)
+    check(ok and runs[1]["environment"]["DB_DATABASE"] == "testing"
+          and runs[1]["environment"]["DB_USERNAME"] == "testing", "phpunit.xml.dist fallback with testing defaults")
+    Path(root, "phpunit.xml").write_text(_PG_XML.replace("app_test", "x&quot;; DROP"))
+    (ok, output), events, runs = phpunit_case(root)
+    check(not ok and "identifiers" in output and not events and not runs, "unsafe identifier starts nothing")
+with tempfile.TemporaryDirectory(prefix="nesti-sqlite-") as root:
+    for xml in (None, '<phpunit><php><env name="DB_CONNECTION" value="sqlite"/></php></phpunit>'):
+        if xml:
+            Path(root, "phpunit.xml").write_text(xml)
+        (ok, _), events, runs = phpunit_case(root)
+        check(ok and not events[:-1] and len(runs) == 1 and runs[0]["command"] == dr._TEST_COMMAND
+              and runs[0]["environment"] is None and runs[0]["network"] is None,
+              "SQLite project starts no sidecar and keeps command/env")
+_cmd = next(line for line in Path(__file__).resolve().with_name("Dockerfile.sandbox").read_text().splitlines()
+            if line.startswith("CMD "))
+check(json.loads(_cmd[4:]) == dr._TEST_COMMAND, "Dockerfile.sandbox CMD is byte-identical to _TEST_COMMAND")
+
+print("\n── Rejected claim ──")
 reset_calls(312)
 patch_tools(docker_outcomes=[True], code_responses=[GOOD_CODE])
 nodes.tool_issue_set_status = lambda *args, **kwargs: {"success": False, "error": "claim rejected"}
@@ -2344,275 +2491,6 @@ final = compiled.invoke(initial(312), config={"recursion_limit": 60})
 check(not calls["workspaces"] and not calls["bootstrap"] and not calls["plan_prompts"]
       and not calls["code_prompts"] and final["failure_reason"],
       "rejected initial claim cannot clone, bootstrap or invoke LLM")
-
-print("\n── Durable dependency intent, ownership and merge boundary ──")
-import issue_dependencies as deps
-deps.telegram_notify = lambda message: None
-
-
-def dependency_repo(root):
-    """Create committed existing API/model prerequisites without a seeder."""
-    repo = _git.Repo.init(root)
-    for relative, body in (("app/Models/Task.php", "<?php class Task {}"),
-                           ("routes/api.php", "<?php // existing GET /api/tasks")):
-        file = Path(root, relative)
-        file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text(body)
-    repo.index.add(["app/Models/Task.php", "routes/api.php"])
-    repo.index.commit("existing API", author=_git.Actor("Test", "test@example.invalid"),
-                      committer=_git.Actor("Test", "test@example.invalid"))
-    return repo
-
-
-def fresh_dependency():
-    transport = _IssueHTTP()
-    transport.add_issue(20, ["nesti", "nesti::in-progress", "human"])
-    return transport, FixtureDependencies(transport.client(), "main")
-
-
-def merged_mr(child, **changes):
-    result = {"iid": 5, "project_id": 63, "target_project_id": 63, "state": "merged",
-              "merged_at": "2026-10-05T10:00:00Z", "target_branch": "main",
-              "description": f"Closes #{child}\n\nSeeder implementation",
-              "merge_commit_sha": None, "squash_commit_sha": None, "sha": None}
-    result.update(changes)
-    return result
-
-
-with tempfile.TemporaryDirectory(prefix="nesti-dependency-") as root:
-    repo = dependency_repo(root)
-    Path(root, "composer.json").write_text("bootstrap-only Scramble setup")
-    http, manager = fresh_dependency()
-    result = manager.pause_for_fixture(20, root, requirement, ["resources/js/app.js"])
-    child = result["child_iid"]
-    state = http.client().get_fixture_state(20)
-    check(result["status"] == "paused" and http.child_posts == 1
-          and "nesti::pause" in http.issues[20]["labels"] and "human" in http.issues[20]["labels"],
-          "frontend change with bootstrap-only Composer mutation durably pauses and creates one child")
-    check(http.issues[child]["description"].startswith("Scope: backend")
-          and ef.parse_child_marker(http.issues[child]["description"])["key"] == state["items"][0]["key"]
-          and http.issues[child]["labels"] == ["nesti"],
-          "backend child carries verified ownership and opt-in in original creation")
-    fresh = FixtureDependencies(http.client(), "main")
-    check(20 in fresh.reconcile()["waiting"] and http.child_posts == 1,
-          "reconstructed manager recovers from GitLab without duplicate child")
-    check(manager.pause_for_fixture(20, root, requirement, ["./app/Models/Task.php"])["status"]
-          == "ineligible" and http.child_posts == 1, "coder-authored backend source cannot become dependency")
-    Path(root, "app/Models/Task.php").write_text("unmerged model modification")
-    check(manager.pause_for_fixture(20, root, requirement, [])["status"] == "ineligible",
-          "changed HEAD-backed model rejects dependency independently of authored paths")
-    repo.git.checkout("HEAD", "--", "app/Models/Task.php")
-    http.issues[child]["state"] = "closed"
-    http.related[child] = [5]
-    for changes in ({"state": "opened", "merged_at": None}, {"state": "closed"},
-                    {"target_project_id": 999}, {"target_branch": "other"},
-                    {"merged_at": None}, {"description": "Unrelated implementation"},
-                    {"description": f" Closes #{child}\n"},
-                    {"merged_at": "2026-01-01T12:00:00"}, {"iid": 5.0}):
-        http.mrs[5] = merged_mr(child, **changes)
-        summary = FixtureDependencies(http.client(), "main").reconcile()
-        check(not summary["resumed"] and "nesti::pause" in http.issues[20]["labels"],
-              f"nonqualifying merge retains hold ({changes})")
-    http.mrs[5] = merged_mr(child)
-    http.failed_get.add(urlsplit(manager.client._project_api).path + "/merge_requests/5")
-    check(FixtureDependencies(http.client(), "main").reconcile()["errors"]
-          and "nesti::pause" in http.issues[20]["labels"], "failed MR detail read retains pause")
-    http.failed_get.clear()
-    check(FixtureDependencies(http.client(), "other").reconcile()["errors"],
-          "configured target change cannot release recorded dependency")
-    summary = FixtureDependencies(http.client(), "main").reconcile()
-    check(summary["resumed"] == [20] and "nesti::pause" not in http.issues[20]["labels"],
-          "actual related fast-forward merge without commit SHA releases parent")
-    client = http.client()
-    check(client.lock_issue(20), "released parent can be claimed normally")
-    before = deepcopy(http.issues[20]["labels"])
-    check(not FixtureDependencies(http.client(), "main").reconcile()["resumed"]
-          and http.issues[20]["labels"] == before, "later reconciliation preserves live claim")
-    check(client.pause_issue(20), "manual later pause applies to released record")
-    FixtureDependencies(http.client(), "main").reconcile()
-    check("nesti::pause" in http.issues[20]["labels"], "released metadata cannot clear later manual pause")
-    result = FixtureDependencies(http.client(), "main").pause_for_fixture(
-        20, root, requirement, ["resources/js/app.js"])
-    check(result["status"] == "paused" and http.child_posts == 1
-          and http.client().get_fixture_state(20)["items"][0]["state"] == "blocked",
-          "merged but unsatisfied fixture blocks rather than creating another child")
-
-    for outcome in ("accepted", "absent"):
-        http, manager = fresh_dependency()
-        http.lost_child = outcome
-        manager.pause_for_fixture(20, root, requirement, ["resources/js/app.js"])
-        summary = FixtureDependencies(http.client(), "main").reconcile()
-        item = http.client().get_fixture_state(20)["items"][0]
-        check(http.child_posts == 1 and 20 in summary["waiting"]
-              and (item["child_iid"] is not None if outcome == "accepted"
-                   else item["creation_submitted"] and item["child_iid"] is None),
-              f"lost child POST {outcome} response recovers or holds without second creation")
-
-    for trusted in (False, True):
-        http, manager = fresh_dependency()
-        http.lost_child = "accepted"
-        manager.pause_for_fixture(20, root, requirement, ["resources/js/app.js"])
-        child = max(http.issues)
-        if trusted:
-            key = http.client().get_fixture_state(20)["items"][0]["key"]
-            http.issues[child]["description"] = f"<!-- NESTI_FIXTURE_CHILD_V1 {key} broken -->"
-        else:
-            http.issues[child]["author"]["id"] = 99
-        FixtureDependencies(http.client(), "main").reconcile()
-        item = http.client().get_fixture_state(20)["items"][0]
-        check(http.child_posts == 1 and item["child_iid"] is None
-              and item["state"] == ("blocked" if trusted else "creating"),
-              "corrupt trusted ownership blocks; foreign ownership cannot attach a child")
-
-    # Closed reused children are observed immediately, including squashed
-    # merges. Paginated candidate selection uses the newest merge, not page 1.
-    http, manager = fresh_dependency()
-    http.lost_child = "accepted"
-    manager.pause_for_fixture(20, root, requirement, ["resources/js/app.js"])
-    child = max(http.issues)
-    http.issues[child]["state"] = "closed"
-    http.related[child] = [4, 5, 6]
-    http.mrs[4] = merged_mr(child, iid=4, merged_at="2026-10-04T10:00:00Z")
-    http.mrs[5] = merged_mr(child, iid=5, squash_commit_sha="a" * 40)
-    http.mrs[6] = merged_mr(child, iid=6, squash_commit_sha="b" * 40)
-    FixtureDependencies(http.client(), "main").reconcile()
-    item = http.client().get_fixture_state(20)["items"][0]
-    check(item["state"] == "merged" and item["mr_iid"] == 6 and item["merge_sha"] == "b" * 40
-          and "nesti::pause" not in http.issues[20]["labels"] and http.child_posts == 1,
-          "closed reused child with paginated squash merges releases using newest IID tie-break")
-
-    http, manager = fresh_dependency()
-    manager.pause_for_fixture(20, root, requirement, ["resources/js/app.js"])
-    child = max(http.issues)
-    http.issues[child]["labels"] = ["human-only"]
-    FixtureDependencies(http.client(), "main").reconcile()
-    check(http.issues[child]["labels"] == ["human-only"], "child opt-out is not undone")
-    state = http.client().get_fixture_state(20)
-    creating = deepcopy(state)
-    creating["items"][0].update(state="creating", child_iid=None, creation_submitted=True)
-    client = http.client()
-    client.get_fixture_state(20)
-    client.save_fixture_state(20, creating)
-    duplicate = http.add_issue(child + 1, [], state="closed",
-                               description=http.issues[child]["description"])
-    FixtureDependencies(http.client(), "main").reconcile()
-    check(http.client().get_fixture_state(20)["items"][0]["state"] == "blocked"
-          and http.child_posts == 1, "multiple trusted child owners fail closed without selecting one")
-
-    # Interrupt after each durable transition, including label writes. A fresh
-    # client must rediscover state, not replay a local in-memory transaction.
-    class Crash(BaseException):
-        pass
-    for boundary in ("intent", "pause", "submitted", "linked", "merged", "resume", "released"):
-        http, manager = fresh_dependency()
-        save = manager.client.save_fixture_state
-        pause = manager.client.pause_issue
-        resume = manager.client.resume_issue
-        def crash_save(iid, state):
-            save(iid, state)
-            item = state["items"][0]
-            hit = ((boundary == "intent" and item["state"] == "creating" and not item["creation_submitted"])
-                   or (boundary == "submitted" and item["state"] == "creating" and item["creation_submitted"])
-                   or (boundary == "linked" and item["state"] == "waiting")
-                   or (boundary == "merged" and item["state"] == "merged" and state["release_pending"])
-                   or (boundary == "released" and item["state"] == "merged" and not state["release_pending"]))
-            if hit:
-                raise Crash()
-        def crash_pause(*args, **kwargs):
-            result = pause(*args, **kwargs)
-            if boundary == "pause":
-                raise Crash()
-            return result
-        def crash_resume(*args, **kwargs):
-            result = resume(*args, **kwargs)
-            if boundary == "resume":
-                raise Crash()
-            return result
-        manager.client.save_fixture_state = crash_save
-        manager.client.pause_issue = crash_pause
-        manager.client.resume_issue = crash_resume
-        try:
-            manager.pause_for_fixture(20, root, requirement, ["resources/js/app.js"])
-            child = max(http.issues)
-            http.related[child] = [5]
-            http.mrs[5] = merged_mr(child)
-            manager.reconcile()
-        except Crash:
-            pass
-        recovered = FixtureDependencies(http.client(), "main")
-        recovered.reconcile()
-        item = http.client().get_fixture_state(20)["items"][0]
-        if boundary == "submitted":
-            check(http.child_posts == 0 and item["child_iid"] is None
-                  and "nesti::pause" in http.issues[20]["labels"],
-                  "crash after submitted intent conservatively holds unknown outcome")
-        elif boundary in ("intent", "pause", "linked"):
-            check(http.child_posts == 1 and item["state"] == "waiting"
-                  and "nesti::pause" in http.issues[20]["labels"],
-                  f"crash after {boundary} recovers one waiting child")
-        else:
-            check(http.child_posts == 1 and item["state"] == "merged"
-                  and not http.client().get_fixture_state(20)["release_pending"]
-                  and "nesti::pause" not in http.issues[20]["labels"],
-                  f"crash after {boundary} completes release exactly once")
-
-    http, manager = fresh_dependency()
-    manager.pause_for_fixture(20, root, requirement, ["resources/js/app.js"])
-    state = http.client().get_fixture_state(20)
-    http.issues[20]["labels"] = ["nesti", "human"]
-    check(20 not in [i["id"] for i in http.client().list_pending()],
-          "durable waiting intent excludes parent even when pause label was lost")
-    http.add_note(20, "NESTI_FIXTURE_DEPENDENCIES_V1\nforeign malformed", author=99)
-    check(http.client().get_fixture_state(20) == state, "foreign latest marker cannot override trusted state")
-    http.add_note(20, "NESTI_FIXTURE_DEPENDENCIES_V1\nsystem malformed", system=True)
-    check(http.client().get_fixture_state(20) == state, "system marker cannot override trusted state")
-    http.add_note(20, "NESTI_FIXTURE_DEPENDENCIES_V1\ntrusted malformed")
-    http.add_issue(50)
-    check(50 in [i["id"] for i in http.client().list_pending()] and
-          20 not in [i["id"] for i in http.client().list_pending()],
-          "malformed newest trusted metadata fails only affected issue closed")
-
-    http, manager = fresh_dependency()
-    manager.pause_for_fixture(20, root, requirement, ["resources/js/app.js"])
-    stale_client = http.client()
-    stale = stale_client.get_fixture_state(20)
-    external = deepcopy(stale)
-    external["items"][0]["reason"] = "operator updated hold"
-    http.add_note(20, ef.format_dependency_note(external))
-    stale["items"][0]["reason"] = "stale worker update"
-    try:
-        stale_client.save_fixture_state(20, stale)
-        refused = False
-    except RuntimeError:
-        refused = True
-    check(refused and http.client().get_fixture_state(20) == external,
-          "external trusted note change rejects stale worker write")
-    client = http.client()
-    current = client.get_fixture_state(20)
-    current["items"][0]["reason"] = "verified lost-note update"
-    http.lost_note = True
-    client.save_fixture_state(20, current)
-    note_count = len(http.notes[20])
-    client.save_fixture_state(20, current)
-    check(http.client().get_fixture_state(20) == current and len(http.notes[20]) == note_count,
-          "accepted lost note response is rediscovered and identical saves do not append")
-    client = http.client()
-    current = client.get_fixture_state(20)
-    current["items"][0]["reason"] = "readback unavailable"
-    next_note = http.note_id + 1
-    http.failed_get.add(urlsplit(client._project_api).path + f"/issues/20/notes/{next_note}")
-    try:
-        client.save_fixture_state(20, current)
-        rejected = False
-    except RuntimeError:
-        rejected = True
-    check(rejected, "accepted dependency note with unavailable independent readback cannot confirm transition")
-    http.failed_get.clear()
-    for state_value, labels in (("closed", ["nesti", "nesti::pause"]), ("opened", ["human"])):
-        http.issues[20].update(state=state_value, labels=labels)
-        snapshot = deepcopy(http.issues[20])
-        FixtureDependencies(http.client(), "main").reconcile()
-        check(http.issues[20] == snapshot, "reconciliation leaves closed or opted-out parent untouched")
 
 print("\n── Configured target checkout versus server HEAD ──")
 from gitlab_client import GitLabClient
@@ -2754,7 +2632,7 @@ try:
 
     boot = tool_laravel_bootstrap(
         os.path.join(mono, "backend"), spa_path=os.path.join(mono, "frontend"))
-    check(boot["success"], "bootstrap with spa_path skips the backend vite.config.js plugin-vue guard")
+    check(boot["success"], "bootstrap with spa_path tops up the backend and the SPA")
     check(os.path.isfile(os.path.join(mono, "backend/tests/Feature/OpenApiDocumentationTest.php"))
           and os.path.isfile(os.path.join(mono, "frontend/vitest.config.js")),
           "bootstrap writes the backend OpenAPI test and the SPA vitest config")
@@ -2765,8 +2643,221 @@ try:
           and _pkg["devDependencies"]["@playwright/test"] == "1.50.0"
           and _pkg["dependencies"]["primevue"] == "^4.4.1",
           "SPA package.json gains vitest/@playwright/test 1.50.0 and keeps primevue ^4.4.1")
+    check(os.path.isfile(os.path.join(mono, "frontend/vitest.setup.js")),
+          "bootstrap writes the absent SPA vitest.setup.js (jsdom polyfills)")
+    import hashlib  # noqa: E402
+    import graph.tools as _tools  # noqa: E402
+    with patch.object(_tools, "_SUPERSEDED_SPA_VITEST_CONFIGS", {hashlib.sha256(b"old").hexdigest()}):
+        for body, upgraded in ((b"old", True), (b"custom", False)):
+            Path(mono, "frontend/vitest.config.js").write_bytes(body)
+            boot = tool_laravel_bootstrap(
+                os.path.join(mono, "backend"), spa_path=os.path.join(mono, "frontend"))
+            replaced = Path(mono, "frontend/vitest.config.js").read_bytes() != body
+            check(boot["success"] and replaced is upgraded
+                  and ("frontend/vitest.config.js" in boot["result"]["reason"]) is upgraded,
+                  f"an SPA vitest.config.js {body!r} is {'upgraded in place' if upgraded else 'left untouched'}")
 finally:
     shutil.rmtree(mono, ignore_errors=True)
+
+print("\n── Backend code prompt carries routing and test conventions ──")
+from prompt_builder import build_code_prompt             # noqa: E402
+conv = tempfile.mkdtemp(prefix="nesti-conv-")
+try:
+    _put(conv, "backend/artisan")
+    _put(conv, "backend/bootstrap/app.php",
+         "<?php\nreturn Application::configure()->withRouting(\n"
+         "    api: __DIR__.'/../routes/api.php', apiPrefix: '',\n)->create();\n")
+    _put(conv, "backend/routes/api.php",
+         "<?php\nforeach (['Admin'] as $d) { require __DIR__.'/domains/'.$d.'.php'; }\n")
+    _put(conv, "backend/routes/domains/Admin.php",
+         "<?php\nRoute::middleware(['bearer', 'roles:Admin'])->group(fn () => Route::get('/panel', X::class));\n")
+    _put(conv, "backend/tests/TestCase.php", "<?php\nabstract class TestCase { function TESTCASE_HELPER() {} }\n")
+    _put(conv, "backend/tests/Feature/PanelAdminTest.php",
+         "<?php\nclass PanelAdminTest { function test_admin() { $this->withToken(ADMIN_TOKEN_SETUP);"
+         " $this->getJson('/panel'); } }\n")
+    _put(conv, "backend/tests/Feature/InvoiceExportTest.php",
+         "<?php\nclass InvoiceExportTest { function test_export() { $this->getJson('/invoices/export'); } }\n")
+    _put(conv, "backend/app/Providers/AppServiceProvider.php", "<?php\nclass AppServiceProvider {}\n")
+    _put(conv, "backend/app/Providers/DocsServiceProvider.php",
+         "<?php\nScramble::routes(fn ($r) => preg_match('#^(SCRAMBLE_FILTER_ENTRY)(/|$)#', $r->uri()));\n")
+    _layout = {"backend": "backend", "frontend": "frontend"}
+    _task = "Add a GET /api/status endpoint for admin users only, returning the panel status."
+    _ctx = nodes._repo_inventory(conv, _layout, "backend", _task)
+    _sys, _user = build_code_prompt({"subject": "status", "description": _task}, "1. route + test",
+                                    repo_context=_ctx, scope="backend", layout=_layout)
+    check("apiPrefix: ''" in _user and "Current backend/bootstrap/app.php (complete)" in _user,
+          "code prompt quotes bootstrap/app.php with its apiPrefix")
+    check("Current backend/routes/domains/Admin.php" in _user and "roles:Admin" in _user,
+          "code prompt quotes route files loaded from routes/ subdirectories")
+    check("TESTCASE_HELPER" in _user and "ADMIN_TOKEN_SETUP" in _user and "/invoices/export" not in _user,
+          "code prompt quotes TestCase.php and the most relevant HTTP Feature test only")
+    check("served under the /api prefix" not in _sys and "apiPrefix" in _sys,
+          "backend standards no longer assume a fixed /api prefix")
+    _front = nodes._repo_inventory(conv, _layout, "frontend", _task)
+    check("apiPrefix: ''" in _front and "TESTCASE_HELPER" not in _front and "ADMIN_TOKEN_SETUP" not in _front,
+          "frontend scope sees the routing prefix but no PHP test conventions")
+    check("Current backend/app/Providers/DocsServiceProvider.php (complete)" in _user
+          and "SCRAMBLE_FILTER_ENTRY" in _user and "Scramble::routes(" in _sys,
+          "backend code prompt quotes the Scramble::routes filter and says to admit new routes")
+    check("SCRAMBLE_FILTER_ENTRY" not in _front, "frontend scope does not quote the Scramble filter")
+finally:
+    shutil.rmtree(conv, ignore_errors=True)
+
+print("\n── Coding prompt: tree-sitter PHP skeletons of reference files ──")
+import code_skeleton                                     # noqa: E402
+_sk_body = "".join(f"        $step{i} = {i};\n" for i in range(6))
+sk = tempfile.mkdtemp(prefix="nesti-skel-")
+try:
+    _put(sk, "backend/artisan")
+    _put(sk, "backend/routes/api.php",
+         "<?php\nRoute::get('/orders', [App\\Http\\Controllers\\OrderController::class, 'index']);\n")
+    _put(sk, "backend/app/Http/Controllers/OrderController.php",
+         "<?php\nclass OrderController\n{\n"
+         "    public function index(): array\n    {\n" + _sk_body + "        return ['ELIDED_MARKER'];\n    }\n\n"
+         "    public function rules(): array\n    {\n" + _sk_body + "        return ['RULES_MARKER'];\n    }\n}\n")
+    _put(sk, "backend/tests/Feature/OrderTest.php",
+         "<?php\nclass OrderTest extends TestCase\n{\n"
+         "    public function test_lists(): void\n    {\n" + _sk_body
+         + "        $this->getJson('/orders?HTTP_MARKER');\n    }\n\n"
+         "    private function seed(): void\n    {\n" + _sk_body + "        $x = 'SEED_MARKER';\n    }\n}\n")
+    _sk_layout = {"backend": "backend", "frontend": None}
+    _sk_controller = "backend/app/Http/Controllers/OrderController.php"
+    _sk_before = Path(sk, _sk_controller).read_text()
+    try:
+        DockerRunner.write_files(f"### FILE: {_sk_controller}\n```php\n<?php\n```\n", sk, [_sk_controller])
+        _sk_error = ""
+    except ValueError as exc:
+        _sk_error = str(exc)
+    check("skeleton" in _sk_error and Path(sk, _sk_controller).read_text() == _sk_before,
+          "write_files refuses a FILE block for a skeleton-quoted file and leaves it untouched")
+    if code_skeleton._parser() is not None:
+        _task = "List the orders"
+        _plain = nodes._repo_inventory(sk, _sk_layout, "backend", _task)
+        check("ELIDED_MARKER" in _plain and "SEED_MARKER" in _plain,
+              "without skeletons (plan prompt) reference files stay complete")
+        _skel: list[str] = []
+        _ctx = nodes._repo_inventory(sk, _sk_layout, "backend", _task, skeletons=_skel)
+        check("ELIDED_MARKER" in _ctx and "RULES_MARKER" in _ctx,
+              "an API contract file stays complete with skeletons on")
+        check("SEED_MARKER" not in _ctx and "HTTP_MARKER" in _ctx and "(skeleton: long method bodies elided" in _ctx,
+              "the example Feature test is a skeleton: long helper elided, first HTTP test kept, labelled")
+        check(sorted(_skel) == ["backend/tests/Feature/OrderTest.php"],
+              f"only the example Feature test is reported, with its prefix (got {_skel})")
+        _named: list[str] = []
+        _ctx = nodes._repo_inventory(sk, _sk_layout, "backend", "Fix OrderTest.php", skeletons=_named)
+        check("SEED_MARKER" in _ctx and _named == [],
+              "a Feature test the task names stays complete")
+        _put(sk, "backend/app/Domains/Orders/OrderModel.php",
+             "<?php\nclass OrderModel\n{\n    public function total(): int\n    {\n"
+             + _sk_body + "        return 'DOMAIN_MARKER';\n    }\n}\n")
+        _dom: list[str] = []
+        _ctx = nodes._repo_inventory(sk, _sk_layout, "backend", _task, skeletons=_dom,
+                                     domain={"selected": ["Orders"], "names": ["Orders"], "root": "Domains",
+                                             "route_files": [], "foreign_route_files": []})
+        check("DOMAIN_MARKER" in _ctx and not any("Domains" in p for p in _dom),
+              "a domain file stays complete with skeletons on")
+    else:
+        print("  (skipped: php grammar not downloaded)")
+finally:
+    shutil.rmtree(sk, ignore_errors=True)
+
+print("\n── OpenAPI gate: /api-prefixed versus unprefixed (HEAD baseline) ──")
+import graph.tools as _gt                                # noqa: E402
+from git import Repo as _Repo                            # noqa: E402
+
+
+def _route(uri, method="GET|HEAD"):
+    return {"uri": uri, "method": method, "middleware": ["api"]}
+
+
+def gate_case(workspace, current, documented, head=(), head_ok=True, baseline=None):
+    """Run the real gate with a fake sandbox that writes the dumps it is asked for."""
+    runs = []
+
+    def dump(path, routes):
+        target = Path(path, _gt._ROUTE_DUMP_REL)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(list(routes)))
+
+    class FakeRunner:
+        def run_openapi_export(self, path):
+            runs.append(("openapi", path))
+            Path(path, "openapi.json").write_text(json.dumps({
+                "openapi": "3.1.0", "servers": [{"url": "http://localhost:8000"}],
+                "paths": {key: {method: {} for method in methods} for key, methods in documented.items()}}))
+            dump(path, current)
+            return True, "exported"
+
+        def run_route_list(self, path):
+            runs.append(("route-list", path))
+            if head_ok:
+                dump(path, head)
+            return head_ok, "head routes" if head_ok else "HEAD boom"
+
+    with patch.object(_gt, "DockerRunner", FakeRunner):
+        result = _gt.tool_openapi_export(workspace, baseline)
+    return result["result"], runs
+
+
+gate_root = tempfile.mkdtemp(prefix="nesti-gate-")
+try:
+    _repo = _Repo.init(gate_root)
+    _put(gate_root, "backend/routes/api.php", "<?php\n")
+    _repo.index.add(["backend/routes/api.php"])
+    _repo.index.commit("init")
+    _ws = os.path.join(gate_root, "backend")
+
+    r, runs = gate_case(_ws, [_route("api/tasks", "POST")], {"/other": ["get"]})
+    check(not r["passed"] and r["undocumented"] == ["POST /api/tasks"] and "baseline_routes" not in r
+          and [kind for kind, _ in runs] == ["openapi"],
+          "prefixed: undocumented /api route fails exactly as before, no HEAD export")
+    r, _ = gate_case(_ws, [_route("api/tasks", "POST")], {"/api/tasks": ["post"]})
+    check(r["passed"], "prefixed: documented /api route passes")
+    r, _ = gate_case(_ws, [_route("api/ping", "HEAD")], {"/other": ["get"]})
+    check(not r["passed"] and "no route under /api is registered" in r["output"],
+          "prefixed: no checkable /api route keeps the 'no route registered' failure")
+
+    _head = [_route("health/live")]
+    _current = [_route("health/live"), _route("test"), {"uri": "docs/api", "method": "GET|HEAD",
+                                                        "middleware": ["web"]}]
+    r, runs = gate_case(_ws, _current, {"/auth/login": ["post"]}, head=_head)
+    check(not r["passed"] and r["undocumented"] == ["GET /test"]
+          and r["baseline_routes"] == ["GET health/live"]
+          and [kind for kind, _ in runs] == ["openapi", "route-list"]
+          and runs[1][1].endswith(os.path.join("head", "backend")),
+          "unprefixed: a new undocumented api-group route fails against the HEAD worktree baseline")
+    check(len(_repo.git.worktree("list").splitlines()) == 1
+          and not _repo.is_dirty(untracked_files=False),
+          "the HEAD worktree is removed and the clone is untouched")
+    r, runs = gate_case(_ws, _current, {"/test": ["get"]}, head=_head)
+    check(r["passed"] and "GET /health/live" not in r["undocumented"],
+          "unprefixed: new documented route passes; pre-existing undocumented /health is not re-checked")
+    r, _ = gate_case(_ws, _head, {"/auth/login": ["post"]}, head=_head)
+    check(r["passed"] and "No new API route" in r["output"],
+          "unprefixed: an existing-controller-only change (no new api route) passes")
+    r, runs = gate_case(_ws, _current, {"/test": ["get"]}, head_ok=False)
+    check(not r["passed"] and "Could not export the HEAD route list" in r["output"]
+          and "HEAD boom" in r["output"], "unprefixed: a failed HEAD export fails closed")
+    r, runs = gate_case(_ws, _current, {"/auth/login": ["post"]}, baseline=["GET health/live"])
+    check(r["undocumented"] == ["GET /test"] and [kind for kind, _ in runs] == ["openapi"],
+          "a supplied baseline skips the HEAD export")
+
+    _seen = []
+
+    def _caching_gate(path, baseline_routes=None):
+        _seen.append(baseline_routes)
+        extra = {} if baseline_routes is not None else {"baseline_routes": ["GET health/live"]}
+        return {"success": True, "result": {"passed": True, "output": "", "paths": [],
+                                            "undocumented": [], **extra}}
+    _gate_state = {"repo_path": gate_root, "layout": {"backend": "backend", "frontend": None}}
+    with patch.object(nodes, "tool_openapi_export", _caching_gate):
+        _gate_state.update(nodes.node_openapi_test(_gate_state))
+        _gate_state.update(nodes.node_openapi_test(_gate_state))
+    check(_seen == [None, ["GET health/live"]]
+          and _gate_state["openapi_baseline_routes"] == ["GET health/live"],
+          "node_openapi_test exports the HEAD baseline once and reuses it")
+finally:
+    shutil.rmtree(gate_root, ignore_errors=True)
 
 _state_dir = tempfile.mkdtemp(prefix="nesti-state-")
 _saved_layout = (project_layout.STATE_DIR, project_layout.LAYOUT_FILE)
@@ -2779,13 +2870,13 @@ try:
     patch_tools(docker_outcomes=[True], code_responses=[
         "### FILE: backend/routes/api.php\n```php\n<?php\n```\n\n"
         "### FILE: backend/app/Http/Controllers/X.php\n```php\n<?php\n```\n\n"
-        "### FILE: frontend/src/components/X.vue\n```vue\n<template/>\n```\n"])
+        "### FILE: frontend/src/components/X.vue\n```vue\n<template/>\n```\n"], layout=None)
 
     def mono_clone(target_path):
         os.makedirs(target_path, exist_ok=True)
         calls["workspaces"].append(os.path.dirname(target_path))
         _monorepo(target_path)
-        return {"success": True, "result": {"repo_path": target_path}}
+        return {"success": True, "result": {"repo_path": target_path, "head_sha": "b" * 40}}
     nodes.tool_gitlab_clone = mono_clone
     f = compiled.invoke(initial(133), config={"recursion_limit": 60})
     _clone = os.path.join(calls["workspaces"][0], "repo")
@@ -2800,12 +2891,709 @@ try:
           "Vitest and Playwright receive <clone>/frontend")
     check(calls["bootstrap"] == [(os.path.join(_clone, "backend"), os.path.join(_clone, "frontend"))],
           "node_bootstrap tops up backend/ with the SPA path")
+    check(calls["starter"] == [], "an existing SPA is continued, never re-scaffolded")
     check("REPOSITORY LAYOUT (strict)" in calls["code_systems"][0]
           and "primevue ^4.4.1" in calls["code_systems"][0],
           "the coding prompt carries the layout block with installed SPA versions")
 finally:
     project_layout.STATE_DIR, project_layout.LAYOUT_FILE = _saved_layout
     shutil.rmtree(_state_dir, ignore_errors=True)
+
+# ═════ Scenario 34: backend domain detection ═════
+print("\n── Scenario 34: backend domain detection ──")
+import issue_domain  # noqa: E402
+
+
+def _domain_tree(root):
+    _put(root, "artisan")
+    _put(root, "composer.json", "{}")
+    for d in ("Announcements", "Members"):
+        _put(root, f"app/Domains/{d}/Http/Controllers/{d}Controller.php",
+             f"<?php\nnamespace App\\Domains\\{d}\\Http\\Controllers;\n// SENTINEL_{d}\n")
+        _put(root, f"app/Domains/{d}/Models/X.php", "<?php\n")
+        _put(root, f"routes/domains/{d}.php",
+             f"<?php\nuse App\\Domains\\{d}\\Http\\Controllers\\{d}Controller;\n"
+             f"Route::prefix('{d.lower()}')->group(function () {{\n"
+             f"    Route::get('/', [{d}Controller::class, 'index']);\n}});\n")
+    _put(root, "routes/api.php",
+         "<?php\nuse App\\Http\\Controllers\\TestController;\n"
+         "Route::get('/test', [TestController::class, '__invoke']);\n"
+         "foreach (['Announcements', 'Members'] as $d) {\n"
+         "    require __DIR__.'/domains/'.$d.'.php';\n}\n")
+
+
+def domain_clone(target_path):
+    os.makedirs(target_path, exist_ok=True)
+    calls["workspaces"].append(os.path.dirname(target_path))
+    _domain_tree(target_path)
+    return {"success": True, "result": {"repo_path": target_path, "head_sha": "b" * 40}}
+
+
+_domain_probe = tempfile.mkdtemp(prefix="nesti-domain-")
+try:
+    _domain_tree(_domain_probe)
+    _cat = issue_domain.domain_catalog(Path(_domain_probe))
+    check([d["name"] for d in _cat["domains"]] == ["Announcements", "Members"]
+          and _cat["domains"][0]["route_files"] == ["routes/domains/Announcements.php"],
+          "domain catalog lists the domains and their route files")
+    _dec = issue_domain.detect("Add GET /announcements/active", "", _cat)
+    check(_dec.domains == ("Announcements",) and not _dec.ask, "a route under a domain prefix decides it")
+    check(issue_domain.detect("Add POST /api/members/{id}/notes", "", _cat).domains == ("Members",),
+          "a leading api/ segment is ignored")
+    _dec = issue_domain.detect("Add a GET /test endpoint", "", _cat)
+    check(_dec.domains == () and _dec.ask and "/test" in _dec.basis,
+          "a route outside every domain asks")
+    _dec = issue_domain.detect("Domain: Members", "", _cat)
+    check(_dec.domains == ("Members",) and _dec.basis == "stated in the issue", "a stated domain decides it")
+    _dec = issue_domain.detect("Domain: Members, also the Announcements domain", "", _cat)
+    check(_dec.domains == ("Announcements", "Members") and not _dec.ask,
+          "two stated domains are both decided without a question")
+    _dec = issue_domain.detect("Domain: Members", "Also add GET /announcements/pinned", _cat)
+    check(_dec.domains == ("Announcements", "Members") and not _dec.ask
+          and _dec.basis == "stated in the issue; route /announcements/pinned",
+          "a stated domain plus a route owned by a second domain decides both")
+    check(issue_domain.detect("Domain: Members", "Add GET /test", _cat).ask,
+          "a stated domain does not hide a route outside every domain")
+    _dec = issue_domain.detect("Add GET /announcements/x and GET /members/y", "", _cat)
+    check(_dec.domains == ("Announcements", "Members") and not _dec.ask,
+          "routes owned by two distinct domains decide both")
+    _dec = issue_domain.detect("Show the active announcements", "", _cat)
+    check(_dec.domains == () and not _dec.ask, "no route or domain leaves it to the classifier")
+    _put(_domain_probe, "routes/domains/Shared.php",
+         "<?php\nuse App\\Domains\\Announcements\\Http\\Controllers\\AnnouncementsController;\n"
+         "use App\\Domains\\Members\\Http\\Controllers\\MembersController;\n"
+         "Route::get('/board', fn () => null);\n")
+    _dec = issue_domain.detect("Add GET /board/pinned", "", issue_domain.domain_catalog(Path(_domain_probe)))
+    check(_dec.domains == () and _dec.ask and "several domains" in _dec.basis,
+          "one route path owned by two domains asks")
+    _opts = ["Announcements", "Members"]
+    check(issue_domain.parse_answer("2", _opts) == ["Members"]
+          and issue_domain.parse_answer("`Announcements` please", _opts) == ["Announcements"]
+          and issue_domain.parse_answer("> 1. `Announcements`\n\nMembers", _opts) == ["Members"],
+          "answers parse by number or name, ignoring the quoted question")
+    check(issue_domain.parse_answer("Members and Announcements", _opts) == _opts
+          and issue_domain.parse_answer("1, 2", _opts) == _opts
+          and issue_domain.parse_answer("2 and 1", _opts) == _opts,
+          "a reply naming two domains, by name or number, selects both")
+    check(issue_domain.parse_answer("3", _opts) == [] and issue_domain.parse_answer("1, 3", _opts) == []
+          and issue_domain.parse_answer("0", _opts) == [] and issue_domain.parse_answer("no idea", _opts) == [],
+          "an out-of-range number or no match is unmatched")
+    check(issue_domain.parse_answer("1,2,", _opts) == _opts and issue_domain.parse_answer("2.", _opts) == ["Members"],
+          "a trailing comma or period after the numbers still selects")
+    check(issue_domain.parse_answer("I tried 2 times, use Members", _opts) == ["Members"]
+          and issue_domain.parse_answer("tried 2 times", _opts) == [],
+          "prose with a stray digit never selects by number")
+    import time as _time  # noqa: E402
+    _t0 = _time.perf_counter()
+    _slow = issue_domain.parse_answer("".join(f"{i}{' ' * 3000}" for i in range(1, 9)) + "x", _opts)
+    check(_slow == [] and _time.perf_counter() - _t0 < 1,
+          "a reply with long whitespace gaps parses quickly and stays unmatched")
+    _put(_domain_probe, "app/Http/Controllers/TestController.php", "<?php\n// SHARED_API\n")
+    _put(_domain_probe, "app/Domains/Billing/Http/Controllers/BillingController.php",
+         "<?php\nnamespace App\\Domains\\Billing\\Http\\Controllers;\n// SENTINEL_Billing\n")
+    _put(_domain_probe, "routes/domains/Billing.php",
+         "<?php\nuse App\\Domains\\Billing\\Http\\Controllers\\BillingController;\n"
+         "Route::get('/billing', [BillingController::class, 'index']); // BILLING_ROUTES\n")
+    _put(_domain_probe, "routes/api.php",
+         "<?php\nuse App\\Http\\Controllers\\TestController;\n"
+         "use App\\Domains\\Billing\\Http\\Controllers\\BillingController;\n"
+         "Route::get('/test', [TestController::class, '__invoke']);\n"
+         "Route::get('/invoices', [BillingController::class, 'index']);\n")
+    os.remove(os.path.join(_domain_probe, "routes/domains/Shared.php"))
+    _cat3 = issue_domain.domain_catalog(Path(_domain_probe))
+    _two = issue_domain.selection(_cat3, ["Members", "Announcements"])
+    check(_two["selected"] == ["Announcements", "Members"]
+          and _two["foreign_route_files"] == ["routes/domains/Billing.php"],
+          "a two-domain selection keeps catalog order and marks the third domain's route file foreign")
+    _inv = nodes._repo_inventory(_domain_probe, {"backend": ".", "frontend": None}, "backend",
+                                 "Add notes", domain=_two)
+    check("SENTINEL_Announcements" in _inv and "SENTINEL_Members" in _inv and "SHARED_API" in _inv
+          and "SENTINEL_Billing" not in _inv and "Domains/Billing/" not in _inv and "BILLING_ROUTES" not in _inv,
+          "a two-domain selection quotes both domains and shared API files, never the third domain")
+    _all = nodes._repo_inventory(_domain_probe, {"backend": ".", "frontend": None}, "backend", "Add notes")
+    check("SENTINEL_Billing" in _all and "BILLING_ROUTES" in _all
+          and nodes._repo_inventory(_domain_probe, {"backend": ".", "frontend": None}, "backend",
+                                    "Add notes", domain=issue_domain.selection(_cat3, [])) == _all,
+          "an empty selection filters nothing: the inventory equals the one without a domain")
+finally:
+    shutil.rmtree(_domain_probe, ignore_errors=True)
+
+
+def _domain_run(n, subject, answer=None, classify_reply=None, answer_raises=False):
+    reset_calls(n)
+    patch_tools(docker_outcomes=[True], code_responses=[PHP_CODE])
+    nodes.tool_gitlab_clone = domain_clone
+    calls["asks"] = []
+
+    def fake_answer(issue_id, options):
+        if answer_raises:
+            raise AssertionError("domain answer looked up for a frontend issue")
+        return {"success": True, "result": answer}
+
+    def fake_ask(issue_id, options):
+        calls["asks"].append(options)
+        return {"success": True, "result": {"issue_id": issue_id, "options": options}}
+    nodes.tool_issue_domain_answer = fake_answer
+    nodes.tool_issue_ask_domain = fake_ask
+    if classify_reply is not None:
+        def fake_plan(sp, up, messages=None):
+            if sp.startswith("You decide which backend domain"):
+                return classify_reply
+            calls["plan_messages"].append(messages)
+            calls["plan_prompts"].append(up)
+            calls["plan_systems"].append(sp)
+            return "1. Objective: implement Hello\n2. Files: src/Hello.php"
+        nodes._llm.generate_plan = fake_plan
+    return compiled.invoke(initial(n, subject, "Implement the thing."), config={"recursion_limit": 60})
+
+
+f = _domain_run(3401, "Add a GET /test endpoint")
+check(calls["asks"] == [["Announcements", "Members"]]
+      and f["failure_reason"].startswith("Paused for a domain question")
+      and not calls["bootstrap"] and not calls["plan_prompts"]
+      and not any(os.path.exists(w) for w in calls["workspaces"]),
+      "an unowned route asks once, pauses and cleans up before bootstrap or planning")
+f = _domain_run(3402, "Add GET /announcements/active")
+check(not calls["asks"] and f["domain"]["selected"] == ["Announcements"], "a domain route decides without asking")
+check(all("This issue belongs to the Announcements domain" in s and "routes/domains/Announcements.php" in s
+          for s in (calls["plan_systems"][0], calls["code_systems"][0])),
+      "plan and code prompts carry the architecture block for the chosen domain")
+check("Current app/Domains/Announcements/Http/Controllers/AnnouncementsController.php (complete)"
+      in calls["plan_prompts"][0] and "MembersController.php (complete)" not in calls["plan_prompts"][0],
+      "the plan prompt quotes the chosen domain's files only")
+_one = '```json\n{"domains": ["Announcements"], "reason": "announcements"}\n```'
+f = _domain_run(3403, "Show only active announcements", classify_reply=_one)
+check(not calls["asks"] and f["domain"]["selected"] == ["Announcements"], "a single classified domain is accepted")
+f = _domain_run(3404, "Show only active announcements",
+                classify_reply='{"domains": ["Announcements", "Members"], "reason": "both"}')
+check(calls["asks"] and "2 plausible domains" in f["failure_reason"],
+      "two plausible classified domains ask")
+f = _domain_run(3405, "Add a GET /test endpoint", answer=["Members"])
+check(not calls["asks"] and "belongs to the Members domain" in calls["plan_systems"][0],
+      "an earlier human answer decides the domain")
+f = _domain_run(3406, "Change the login button colour to red", answer_raises=True)
+check(f["domain"]["selected"] == [] and not calls["asks"], "a frontend issue skips the domain decision")
+f = _domain_run(3407, "Add GET /announcements/x and GET /members/y")
+check(not calls["asks"] and f["domain"]["selected"] == ["Announcements", "Members"]
+      and "This issue belongs to the Announcements, Members domains" in calls["code_systems"][0]
+      and "MembersController.php (complete)" in calls["plan_prompts"][0]
+      and "AnnouncementsController.php (complete)" in calls["plan_prompts"][0],
+      "routes in two domains decide both; the prompts carry both domains")
+
+http = _IssueHTTP()
+http.add_issue(40, ["nesti", "nesti::in-progress"])
+issue_domain.ask(http.client(), 40, ["Announcements", "Members"])
+check(http.issues[40]["labels"] == ["nesti", "nesti::pause"] and len(http.notes[40]) == 1
+      and http.notes[40][0]["body"].startswith(issue_domain.QUESTION)
+      and issue_domain.QUESTION_MARKER in http.notes[40][0]["body"],
+      "ask posts one verified question and pauses the issue")
+check(issue_domain.reconcile(http.client())["waiting"] == [40], "an unanswered question waits")
+http.add_note(40, "> 1. `Announcements`\n\nMembers", author=99)
+check(issue_domain.reconcile(http.client())["resumed"] == [40]
+      and http.issues[40]["labels"] == ["nesti"] and len(http.notes[40]) == 2,
+      "a matching reply resumes the issue without a new note")
+http.add_note(40, "Run failed", author=15)
+check(issue_domain.answer(http.client().list_notes(40), 15, ["Announcements", "Members"]) == ["Members"],
+      "the answer survives a later Nesti note")
+http2 = _IssueHTTP()
+http2.add_issue(41, ["nesti", "nesti::pause"])
+http2.add_note(41, issue_domain.format_question(["Announcements", "Members"]), author=15)
+http2.add_note(41, "no idea", author=99)
+http2.add_issue(42, ["nesti", "nesti::pause"])
+http2.add_note(42, "pausing this manually", author=99)
+r = issue_domain.reconcile(http2.client())
+check(r["asked"] == [41] and len(http2.notes[41]) == 3 and "previous reply" in http2.notes[41][2]["body"]
+      and "nesti::pause" in http2.issues[41]["labels"], "an unmatched reply is asked again once")
+check(r["resumed"] == r["waiting"] == r["errors"] == []
+      and http2.issues[42]["labels"] == ["nesti", "nesti::pause"] and len(http2.notes[42]) == 1,
+      "a manual pause is never lifted or commented")
+
+# ═════ Scenario 35: webservice scaffold, .frontend SPA, starter kit, empty repository ═════
+print("\n── Scenario 35: starter kit, layouts and empty-repository start ──")
+import starter_kit  # noqa: E402
+
+_VUE_PACKAGE = json.dumps({"dependencies": {"vue": "^3.5.0"}})
+# Laravel 13 skeleton files, verbatim.
+_L13_USER = """<?php
+
+namespace App\\Models;
+
+// use Illuminate\\Contracts\\Auth\\MustVerifyEmail;
+use Database\\Factories\\UserFactory;
+use Illuminate\\Database\\Eloquent\\Attributes\\Fillable;
+use Illuminate\\Database\\Eloquent\\Attributes\\Hidden;
+use Illuminate\\Database\\Eloquent\\Factories\\HasFactory;
+use Illuminate\\Foundation\\Auth\\User as Authenticatable;
+use Illuminate\\Notifications\\Notifiable;
+
+#[Fillable(['name', 'email', 'password'])]
+#[Hidden(['password', 'remember_token'])]
+class User extends Authenticatable
+{
+    /** @use HasFactory<UserFactory> */
+    use HasFactory, Notifiable;
+
+    /**
+     * Get the attributes that should be cast.
+     *
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'email_verified_at' => 'datetime',
+            'password' => 'hashed',
+        ];
+    }
+}
+"""
+_L13_SEEDER = """<?php
+
+namespace Database\\Seeders;
+
+use App\\Models\\User;
+use Illuminate\\Database\\Console\\Seeds\\WithoutModelEvents;
+use Illuminate\\Database\\Seeder;
+
+class DatabaseSeeder extends Seeder
+{
+    use WithoutModelEvents;
+
+    /**
+     * Seed the application's database.
+     */
+    public function run(): void
+    {
+        // User::factory(10)->create();
+
+        User::factory()->create([
+            'name' => 'Test User',
+            'email' => 'test@example.com',
+        ]);
+    }
+}
+"""
+_L13_PHPUNIT = """<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="APP_ENV" value="testing"/>
+        <env name="CACHE_STORE" value="array"/>
+        <env name="DB_CONNECTION" value="sqlite"/>
+        <env name="DB_DATABASE" value=":memory:"/>
+        <env name="DB_URL" value=""/>
+        <env name="SESSION_DRIVER" value="array"/>
+    </php>
+</phpunit>
+"""
+_INSTALL_API_ROUTES = """<?php
+
+use Illuminate\\Http\\Request;
+use Illuminate\\Support\\Facades\\Route;
+
+Route::get('/user', function (Request $request) {
+    return $request->user();
+})->middleware('auth:sanctum');
+"""
+
+
+def _skeleton(root, require=None, migrations=(), routes=None):
+    """A Laravel 13 skeleton app (no sandbox needed) at *root*."""
+    _put(root, "artisan")
+    _put(root, "composer.json", json.dumps({"require": {"php": "^8.4", **(require or {})}}))
+    _put(root, "app/Models/User.php", _L13_USER)
+    _put(root, "database/seeders/DatabaseSeeder.php", _L13_SEEDER)
+    for name, body in migrations:
+        _put(root, f"database/migrations/{name}", body)
+    if routes is not None:
+        _put(root, "routes/api.php", routes)
+
+
+def _tree_snapshot(root):
+    return {str(p.relative_to(root)): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()}
+
+
+def _has_route(text, path):
+    return re.search(rf"['\"]/?{path}['\"]", text) is not None
+
+
+_installs = []
+
+
+def _fake_starter_install(self, app_path, *, install_api, publish_sanctum, publish_permission):
+    _installs.append((install_api, publish_sanctum, publish_permission))
+    if install_api:
+        _put(app_path, "routes/api.php", _INSTALL_API_ROUTES)
+        composer_path = Path(app_path, "composer.json")
+        composer = json.loads(composer_path.read_text())
+        composer["require"]["laravel/sanctum"] = "^4.0"
+        composer_path.write_text(json.dumps(composer))
+    return True, "installed"
+
+
+def _starter(root, backend=".", spa=".frontend"):
+    _installs.clear()
+    with patch.object(dr.docker, "from_env", return_value=None), \
+            patch.object(DockerRunner, "run_starter_install", _fake_starter_install):
+        return _gt.tool_starter_kit(root, backend, spa)
+
+
+_PAT = ("2026_01_01_000000_create_personal_access_tokens_table.php", "<?php\n")
+_PERMISSION = ("2026_01_01_000001_create_permission_tables.php", "<?php\n")
+_CUSTOM_ROLES = ("2026_01_01_000002_create_roles_and_permissions_tables.php",
+                 "<?php\nSchema::create('roles', fn ($t) => $t->id());\n"
+                 "Schema::create(\"permissions\", fn ($t) => $t->id());\n")
+_EXISTING_ROUTES = ("<?php\n\nuse Illuminate\\Support\\Facades\\Route;\n\n"
+                    "Route::get('/health', fn () => ['ok' => true]);\n")
+
+with tempfile.TemporaryDirectory(prefix="nesti-s35-") as s35:
+    a, b, c, d, e = (os.path.join(s35, n) for n in "abcde")
+    _put(a, "artisan")
+    _put(a, ".frontend/package.json", _VUE_PACKAGE)
+    _put(b, "artisan")
+    _put(b, ".frontend/package.json", json.dumps({"dependencies": {"react": "^19.0.0"}}))
+    _put(c, "webservice/artisan")
+    _put(c, "webservice/composer.json", "{}")
+    _put(c, "frontend/package.json", _VUE_PACKAGE)
+    _put(d, "webservice/artisan")
+    _put(d, "docs/index.md")
+    _put(e, "api/artisan")
+    _put(e, "api/composer.json", "{}")
+    _put(e, "frontend/package.json", _VUE_PACKAGE)
+    check(project_layout.deterministic_layout(Path(a)) == {"backend": ".", "frontend": ".frontend"},
+          "root artisan + .frontend Vue SPA → ('.', '.frontend')")
+    check(project_layout.deterministic_layout(Path(b)) == {"backend": ".", "frontend": None},
+          "root artisan + a .frontend without vue → ('.', None)")
+    check(project_layout.deterministic_layout(Path(c)) == {"backend": "webservice", "frontend": "frontend"},
+          "webservice/artisan + frontend SPA → ('webservice', 'frontend')")
+    check(project_layout.deterministic_layout(Path(d)) is None,
+          "webservice/artisan beside an extra docs/ folder is not deterministic")
+    _saved = (project_layout.STATE_DIR, project_layout.LAYOUT_FILE)
+    project_layout.STATE_DIR = Path(s35, "state")
+    project_layout.LAYOUT_FILE = project_layout.STATE_DIR / "layout.json"
+    try:
+        project_layout.save_layout({"schema": 1, "layout": {"backend": ".", "frontend": None}})
+        _root_layout = project_layout.clone_layout(Path(a))
+        project_layout.save_layout({"schema": 1, "layout": {"backend": "api", "frontend": None}})
+        check(_root_layout == {"backend": ".", "frontend": ".frontend"}
+              and project_layout.clone_layout(Path(e)) == {"backend": "api", "frontend": "frontend"},
+              "clone_layout fills the starter SPA into a saved layout without a frontend")
+    finally:
+        project_layout.STATE_DIR, project_layout.LAYOUT_FILE = _saved
+    try:
+        project_layout.validate_layout(Path(a), {"backend": ".", "frontend": ".frontend"})
+        _valid = True
+    except project_layout.LayoutError:
+        _valid = False
+    check(_valid, "validate_layout accepts a saved ('.', '.frontend')")
+
+    g = os.path.join(s35, "gates")
+    _put(g, "artisan")
+    _put(g, "composer.json", "{}")
+    _put(g, "app/Models/User.php", "<?php\n")
+    _put(g, ".frontend/package.json", _VUE_PACKAGE)
+    _put(g, ".frontend/src/App.vue", "<template/>")
+    _gate = lambda files: tool_detect_stack(g, files, ".", ".frontend")["result"]  # noqa: E731
+    r = _gate([".frontend/src/views/About.vue"])
+    check(r["run_frontend"] and not r["run_phpunit"], "root backend: a .frontend change runs the frontend layers only")
+    r = _gate(["app/Models/Post.php"])
+    check(r["run_phpunit"] and not r["run_frontend"], "root backend: an app/ change runs PHPUnit only")
+    r = _gate([".frontend/src/x.vue", "app/Models/Post.php"])
+    check(r["run_phpunit"] and r["run_frontend"], "root backend: both sides run every layer")
+    _inv = nodes._repo_inventory(g, {"backend": ".", "frontend": ".frontend"})
+    check("- app/Models/: User.php" in _inv and "./app" not in _inv and ".frontend/src/App.vue" in _inv,
+          "a root backend's inventory lists app/… and .frontend/src/App.vue")
+
+    for name, files, expected in (
+        ("spatie", {"composer.json": json.dumps({"require": {"spatie/laravel-permission": "^6.0"}})}, "spatie"),
+        ("custom", {"composer.json": "{}", f"database/migrations/{_CUSTOM_ROLES[0]}": _CUSTOM_ROLES[1]}, "custom"),
+        ("none", {"composer.json": "{}"}, "none"),
+    ):
+        for rel, body in files.items():
+            _put(os.path.join(s35, "roles", name), rel, body)
+        check(starter_kit.role_schema(Path(s35, "roles", name)) == expected, f"role_schema → {expected}")
+
+    _user = Path(s35, "User.php")
+    _user.write_text(_L13_USER)
+    check(starter_kit.add_model_traits(_user, starter_kit.MODEL_TRAITS["spatie"]), "add_model_traits changes the skeleton User")
+    _traited = _user.read_text()
+    check("\nuse Laravel\\Sanctum\\HasApiTokens;\n" in _traited
+          and "\nuse Spatie\\Permission\\Traits\\HasRoles;\n" in _traited
+          and "    use HasRoles, HasApiTokens, HasFactory, Notifiable;\n" in _traited,
+          "both trait imports land and the class uses HasRoles, HasApiTokens, HasFactory, Notifiable")
+    check(not starter_kit.add_model_traits(_user, starter_kit.MODEL_TRAITS["spatie"])
+          and _user.read_text() == _traited, "add_model_traits is idempotent")
+    try:
+        starter_kit.model_with_traits("<?php\n\nnamespace App\\Models;\n", starter_kit.MODEL_TRAITS["none"])
+        _raised = False
+    except ValueError:
+        _raised = True
+    check(_raised, "a model without class User raises ValueError")
+    _seeder = Path(s35, "DatabaseSeeder.php")
+    _seeder.write_text(_L13_SEEDER)
+    _first = starter_kit.register_seeders(_seeder, ["UserSeeder"])
+    _seeded = _seeder.read_text()
+    check(_first and _seeded.count("UserSeeder::class") == 1
+          and not starter_kit.register_seeders(_seeder, ["UserSeeder"]) and _seeder.read_text() == _seeded,
+          "register_seeders inserts one call into the skeleton seeder, then is a no-op")
+
+    # tool_starter_kit: none variant on the bare skeleton (install:api runs in the fake sandbox).
+    none_app = os.path.join(s35, "none")
+    _skeleton(none_app)
+    r = _starter(none_app)
+    _routes = Path(none_app, "routes/api.php").read_text()
+    check(r["success"] and r["result"]["variant"] == "none" and _installs and _installs[0][0],
+          "none variant: install:api runs when Sanctum and routes/api.php are missing")
+    check(_has_route(_routes, "login") and _has_route(_routes, "users") and not _has_route(_routes, "roles")
+          and "Route::get('/user'" not in _routes,
+          "none variant: /login and /users routed, no /roles, install:api's /user stub gone")
+    check("use HasApiTokens, HasFactory, Notifiable;" in Path(none_app, "app/Models/User.php").read_text()
+          and "UserSeeder::class" in Path(none_app, "database/seeders/DatabaseSeeder.php").read_text(),
+          "none variant: User gets HasApiTokens and DatabaseSeeder calls UserSeeder")
+    _spa_pkg = json.loads(Path(none_app, ".frontend/package.json").read_text())
+    check(Path(none_app, ".frontend/src/views/pages/Users.vue").is_file()
+          and not Path(none_app, ".frontend/src/views/pages/Roles.vue").exists()
+          and _spa_pkg["devDependencies"]["@playwright/test"] == "1.50.0",
+          "none variant: the SPA has Users.vue, no Roles.vue, and pins @playwright/test 1.50.0")
+
+    spatie_app = os.path.join(s35, "spatie")
+    _skeleton(spatie_app, {"laravel/sanctum": "^4.0", "spatie/laravel-permission": "^6.0"},
+              (_PAT, _PERMISSION), _EXISTING_ROUTES)
+    r = _starter(spatie_app)
+    _routes = Path(spatie_app, "routes/api.php").read_text()
+    check(r["success"] and r["result"]["variant"] == "spatie" and _installs == [],
+          "spatie variant with Sanctum, routes and both migrations needs no sandbox")
+    check("Route::get('/health', fn () => ['ok' => true]);" in _routes and _has_route(_routes, "roles")
+          and "HasRoles" in Path(spatie_app, "app/Models/User.php").read_text()
+          and Path(spatie_app, ".frontend/src/views/pages/Roles.vue").is_file(),
+          "spatie variant keeps the existing route, adds /roles, HasRoles and Roles.vue")
+
+    custom_app = os.path.join(s35, "custom")
+    _skeleton(custom_app, {"laravel/sanctum": "^4.0"}, (_PAT, _CUSTOM_ROLES), _EXISTING_ROUTES)
+    r = _starter(custom_app)
+    check(r["success"] and r["result"]["variant"] == "custom"
+          and _has_route(Path(custom_app, "routes/api.php").read_text(), "roles")
+          and Path(custom_app, ".frontend/src/views/pages/Roles.vue").is_file(),
+          "custom variant routes /roles and adds Roles.vue")
+
+    clash_app = os.path.join(s35, "clash")
+    _skeleton(clash_app)
+    _put(clash_app, "app/Http/Controllers/Api/AuthController.php", "<?php\n// mine\n")
+    _before = _tree_snapshot(clash_app)
+    r = _starter(clash_app)
+    check(not r["success"] and "AuthController.php" in r["error"] and _tree_snapshot(clash_app) == _before,
+          "an existing starter contract file fails before any file or SPA is written")
+
+    kept_app = os.path.join(s35, "kept")
+    _skeleton(kept_app)
+    _put(kept_app, "database/seeders/UserSeeder.php", "<?php\n// custom demo users\n")
+    r = _starter(kept_app)
+    check(r["success"]
+          and Path(kept_app, "database/seeders/UserSeeder.php").read_text() == "<?php\n// custom demo users\n"
+          and Path(kept_app, "database/seeders/DatabaseSeeder.php").read_text() == _L13_SEEDER,
+          "an existing UserSeeder is kept byte-identical and DatabaseSeeder stays unchanged")
+    check(not _starter(kept_app)["success"], "an existing SPA folder refuses the starter kit")
+
+    pg = os.path.join(s35, "pg")
+    _put(pg, ".env.example", "APP_NAME=Laravel\nDB_CONNECTION=pgsql\nDB_HOST=127.0.0.1\nDB_DATABASE=alt\n")
+    _put(pg, "phpunit.xml", _L13_PHPUNIT)
+    check(_gt._align_phpunit_database(Path(pg)) == "alt_test"
+          and dr._pgsql_settings(pg)["DB_DATABASE"] == "alt_test",
+          "a pgsql app's phpunit.xml runs on <DB_DATABASE>_test")
+    my = os.path.join(s35, "mysql")
+    _put(my, ".env.example", "DB_CONNECTION=mysql\nDB_DATABASE=alt\n")
+    _put(my, "phpunit.xml", _L13_PHPUNIT)
+    check(_gt._align_phpunit_database(Path(my)) == "" and Path(my, "phpunit.xml").read_text() == _L13_PHPUNIT
+          and dr._pgsql_settings(my) is None, "a mysql app's phpunit.xml stays byte-identical")
+    already = os.path.join(s35, "already")
+    _put(already, ".env.example", "DB_CONNECTION=pgsql\nDB_DATABASE=alt\n")
+    _put(already, "phpunit.xml", _PG_XML)
+    check(_gt._align_phpunit_database(Path(already)) == "" and Path(already, "phpunit.xml").read_text() == _PG_XML,
+          "a phpunit.xml already on pgsql is left alone")
+
+    topup = os.path.join(s35, "topup")
+    _skeleton(topup)
+    _put(topup, "vite.config.js", "import laravel from 'laravel-vite-plugin';\n")
+    with patch.object(dr.docker, "from_env", return_value=None), \
+            patch.object(DockerRunner, "run_scramble_install", lambda self, path: (True, "")):
+        r = tool_laravel_bootstrap(topup)
+    check(r["success"] and not Path(topup, "vitest.config.js").exists()
+          and Path(topup, "tests/Feature/OpenApiDocumentationTest.php").is_file(),
+          "top-up of a root app succeeds and writes no SPA test config into it")
+
+    from gitlab_client import GitLabClient  # noqa: E402
+    _bare = _git.Repo.init(Path(s35, "origin.git"), bare=True)
+    with patch.dict(os.environ, {"GITLAB_URL": "https://gitlab.test", "GITLAB_TOKEN": "t",
+                                 "GITLAB_USE_SSH": "true", "GITLAB_REPO_SSH": str(Path(s35, "origin.git")),
+                                 "GITLAB_DEFAULT_BRANCH": "main"}):
+        _first_clone = GitLabClient().clone(str(Path(s35, "first")))
+        check(_first_clone.active_branch.name == "main" and len(list(_bare.iter_commits("main"))) == 1,
+              "an empty repository gets one empty commit on main and the clone sits on main")
+        GitLabClient().clone(str(Path(s35, "second")))
+        check(len(list(_bare.iter_commits("main"))) == 1, "cloning a non-empty repository adds no commit")
+
+
+def _git_clone(setup):
+    """A fake clone: *setup* writes the tree, then one initial commit (empty for greenfield)."""
+    def clone(target_path):
+        os.makedirs(target_path, exist_ok=True)
+        calls["workspaces"].append(os.path.dirname(target_path))
+        setup(target_path)
+        with _git.Repo.init(target_path) as repo:
+            repo.git.add(A=True)
+            head = repo.index.commit("Initial commit").hexsha
+        return {"success": True, "result": {"repo_path": target_path, "head_sha": head}}
+    return clone
+
+
+def _scaffold_bootstrap(repo_path, spa_path=""):
+    calls["bootstrap"].append(repo_path)
+    created = not os.path.isfile(os.path.join(repo_path, "artisan"))
+    if created:
+        for rel, body in (("artisan", ""), ("composer.json", "{}"), ("routes/api.php", "<?php\n"),
+                          ("app/Models/User.php", "<?php\n")):
+            _put(repo_path, rel, body)
+    return {"success": True, "result": {"created": created, "mode": "scaffold" if created else "top-up",
+                                        "reason": "scaffolded" if created else "already fully wired",
+                                        "output": ""}}
+
+
+def _starter_run(n, description, setup, code, bootstrap=_scaffold_bootstrap, **kw):
+    """A graph run on a git-initialised clone; returns (final, clone, commits seen at push)."""
+    reset_calls(n)
+    patch_tools(docker_outcomes=[True], code_responses=[code], layout=None, **kw)
+    nodes.tool_gitlab_clone = _git_clone(setup)
+    nodes.tool_laravel_bootstrap = bootstrap
+    commits, push = [], nodes.tool_gitlab_commit_and_push
+
+    def counting_push(repo_path, branch_name, message):
+        with _git.Repo(repo_path) as repo:
+            commits.append(len(list(repo.iter_commits())))
+        return push(repo_path, branch_name, message)
+    nodes.tool_gitlab_commit_and_push = counting_push
+    final = compiled.invoke(initial(n, "Add an About page", description), config={"recursion_limit": 60})
+    return final, os.path.join(calls["workspaces"][0], "repo"), commits
+
+
+_ABOUT = ("### FILE: {spa}/src/views/About.vue\n```vue\n<template><h1>About</h1></template>\n```\n\n"
+          "### FILE: {spa}/e2e/about.spec.js\n```js\n// playwright\n```\n")
+_root_laravel = lambda root: (_put(root, "artisan"), _put(root, "composer.json", "{}"))  # noqa: E731
+
+f, _clone, _commits = _starter_run(3501, "Scope: frontend\n\nShow an About page.", lambda root: None,
+                                   _ABOUT.format(spa="frontend"))
+_paths = dict(calls["layer_paths"])
+check(calls["bootstrap"] == [os.path.join(_clone, "webservice")]
+      and calls["starter"] == [(_clone, "webservice", "frontend")],
+      "greenfield frontend issue: webservice/ scaffold, then the starter kit in frontend/")
+check(f["layout"] == {"backend": "webservice", "frontend": "frontend"}
+      and {"webservice/artisan", "webservice/routes/api.php", "frontend/src/App.vue"} <= set(f["bootstrap_files"]),
+      "greenfield frontend issue: final layout and the committed bootstrap files")
+check(_commits == [2], "the clone holds the initial and the bootstrap commit before commit_and_push")
+check(_paths.get("docker") == os.path.join(_clone, "webservice")
+      and _paths.get("vitest") == _paths.get("playwright") == os.path.join(_clone, "frontend")
+      and f["mr_url"], "PHPUnit runs in webservice/, Vitest + Playwright in frontend/, and the MR opens")
+
+f, _clone, _commits = _starter_run(
+    3502, "Scope: backend\n\nAdd GET /api/health.", lambda root: None,
+    "### FILE: webservice/app/Http/Controllers/HealthController.php\n```php\n<?php\n```\n")
+check(not calls["starter"] and f["layout"] == {"backend": "webservice", "frontend": None}
+      and calls["vitest"] == 0 and f["mr_url"],
+      "greenfield backend issue: no starter kit, no SPA, no Vitest")
+
+f, _clone, _commits = _starter_run(3503, "Scope: frontend\n\nShow an About page.", _root_laravel,
+                                   _ABOUT.format(spa=".frontend"))
+check(calls["starter"] == [(_clone, ".", ".frontend")] and f["layout"] == {"backend": ".", "frontend": ".frontend"},
+      "root Laravel app + frontend issue: the starter kit goes into .frontend/")
+
+f, _clone, _commits = _starter_run(
+    3504, "Scope: backend\n\nAdd GET /api/health.", _root_laravel,
+    "### FILE: app/Http/Controllers/HealthController.php\n```php\n<?php\n```\n")
+check(f["bootstrap_files"] == [] and _commits == [1], "a top-up that changes nothing makes no bootstrap commit")
+
+
+def _topup_bootstrap(repo_path, spa_path=""):
+    """Top-up of an existing app + SPA: wires test harness files into both sides."""
+    _put(spa_path, "vitest.config.js", "// nesti\n")
+    _put(repo_path, "tests/Feature/OpenApiDocumentationTest.php", "<?php\n")
+    return {"success": True, "result": {"created": False, "mode": "top-up",
+                                        "reason": "topped up", "output": ""}}
+
+
+_app_and_spa = lambda root: (_root_laravel(root), _put(root, ".frontend/package.json",  # noqa: E731
+                                                       json.dumps({"dependencies": {"vue": "^3.5.0"}})))
+f, _clone, _commits = _starter_run(
+    3506, "Scope: backend\n\nAdd GET /api/health.", _app_and_spa,
+    "### FILE: app/Http/Controllers/HealthController.php\n```php\n<?php\n```\n", bootstrap=_topup_bootstrap)
+check(_commits == [2] and f["bootstrap_files"] == [] and f["run_phpunit"] is True
+      and f["run_frontend"] is False and calls["vitest"] == calls["playwright"] == 0 and f["mr_url"],
+      "top-up SPA test config is committed but a backend-only change runs no Vitest/Playwright")
+f, _clone, _commits = _starter_run(3507, "Scope: frontend\n\nShow an About page.", _app_and_spa,
+                                   _ABOUT.format(spa=".frontend"), bootstrap=_topup_bootstrap)
+check(_commits == [2] and f["run_phpunit"] is False and f["run_frontend"] is True
+      and calls["docker"] == 0 and calls["vitest"] == calls["playwright"] == 1 and f["mr_url"],
+      "top-up backend test file is committed but a frontend-only change runs no PHPUnit")
+
+# Rule 31: a Laravel app that serves its own frontend is refused, never processed.
+with tempfile.TemporaryDirectory(prefix="nesti-website-") as _web:
+    def _website(name, files):
+        for rel, body in files.items():
+            _put(os.path.join(_web, name), rel, body)
+        return Path(_web, name)
+
+    def _refused(call):
+        try:
+            call()
+        except project_layout.LayoutError as exc:
+            return project_layout.UNSUPPORTED_WEBSITE in str(exc)
+        return False
+
+    _vue_site = _website("vue", {"artisan": "", "composer.json": "{}",
+                                 "vite.config.js": "import vue from '@vitejs/plugin-vue';\n"})
+    check(_refused(lambda: project_layout.deterministic_layout(_vue_site)),
+          "a root Laravel app whose Vite build uses @vitejs/plugin-vue is refused")
+    _livewire = _website("livewire", {"artisan": "", "composer.json": json.dumps(
+        {"require": {"livewire/livewire": "^3.0"}})})
+    check(_refused(lambda: project_layout.deterministic_layout(_livewire)),
+          "a root Laravel app requiring livewire/livewire is refused")
+    check(_refused(lambda: project_layout.validate_layout(_vue_site, {"backend": ".", "frontend": None})),
+          "validate_layout refuses a saved record whose root app serves its own frontend")
+    _inertia = _website("inertia", {"backend/artisan": "", "backend/composer.json": json.dumps(
+        {"require": {"inertiajs/inertia-laravel": "^2.0"}})})
+    check(_refused(lambda: project_layout.validate_layout(_inertia, {"backend": "backend", "frontend": None})),
+          "validate_layout refuses an Inertia backend folder")
+    _skeleton_site = _website("skeleton", {"artisan": "", "composer.json": "{}", "vite.config.js": (
+        "import laravel from 'laravel-vite-plugin';\nimport tailwindcss from '@tailwindcss/vite';\n")})
+    check(project_layout.deterministic_layout(_skeleton_site) == {"backend": ".", "frontend": None},
+          "the Laravel skeleton's vite.config.js (laravel-vite-plugin + tailwind) is API-only")
+
+reset_calls(3505)
+patch_tools(docker_outcomes=[True], code_responses=[VUE_CODE], layout=None, laravel_repo=True)
+_api_clone = nodes.tool_gitlab_clone
+
+
+def _website_clone(target_path):
+    result = _api_clone(target_path)
+    _put(target_path, "vite.config.js", "import vue from '@vitejs/plugin-vue';\n")
+    return result
+
+
+nodes.tool_gitlab_clone = _website_clone
+_layout_error = ""
+try:
+    compiled.invoke(initial(3505), config={"recursion_limit": 60})
+except RuntimeError as exc:
+    _layout_error = str(exc)
+check(_layout_error.startswith("Project layout:") and "not supported" in _layout_error
+      and calls["bootstrap"] == [] and not any(os.path.exists(w) for w in calls["workspaces"]),
+      "a clone that serves its own frontend fails before bootstrap and leaves no workspace")
 
 # ═════ Scenario 13: TaskEngine thin wrapper ═════
 print("\n── Scenario 13: TaskEngine.run_once() ──")
@@ -2816,13 +3604,152 @@ task_engine.tool_issue_list_pending = lambda: {
     "success": True,
     "result": [{"id": 111, "subject": "Wrapper test", "description": "d"}]}
 task_engine.tool_issue_set_status = nodes.tool_issue_set_status
-task_engine.tool_issue_reconcile_dependencies = lambda: {
-    "success": True, "result": {"resumed": [], "waiting": [], "errors": []}}
+task_engine.tool_issue_reconcile_domain_questions = lambda: {
+    "success": True, "result": {"resumed": [], "asked": [], "waiting": [], "errors": []}}
 engine = task_engine.TaskEngine()
 check(engine.run_once() is True, "run_once returns True when MR opened")
 check(calls["docker"] == 1, "graph executed via wrapper")
 task_engine.tool_issue_list_pending = lambda: {"success": True, "result": []}
 check(engine.run_once() is False, "run_once returns False when no pending issues")
+
+# ═════ Duplicate-poller warning (heartbeat in a GitLab CI/CD variable) ═════
+print("\n── Duplicate-poller heartbeat ──")
+from unittest.mock import MagicMock  # noqa: E402
+_slot: dict = {"value": None}
+
+
+def _swap(value):
+    previous, _slot["value"] = _slot["value"], value
+    return {"success": True, "result": {"previous": previous}}
+
+
+_alerts: list = []
+_clock = [1000.0]
+_real_swap, _real_notify = task_engine.tool_issue_swap_poll_heartbeat, task_engine.telegram_notify
+task_engine.tool_issue_swap_poll_heartbeat = _swap
+task_engine.telegram_notify = _alerts.append
+
+
+def _poll(engine, step=30.0):
+    _clock[0] += step
+    with patch("task_engine.time.time", return_value=_clock[0]):
+        return engine.run_once()
+
+
+try:
+    _a, _b = task_engine.TaskEngine(poll_interval=60), task_engine.TaskEngine(poll_interval=60)
+    for _engine in (_a, _b, _a):
+        _poll(_engine)
+    check(_alerts == [], "a first foreign heartbeat (possibly a restarted predecessor) is not alerted")
+    _poll(_b)
+    check(len(_alerts) == 1 and "Multiple Nesti instances are running for the same project "
+          "gitlab.test/ai/hello-world" in _alerts[0],
+          "the second consecutive foreign heartbeat within one poll interval alerts")
+    _poll(_a)
+    _poll(_b)
+    check(len(_alerts) == 2, "each poller alerts once per streak, not on every poll")
+    _slot["value"] = json.dumps({"instance": _a._instance, "t": _clock[0]})
+    _c = task_engine.TaskEngine(poll_interval=60)
+    _poll(_c, 20)
+    _poll(_c, 60)
+    check(len(_alerts) == 2, "a restarted instance seeing its predecessor once, then itself, stays quiet")
+    _d = task_engine.TaskEngine(poll_interval=60)
+    for _ in range(2):
+        _slot["value"] = json.dumps({"instance": "other-host", "t": _clock[0]})
+        _poll(_d, 61)
+    check(len(_alerts) == 2, "a heartbeat older than the poll interval is not a live poller")
+
+    task_engine.tool_issue_swap_poll_heartbeat = lambda value: {"success": False, "error": "403"}
+    _e = task_engine.TaskEngine(poll_interval=60)
+    with patch("task_engine.logger") as _log:
+        _results = [_e.run_once(), _e.run_once()]
+    _heartbeat_warnings = [c for c in _log.warning.call_args_list
+                           if str(c.args[0]).startswith("Poll heartbeat unavailable")]
+    check(_results == [False, False] and len(_heartbeat_warnings) == 1,
+          "an unavailable heartbeat warns once and never blocks polling")
+
+    def _must_not_swap(value):
+        raise AssertionError("single run swapped the heartbeat")
+    task_engine.tool_issue_swap_poll_heartbeat = _must_not_swap
+    check(task_engine.TaskEngine().run_once() is False,
+          "a single run (poll_interval 0) never touches the heartbeat")
+finally:
+    task_engine.tool_issue_swap_poll_heartbeat = _real_swap
+    task_engine.telegram_notify = _real_notify
+
+_hb = gic.GitLabIssuesClient()
+_hb.session = MagicMock()
+_hb.session.get.return_value.status_code = 404
+_first = _hb.swap_poll_heartbeat("x")
+check(_first is None and not _hb.session.put.called
+      and _hb.session.post.call_args.kwargs["json"]["key"] == "NESTI_POLL_HEARTBEAT"
+      and _hb.session.post.call_args.kwargs["json"]["value"] == "x",
+      "a missing heartbeat variable is created and reports no previous poller")
+_hb.session.get.return_value.status_code = 200
+_hb.session.get.return_value.json.return_value = {"value": "x"}
+check(_hb.swap_poll_heartbeat("y") == "x"
+      and _hb.session.put.call_args.kwargs["json"] == {"value": "y"}
+      and _hb.session.post.call_count == 1,
+      "an existing heartbeat is overwritten and its previous value returned")
+
+# ═════ MCP: each client connection acts on its own GitLab project ═════
+print("\n── MCP client project binding ──")
+import gitlab_project  # noqa: E402
+import gitlab_client  # noqa: E402
+import graph.tools as _bind_tools  # noqa: E402
+
+_remotes = {
+    "https://gitlab.com/acme/shop.git": "acme/shop",
+    "https://oauth2:SECRET@gitlab.com/acme/shop": "acme/shop",
+    "git@gitlab.com:group/sub/proj.git": "group/sub/proj",
+    "ssh://git@gitlab.com:2222/group/proj.git": "group/proj",
+}
+check(all(gitlab_project.project_from_remote(r, "https://gitlab.com") == p
+          for r, p in _remotes.items())
+      and gitlab_project.project_from_remote(
+          "https://example.com/gitlab/g/p.git", "https://example.com/gitlab") == "g/p",
+      "https, credentialed, scp, ssh-with-port and sub-path remotes resolve to namespace/project")
+_bad = []
+for _remote in ("", "https://gitlab.com/shop", "https://u:SECRET@github.com/x/y.git"):
+    try:
+        gitlab_project.project_from_remote(_remote, "https://gitlab.com")
+    except ValueError as exc:
+        _bad.append(str(exc))
+check(len(_bad) == 3 and "github.com" in _bad[2] and not any("SECRET" in m for m in _bad),
+      "empty, namespace-less and foreign-host remotes are refused without echoing credentials")
+try:
+    gitlab_project.bind_client("git@gitlab.test:Group/Proj.git")
+    check(gitlab_project.path() == "Group/Proj"
+          and gitlab_project.identity() == "gitlab.test/group/proj"
+          and gic.GitLabIssuesClient().project_path == "Group/Proj",
+          "a bound client acts on its remote's project, not GITLAB_PROJECT_PATH")
+    with patch("gitlab_project.requests.get") as _get:
+        _get.return_value.json.return_value = {"default_branch": "develop"}
+        check(gitlab_client.GitLabClient().default_branch == "develop",
+              "a bound client targets its project's GitLab default branch")
+    with patch("project_layout.load_layout",
+               return_value={"gitlab_project": "gitlab.test/other/proj"}):
+        _layout = _bind_tools.tool_project_layout()
+    with patch("project_layout.load_layout",
+               return_value={"gitlab_project": "gitlab.test/group/proj"}):
+        _own = _bind_tools.tool_project_layout()
+    check(not _layout["success"] and "gitlab.test/other/proj" in _layout["error"]
+          and "gitlab.test/group/proj" in _layout["error"] and _own["success"],
+          "project_layout serves only the layout recorded for the client's project")
+    gitlab_project.bind_client("")
+    _refused = _bind_tools.tool_issue_list_pending()
+    check(not _refused["success"] and "nesti mcp" in _refused["error"],
+          "a client without a resolvable project is refused, never served .env's project")
+    _globbed = []
+    for _remote in ("https://gitlab.test/acme/*", "git@gitlab.test:acme/[ab].git"):
+        gitlab_project.bind_client(_remote)
+        with patch("graph.tools.get_semantic_memory") as _memory:
+            _globbed.append((_bind_tools.tool_memory_forget_episodes(1, "r")["success"],
+                             _memory.called))
+    check(_globbed == [(False, False), (False, False)],
+          "a wildcard remote is refused before Redis, so it cannot delete other projects' episodes")
+finally:
+    gitlab_project._bound = None
 
 # ═════ Static acceptance checks ═════
 print("\n── Static acceptance checks ──")
@@ -2890,5 +3817,22 @@ token_config = subprocess.run(
 )
 check(json.loads(token_config.stdout) == 16000,
       "configured output tokens are a JSON number, not a rejected API string")
+
+print("\n── Ponytail level ──")
+_ponytail_probe = ("import prompt_builder as p; print(all(f'Use {p._PONYTAIL_LEVEL.upper()} for both'"
+                   " in f('fullstack', '', {'backend': '.', 'frontend': None})"
+                   " for f in (p._planning_system_prompt, p._coding_system_prompt)), p._PONYTAIL_LEVEL)")
+for _value, _level in ((None, "ultra"), ("", "ultra"), ("lite", "lite"), (" FULL ", "full"), ("ultra", "ultra")):
+    _env = {k: v for k, v in os.environ.items() if k != "NESTI_PONYTAIL_LEVEL"}
+    if _value is not None:
+        _env["NESTI_PONYTAIL_LEVEL"] = _value
+    _run = subprocess.run([sys.executable, "-c", _ponytail_probe], env=_env,
+                          capture_output=True, text=True)
+    check(_run.stdout.split() == ["True", _level],
+          f"NESTI_PONYTAIL_LEVEL={_value!r} puts {_level.upper()} into the plan and code prompts")
+_run = subprocess.run([sys.executable, "-c", "import prompt_builder"],
+                      env={**os.environ, "NESTI_PONYTAIL_LEVEL": "bogus"}, capture_output=True, text=True)
+check(_run.returncode != 0 and "Invalid NESTI_PONYTAIL_LEVEL" in _run.stderr,
+      "invalid NESTI_PONYTAIL_LEVEL fails the prompt_builder import")
 
 print(f"\nALL {passed_checks} CHECKS PASSED ✅")

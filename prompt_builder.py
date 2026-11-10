@@ -2,8 +2,8 @@
 prompt_builder.py – constructs all prompts used by the orchestrator.
 
 The orchestrator now drives a Laravel 13 + PrimeVue 5 codebase: backend code is
-Laravel, frontend code is Vue 3 with PrimeVue components mounted through Laravel
-Vite.
+a Laravel API, frontend code is a separate Vue 3 + PrimeVue SPA that reaches the
+Laravel API over HTTP.
 
 Task scope
 ──────────
@@ -14,7 +14,9 @@ Task scope
   instructions; fullstack carries both — what every issue received before
   scopes existed, and still the answer whenever the scope is uncertain.
 
-  Each system prompt carries a TASK SCOPE block right after its role: the side
+  Each system prompt carries a TASK SCOPE block near its end, with the BACKEND
+  ARCHITECTURE block (the issue-specific parts) right before the output format,
+  so the issue-independent head is one prefix the providers can cache: the side
   of the application the change stays on, and documentation files (README.md,
   CHANGELOG.md, docs/) out of the change unless the issue asks for them
   (issue_scope.documentation_request).  The planner declares the scope of its
@@ -85,9 +87,18 @@ _PRIMEVUE_MAJOR: str = "5"
 # ── Project context (read once at import; stable across the process lifetime) ──
 _GITLAB_PROJECT: str = os.environ.get("GITLAB_PROJECT_PATH", "the project")
 _DEFAULT_BRANCH: str = os.environ.get("GITLAB_DEFAULT_BRANCH", "main")
-_PONYTAIL_FULL = (Path(__file__).parent / "skills" / "ponytail" / "SKILL.md").read_text(
-    encoding="utf-8"
-).strip()
+_PONYTAIL_LEVEL: str = (os.environ.get("NESTI_PONYTAIL_LEVEL") or "ultra").strip().lower()
+if _PONYTAIL_LEVEL not in ("lite", "full", "ultra"):
+    raise ValueError(
+        f"Invalid NESTI_PONYTAIL_LEVEL={_PONYTAIL_LEVEL!r} – expected 'lite', 'full' or 'ultra'."
+    )
+_PONYTAIL = (
+    Path(__file__).parent / "skills" / "ponytail" / f"SKILL_{_PONYTAIL_LEVEL.upper()}.md"
+).read_text(encoding="utf-8").strip()
+
+# Splits build_code_prompt's user prompt: everything before it is identical across attempts of one issue.
+# llm_client caches it on Anthropic models and strips it for every other provider.
+CACHE_BREAK = "<!-- nesti:cache-break -->"
 
 # ── Prompt blocks ──────────────────────────────────────────────────────────────
 # Every system prompt is composed from these blocks for the issue's scope
@@ -116,8 +127,7 @@ _SCOPE_SUMMARY = {
     "fullstack": "fullstack — the issue may change both the Laravel backend and the Vue frontend.",
 }
 
-# What a narrow scope keeps out of the change.  The plumbing a new screen needs
-# (a Blade view, a routes/web.php entry) counts as frontend work.
+# What a narrow scope keeps out of the change.
 _SCOPE_BOUNDARY = {
     "backend": """\
 - No frontend files: no .vue component, JavaScript, CSS, page view, package.json change,
@@ -126,8 +136,7 @@ _SCOPE_BOUNDARY = {
     "frontend": """\
 - No backend files: no migration, model, factory, seeder, controller, FormRequest, API
   Resource, service, routes/api.php entry or PHPUnit test. The backend the UI needs is listed
-  under Existing Repository State; use it as it is. Page plumbing is frontend work: a Blade
-  view or a routes/web.php entry that serves the page is allowed.""",
+  under Existing Repository State; use it as it is.""",
     "fullstack": "",
 }
 
@@ -149,12 +158,12 @@ You are a senior Laravel {_LARAVEL_MAJOR} architect working on the "{_GITLAB_PRO
 The repository IS a Laravel application; this issue concerns its backend.""",
     "frontend": f"""\
 You are a senior PrimeVue {_PRIMEVUE_MAJOR} frontend architect working on the "{_GITLAB_PROJECT}" project.
-The repository IS a Laravel application whose frontend is Vue 3 with PrimeVue components
-mounted through Laravel Vite; this issue concerns that frontend.""",
+The repository IS a Laravel application whose frontend is a separate Vue 3 + PrimeVue SPA that
+reaches the Laravel API over HTTP; this issue concerns that frontend.""",
     "fullstack": f"""\
 You are a senior Laravel {_LARAVEL_MAJOR} architect and PrimeVue {_PRIMEVUE_MAJOR} frontend architect working on the
 "{_GITLAB_PROJECT}" project. The repository IS a Laravel application: backend code is Laravel,
-frontend code is Vue 3 with PrimeVue components mounted through Laravel Vite.""",
+frontend code is a separate Vue 3 + PrimeVue SPA that reaches the Laravel API over HTTP.""",
 }
 
 _CODING_ROLE = {
@@ -164,7 +173,7 @@ on the "{_DEFAULT_BRANCH}" branch.""",
     "frontend": f"""\
 You are a senior Vue 3 + PrimeVue {_PRIMEVUE_MAJOR} frontend developer working on the "{_GITLAB_PROJECT}"
 project on the "{_DEFAULT_BRANCH}" branch. The repository is a Laravel application; its
-frontend is mounted through Laravel Vite.""",
+frontend is a separate Vue 3 + PrimeVue SPA that reaches the Laravel API over HTTP.""",
     "fullstack": f"""\
 You are a senior Laravel {_LARAVEL_MAJOR} + PrimeVue {_PRIMEVUE_MAJOR} developer working on the "{_GITLAB_PROJECT}" project
 on the "{_DEFAULT_BRANCH}" branch.""",
@@ -201,34 +210,12 @@ SEEDER REMOVAL — only when the issue explicitly asks to remove an existing see
   repository; never invent an alternative boolean or response field.
 - A deletion still runs the normal PHPUnit gate; do not skip, weaken or mock it."""
 
-_PLAN_FRONTEND_STANDARDS = f"""\
-- For UI work, name the **PrimeVue components** to be used (by their PrimeVue {_PRIMEVUE_MAJOR} names)
-  instead of describing raw HTML, and the Vue component files under resources/js/components/.
-- Name the existing routes and response shapes the UI relies on, as listed under Existing
-  Repository State.
-- Name how the feature reaches the served page: the entry chain (routes/web.php → Blade view →
-  resources/js/app.js) and the exact change to it — e.g. app.component('TaskTable', TaskTable)
-  before app.mount('#app') plus <task-table></task-table> inside <div id="app">, or rendering
-  from an existing App.vue root. Keep the PrimeVue/Aura setup and every existing registration.
-  An App.vue no entry imports, or a component only a test mounts, is not on the page."""
-
 _PLAN_SPA_STANDARDS = """\
 - For UI work, name the **PrimeVue components** to be used instead of describing raw HTML.
 - Follow the SPA's existing structure shown under Existing Repository State (router module,
-  pages folder, stores, API client modules) instead of resources/js/components.
+  pages folder, stores, API client modules).
 - The feature reaches the page through the existing router; keep the plugin/theme
   registrations in src/main.*."""
-
-# The E2E data contract the planner and the coder share (frontend_runner +
-# scripts/e2e_fixtures.php consume e2e/nesti-fixtures.json).
-_PLAN_E2E_DATA = """\
-- E2E data comes from DatabaseSeeder, from records a spec creates through existing UI/API
-  routes, or from a fixture declared in e2e/nesti-fixtures.json: the sandbox runs its seeder
-  only while the declared GET /api collection is still empty. Plan a fixture only when a
-  Playwright case needs real rows from an existing unauthenticated GET /api collection — never
-  for a valid empty state, a mocked API or a spec that creates its own data. Name the model's
-  existing seeder; when none exists, name Database\\Seeders\\<Model>Seeder without planning that
-  class: Nesti verifies it is absent and opens a backend dependency issue."""
 
 _PLAN_TEST_STANDARDS = {
     "backend": """\
@@ -237,16 +224,15 @@ _PLAN_TEST_STANDARDS = {
   Playwright cases.""",
     "frontend": """\
 - Define the Vitest (component) and Playwright (E2E) test cases the implementation must
-  satisfy. At least one Playwright case loads the served page and asserts the feature on real
-  data. A frontend task defines no PHPUnit cases.
-""" + _PLAN_E2E_DATA,
+  satisfy. At least one Playwright case opens the feature's page; SPA specs stub every API
+  request (Playwright page.route through e2e/support/session). A frontend task defines no
+  PHPUnit cases.""",
     "fullstack": """\
 - Define the test cases the implementation must satisfy, in the layers the task actually
   touches, grouped by layer: PHPUnit (Feature/Unit) → OpenAPI → Vitest → Playwright. A
   frontend-only task defines no PHPUnit cases; a backend-only task defines no Vitest or
-  Playwright cases. A UI change gets at least one Playwright case that loads the served page
-  and asserts the feature on real data.
-""" + _PLAN_E2E_DATA + """
+  Playwright cases. A UI change gets at least one Playwright case that opens the feature's
+  page; SPA specs stub every API request (Playwright page.route through e2e/support/session).
   A model or /api collection this change adds ships its own factory and seeder.""",
 }
 
@@ -307,9 +293,13 @@ LARAVEL BACKEND (PHP):
   explicit $request->validate([...]) call — Scramble can only document those two forms.
 - Eloquent models in app/Models with $fillable, $casts, relationships and HasFactory.
 - API responses go through API Resources (app/Http/Resources) extending JsonResource.
-- API routes go in routes/api.php and are served under the /api prefix. Web routes in
-  routes/web.php.
-- Feature tests in tests/Feature use the RefreshDatabase trait; unit tests in tests/Unit.
+- API routes go in routes/api.php (or the route files it loads); their URL prefix is the
+  apiPrefix that bootstrap/app.php's withRouting() sets (Laravel default /api). Register each
+  URI so the served path is exactly the one the issue names. Web routes in routes/web.php.
+- Feature tests in tests/Feature, unit tests in tests/Unit. Build, authorise and authenticate
+  users and pick the database trait the way the quoted existing Feature test and
+  tests/TestCase.php do (RefreshDatabase when there is none); call Model::factory() only on a
+  model that uses HasFactory.
 - Do not create or modify: composer.json beyond adding a package you actually need,
   phpunit.xml, bootstrap/app.php, config/scramble.php.
 
@@ -322,6 +312,9 @@ API DOCUMENTATION (Scramble, dedoc/scramble is already installed):
 - Use #[Response(status, description, type: '...')] from Dedoc\\Scramble\\Attributes only when
   the response cannot be inferred. Never use #[ExcludeRouteFromDocs].
 - Never add a Gate named viewApiDocs and never change config/scramble.php.
+- When a provider restricts Scramble with Scramble::routes(...) (quoted under Existing
+  Repository State), every new /api route must be admitted by that filter: edit the filter in
+  place, keeping its existing entries.
 - Do NOT write a PHPUnit test that inspects the generated OpenAPI document. Verifying it is
   the pipeline's own job, and the document's path keys are relative to the server URL, so an
   assertion like assertArrayHasKey('/api/tasks', $doc['paths']) fails even when the route is
@@ -358,47 +351,11 @@ _VITEST_GUIDANCE = """\
   For locally paginated filtered results, assert visible rows and paginator props, not the
   last fetch's page number: changing local pages need not send any HTTP request.
 - On failure, check the test's interaction, update timing and mock contract before changing
-  working application code. Repair invalid test setup without weakening the expected behaviour."""
-
-_FRONTEND_STANDARDS = f"""\
-PRIMEVUE FRONTEND (Vue 3):
-- Vue 3 Composition API with <script setup>. Never @vue/compat, never the Options API.
-- Use PrimeVue {_PRIMEVUE_MAJOR} components instead of hand-written markup: tables → DataTable + Column,
-  forms → InputText / Select / DatePicker / Checkbox / InputNumber, actions → Button,
-  modals → Dialog / ConfirmDialog, feedback → Toast / Message, uploads → FileUpload,
-  navigation → Menubar / Breadcrumb / Tabs.
-- Import components per file: import DataTable from 'primevue/datatable'; the import path is
-  the lowercase component name (OrganizationChart → 'primevue/organizationchart').
-- The PrimeVue plugin and the Aura preset are already registered in resources/js/app.js
-  (app.use(PrimeVue, {{ theme: {{ preset: Aura }} }}) with Aura from '@primeuix/themes/aura').
-  Never re-register or reconfigure them, and keep every existing import, app.use(...) and
-  app.component(...) line. A global service (ToastService, ConfirmationService) adds only its line.
-- A feature must reach the page the app serves (routes/web.php → its Blade view → the @vite
-  entry resources/js/app.js or app.ts). Make the import/registration/mount change it needs and
-  keep the existing root architecture:
-  - In-DOM template (createApp({{}}) mounted on <div id="app"> of resources/views/app.blade.php):
-    import the component, add app.component('TaskTable', TaskTable) before app.mount('#app'),
-    and put <task-table></task-table> inside <div id="app"> of the served Blade view. In-DOM
-    tags, props and events are kebab-case (:page-size, @row-select); never self-close a custom tag.
-  - SFC root (createApp(App) with an imported App.vue): keep it and render the feature from that
-    root. Never convert one architecture into the other.
-  - An App.vue that no entry file imports is not a page implementation: nothing renders it.
-- Edit the entry file or the Blade view only from its complete body quoted under Existing
-  Repository State, emitting the whole file with your change. If that body is named as omitted,
-  never reconstruct it from a fragment or replace the boot code by guess; state the assumption.
-- An explicit element choice in the issue takes precedence over the PrimeVue preference;
-  for example, a requested native input type="date" must stay a native date input.
-- Components live in resources/js/components/<Name>.vue; Vitest specs in
-  resources/js/components/__tests__/<Name>.test.js; Playwright specs in e2e/<feature>.spec.js.
-- Extend the existing component test suite and reuse its mount helper and plugin setup.
-  A new suite still mounts with the PrimeVue plugin (and the existing Aura preset); importing
-  the component alone does not provide $primevue.config.
-- vite.config.js, vitest.config.js, playwright.config.js and package.json already exist. You
-  may ADD an npm dependency to package.json when the task truly needs one; never remove an
-  existing dependency, never change the pinned "@playwright/test": "1.50.0", and never rewrite
-  the three config files.
-- Tailwind CSS 4 is available for layout utilities.
-""" + _VITEST_GUIDANCE
+  working application code. Repair invalid test setup without weakening the expected behaviour.
+- jsdom has no window.matchMedia or ResizeObserver, which PrimeVue calls while mounting Select,
+  the DataTable paginator and overlays. vitest.setup.js provides both when the quoted
+  vitest.config.js lists it under setupFiles; otherwise stub both with vi.stubGlobal in the spec
+  before mount."""
 
 _SPA_STANDARDS = """\
 PRIMEVUE SPA (Vue 3):
@@ -412,7 +369,7 @@ PRIMEVUE SPA (Vue 3):
 - Components and Vitest specs follow the existing locations shown under Existing Repository
   State (else src/components/__tests__/<Name>.spec.(ts|js)); Playwright specs go in
   <frontend>/e2e/<feature>.spec.(ts|js).
-- vitest.config.js and playwright.config.js already exist: never rewrite them. package.json may
+- vitest.config.js, vitest.setup.js and playwright.config.js already exist: never rewrite them. package.json may
   only gain dependencies; "@playwright/test": "1.50.0" stays exact.
 """ + _VITEST_GUIDANCE
 
@@ -420,49 +377,25 @@ _TEST_PHPUNIT = """\
 - PHPUnit (`php artisan test`) runs whenever the change creates, modifies or deletes PHP, so
   every PHP change ships a Feature or Unit test. Migrations are executed before the suite:
   a broken migration fails the layer.
-- The OpenAPI layer runs when the change touches routes/api.php, app/Http/Controllers,
-  app/Http/Resources, or app/Http/Requests."""
-
-_TEST_FRONTEND_LAYERS = """\
-- Vitest and then Playwright run when the change touches the frontend (.vue, JavaScript, CSS,
-  Blade views, package.json, e2e/). Playwright drives the real application: the sandbox runs
-  the migrations and DatabaseSeeder, then the fixtures declared in e2e/nesti-fixtures.json,
-  `npm run build`, and playwright.config.js serves the app with `php artisan serve` on
-  http://127.0.0.1:8000.
-- Test the integration on the served page: at least one Playwright spec opens it (page.goto('/')
-  or the feature's web route) and asserts the feature with real API data. A directly mounted
-  component or a mocked API proves nothing about integration.
-- Reuse the existing E2E setup and mutation routes shown in repository tests. A field in a
-  GET response is not necessarily accepted by POST: do not invent writable fields from it.
-  Verify setup responses establish the required state; the repository contract overrides a
-  plan's assumptions. Preserve the API's ordering in expected rows, or explicitly request a sort.
-- The E2E database holds what DatabaseSeeder creates plus any declared fixture. NEVER assume
-  other rows exist."""
-
-_E2E_FIXTURE_RULE = """\
-  If an E2E spec needs data, create it through the UI or the existing /api routes inside the
-  spec, or use what DatabaseSeeder creates. Declare a fixture in e2e/nesti-fixtures.json only
-  when the spec needs nonempty real rows from an existing unauthenticated GET /api collection —
-  never for a valid empty state, a mocked API, or a spec that creates its own data:
-  {"version":1,"fixtures":[{"endpoint":"/api/tasks","model":"App\\\\Models\\\\Task","seeder":"Database\\\\Seeders\\\\TaskSeeder"}]}
-  The sandbox runs that seeder only while the endpoint is still empty. Name the model's
-  existing seeder; when none exists, name Database\\Seeders\\<Model>Seeder anyway and do NOT
-  write that class or register it in DatabaseSeeder: Nesti verifies it is absent and opens a
-  backend dependency issue. The manifest is test setup, not default seeding — register a seeder
-  in DatabaseSeeder::run() only when the issue asks for default seed data. On a retry, re-emit a
-  still-needed manifest in full, or emit {"version":1,"fixtures":[]} once it is no longer needed."""
-
-_TEST_E2E_DATA = {
-    "frontend": _E2E_FIXTURE_RULE,
-    "fullstack": _E2E_FIXTURE_RULE + """
-  A model or /api collection this change adds ships its own factory and seeder.""",
-}
+- The OpenAPI layer runs when the change touches routes/api.php, a route file under routes/<dir>/,
+  or an Http/Controllers, Http/Resources or Http/Requests folder (also inside a domain)."""
 
 _TEST_SPA_LAYERS = """\
 - Vitest and then Playwright run when the change touches the SPA folder. Playwright builds the
   SPA (`npm run build`) and serves it with `vite preview` on http://127.0.0.1:4173; the Laravel
-  API is NOT running. Every spec stubs each /api request it triggers with page.route(...) and
-  realistic JSON shaped like the backend's API Resources. Never declare e2e/nesti-fixtures.json."""
+  API is NOT running, so every request the page sends must be answered by a stub.
+- Sign-in and API stubs come from <frontend>/e2e/support/session.(ts|js): signIn(page, user?)
+  registers a catch-all that logs and answers every unstubbed fetch/XHR with 404 JSON, stubs the
+  requests the signed-in layout sends on every page, and seeds the session with
+  page.addInitScript exactly as the app's own sign-in stores it (the storage keys and stored-user
+  shape of the quoted files); stubApi(page, { 'GET /path': body | { status, json } }) answers
+  fetch/XHR requests whose method matches and whose URL path ends with that path, else calls
+  route.fallback(). Call signIn, then stubApi, then page.goto.
+- When that helper is absent, create it in this change with exactly those two exports; when it
+  exists, import it and never redefine either function in a spec. Fill the login form only in a
+  spec about signing in.
+- API paths are those the SPA's HTTP client builds: its base URL may be absolute and need not end
+  in /api. Stub bodies follow the backend's API Resources under Existing Repository State."""
 
 _TEST_LOCATORS = """\
 - Use precise Playwright locators: getByRole('radio', { name: 'Done', exact: true }),
@@ -476,8 +409,7 @@ _TEST_SCOPE_NOTE = {
 - Vitest and Playwright do not run for a backend change: write no .vue file, no Vitest spec
   and no Playwright spec.""",
     "frontend": """\
-- Write no PHPUnit test and no PHP class. PHPUnit runs the existing PHP suite only when the
-  change touches a PHP file (a Blade view, routes/web.php).""",
+- Write no PHPUnit test and no PHP class.""",
     "fullstack": """\
 - A backend-only task needs no .vue file, no Vitest spec and no Playwright spec. A frontend-only
   task needs no PHP code and no PHPUnit test.""",
@@ -506,23 +438,27 @@ To physically remove a file, emit one standalone line with no code fence or body
   Minimal code changes do not mean a partial response; unchanged files within this feature
   still need their complete bodies. Before answering, check the plan and previous change set."""
 
+_EXISTING_TEST_RULE = """
+- An existing test may only be changed in the assertions the issue makes wrong; never remove
+  or loosen its other assertions."""
+
 _CODE_TEST_INSTRUCTIONS = {
     "backend": """\
 - Include a PHPUnit Feature or Unit test for every behaviour the plan changes.
 - Include a new migration, factory or seeder only when the plan requires creating it;
   a removal uses DELETE and its removal tests, never a replacement seeder.
 - Add or extend the Feature test that proves each new or changed /api route responds as
-  documented.""",
+  documented.""" + _EXISTING_TEST_RULE,
     "frontend": """\
 - Include a Vitest spec for every component you create or change, and a Playwright spec for
-  the user flow the issue names.""",
+  the user flow the issue names.""" + _EXISTING_TEST_RULE,
     "fullstack": """\
 - Include the test files for every layer the plan touches (PHPUnit for PHP,
   Vitest + Playwright for Vue.js). Skip the layers the plan does not touch.
 - Include a new migration, factory or seeder only when the plan requires creating it;
   a removal uses DELETE and its removal tests, never a replacement seeder.
 - Add or extend the Feature test that proves each new or changed /api route responds as
-  documented.""",
+  documented.""" + _EXISTING_TEST_RULE,
 }
 
 _CODE_REPOSITORY_RULE = {
@@ -549,7 +485,7 @@ def _normalise_scope(scope: str) -> str:
 
 
 def _task_scope_block(scope: str, documentation: str) -> str:
-    """The TASK SCOPE block both system prompts carry right after their role."""
+    """The TASK SCOPE block both system prompts carry before their output format."""
     lines = [
         f"TASK SCOPE: {_SCOPE_SUMMARY[scope]}",
     ]
@@ -567,26 +503,33 @@ def _task_scope_block(scope: str, documentation: str) -> str:
     return "\n".join(lines)
 
 
-def _is_separated(layout: dict | None) -> bool:
-    """True for a layout whose Laravel API lives in its own folder, not the clone root."""
-    return bool(layout) and layout.get("backend") not in (None, ".")
-
-
 def _layout_block(layout: dict, spa_versions: dict) -> str:
-    """The REPOSITORY LAYOUT block for a separated layout."""
+    """The REPOSITORY LAYOUT block."""
     backend, frontend = layout["backend"], layout.get("frontend")
-    text = (
-        f"REPOSITORY LAYOUT (strict): The Laravel API lives in {backend}/; every backend path in "
-        "these instructions (app/…, routes/…, database/…, tests/…) is relative to it — write "
-        f"FILE paths as {backend}/app/…. "
-    )
+    if backend == ".":
+        text = (
+            "REPOSITORY LAYOUT (strict): The Laravel API lives in the repository root: PHP paths keep "
+            "their plain Laravel form (app/…, routes/…, tests/…). "
+        )
+    else:
+        text = (
+            f"REPOSITORY LAYOUT (strict): The Laravel API lives in {backend}/; every backend path in "
+            "these instructions (app/…, routes/…, database/…, tests/…) is relative to it — write "
+            f"FILE paths as {backend}/app/…. "
+        )
     if not frontend:
         return text + "This project has no SPA: never create .vue, JavaScript or CSS files."
-    text += (
-        f"The Vue SPA lives in {frontend}/, a separate application (FILE paths {frontend}/src/…, "
-        f"{frontend}/e2e/…); it reaches the API only over HTTP. Never put Vue, JavaScript or CSS "
-        f"into {backend}/."
-    )
+    if backend == ".":
+        text += (
+            f"The SPA lives in {frontend}/; every Vue/JS/CSS/test file goes under {frontend}/, never "
+            "into resources/js or resources/css of the Laravel app."
+        )
+    else:
+        text += (
+            f"The Vue SPA lives in {frontend}/, a separate application (FILE paths {frontend}/src/…, "
+            f"{frontend}/e2e/…); it reaches the API only over HTTP. Never put Vue, JavaScript or CSS "
+            f"into {backend}/."
+        )
     if spa_versions:
         text += (
             " Installed SPA dependencies: "
@@ -596,63 +539,91 @@ def _layout_block(layout: dict, spa_versions: dict) -> str:
     return text
 
 
-def _planning_system_prompt(scope: str, documentation: str, layout: dict | None = None) -> str:
+def _architecture_block(domain: dict) -> str:
+    """The BACKEND ARCHITECTURE block for a domain-split backend (paths backend-relative)."""
+    root, selected = domain["root"], domain["selected"]
+    listed = "" if selected else f" ({', '.join(domain['names'])})"
+    text = (
+        f"BACKEND ARCHITECTURE (strict): The backend splits its code into domains under app/{root}/"
+        f"{listed}; each domain keeps its own layers ({', '.join(domain['layers'])}) "
+        f"under the namespace App\\{root}\\<Domain>\\. New feature classes (controllers, requests, "
+        "resources, models, repositories, services) go into the owning domain, not into Laravel's "
+        "default app/Http/Controllers, app/Http/Requests, app/Http/Resources or app/Models folders "
+        "named under LARAVEL BACKEND; existing shared classes stay where they are."
+    )
+    if not selected:
+        return text + (" Put the change into the domain that owns the feature and mirror that "
+                       "domain's existing files.")
+    names = ", ".join(selected)
+    text += (
+        f" This issue belongs to the {names} domain{'s' if len(selected) > 1 else ''}: put every new or "
+        "changed backend class under " + " or ".join(
+            f"app/{root}/{name}/<Layer>/ (namespace App\\{root}\\{name}\\<Layer>)" for name in selected)
+    )
+    if domain["route_files"]:
+        text += f" and register its routes in {', '.join(domain['route_files'])}"
+    return text + (
+        f". Mirror the structure, naming, base classes and wiring of the {names} files quoted under "
+        "Existing Repository State; migrations, factories, seeders and tests stay where the project "
+        "keeps them."
+    )
+
+
+def _planning_system_prompt(
+    scope: str, documentation: str, layout: dict, domain: dict | None = None,
+) -> str:
     """The planning system prompt for *scope* (already normalised)."""
-    separated = _is_separated(layout)
     standards = [_PLAN_COMMON_STANDARDS]
     if scope != "frontend":
         standards += [_PLAN_BACKEND_STANDARDS, _SEEDER_REMOVAL_STANDARDS]
-    if scope != "backend" and not separated:
-        standards.append(_PLAN_FRONTEND_STANDARDS)
-    elif scope != "backend" and layout.get("frontend"):
+    if scope != "backend" and layout.get("frontend"):
         standards.append(_PLAN_SPA_STANDARDS)
-    standards.append(
-        _PLAN_TEST_STANDARDS[scope].replace("\n" + _PLAN_E2E_DATA, "") if separated
-        else _PLAN_TEST_STANDARDS[scope]
-    )
+    standards.append(_PLAN_TEST_STANDARDS[scope])
 
-    sections = [
-        _PLANNING_ROLE[scope],
-        "Your task in this phase is a concise IMPLEMENTATION PLAN — no code yet.",
-        _task_scope_block(scope, documentation),
-    ]
-    if separated:
-        sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
-    sections.append(_PONYTAIL_FULL)
+    sections = [_PONYTAIL]
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
+    sections += [
+        _PLANNING_ROLE[scope],
+        "Your task in this phase is a concise IMPLEMENTATION PLAN — no code yet.",
+    ]
+    sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
     sections.append("PLANNING STANDARDS:\n" + "\n".join(standards))
+    # Issue-specific blocks last: everything above is one prefix shared across calls and issues (prompt cache).
+    sections.append(_task_scope_block(scope, documentation))
+    if domain and scope != "frontend":
+        sections.append(_architecture_block(domain))
     sections.append(_PLANNING_OUTPUT_FORMAT)
     return "\n\n".join(sections)
 
 
-def _coding_system_prompt(scope: str, documentation: str, layout: dict | None = None) -> str:
+def _coding_system_prompt(
+    scope: str, documentation: str, layout: dict, domain: dict | None = None,
+) -> str:
     """The coding system prompt for *scope* (already normalised)."""
-    separated = _is_separated(layout)
-    spa = separated and bool(layout.get("frontend"))
+    spa = bool(layout.get("frontend"))
     testing = ["TESTING (layers follow the files you create, modify or delete):"]
     if scope != "frontend":
         testing.append(_TEST_PHPUNIT)
-    if scope != "backend" and not separated:
-        testing += [_TEST_FRONTEND_LAYERS, _TEST_E2E_DATA[scope], _TEST_LOCATORS]
-    elif scope != "backend" and spa:
+    if scope != "backend" and spa:
         testing += [_TEST_SPA_LAYERS, _TEST_LOCATORS]
     testing.append(_TEST_SCOPE_NOTE[scope])
 
-    sections = [_CODING_ROLE[scope], _task_scope_block(scope, documentation)]
-    if separated:
-        sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
-    sections.append(_PONYTAIL_FULL)
+    sections = [_PONYTAIL]
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
+    sections.append(_CODING_ROLE[scope])
+    sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
     sections.append(_CODING_STANDARDS)
     if scope != "frontend":
         sections += [_BACKEND_STANDARDS, _SEEDER_REMOVAL_STANDARDS]
-    if scope != "backend" and not separated:
-        sections.append(_FRONTEND_STANDARDS)
-    elif scope != "backend" and spa:
+    if scope != "backend" and spa:
         sections.append(_SPA_STANDARDS)
     sections.append("\n".join(testing))
+    # Issue-specific blocks last: everything above is one prefix shared across calls and issues (prompt cache).
+    sections.append(_task_scope_block(scope, documentation))
+    if domain and scope != "frontend":
+        sections.append(_architecture_block(domain))
     sections.append(_CODE_OUTPUT_FORMAT)
     return "\n\n".join(sections)
 
@@ -841,6 +812,13 @@ def _format_episodes_section(episodes: "list[dict] | None", char_budget: int) ->
     return "\n## Earlier Failed Attempts on This Issue\n" + "\n".join(blocks)
 
 
+def _facts_section(app_facts: str, scope: str) -> str:
+    """The Laravel Boost facts section; empty for the frontend scope or without facts."""
+    if not app_facts or scope == "frontend":
+        return ""
+    return f"\n## Application Facts (Laravel Boost, repository HEAD before this change)\n{app_facts.strip()}\n"
+
+
 # ── Public builder functions ───────────────────────────────────────────────────
 
 def build_plan_prompt(
@@ -853,7 +831,10 @@ def build_plan_prompt(
     scope: str = "fullstack",
     scope_evidence: str = "",
     metrics: dict | None = None,
-    layout: dict | None = None,
+    *,
+    layout: dict,
+    domain: dict | None = None,
+    app_facts: str = "",
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the planning phase.
@@ -892,6 +873,9 @@ def build_plan_prompt(
         the planner, which confirms or corrects the scope on line 1 of its plan.
     metrics:
         Optional output dict of section character counts and selected/rendered RAG counts.
+    app_facts:
+        Laravel Boost facts (versions, packages, database schema summary) of the
+        backend at the cloned HEAD; rendered only outside the frontend scope.
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
@@ -931,6 +915,7 @@ GitLab Issue #{issue_id}: {subject}
 {description or "(no description provided)"}
 """,
         "repo": repo_section,
+        "facts": _facts_section(app_facts, scope),
         "solutions": solutions_section,
         "catalog": catalog_section,
         "rag": retrieved_section,
@@ -947,7 +932,7 @@ Write the plan now. No code, no preamble.\
     }
     user_prompt = "".join(sections.values())
     system_prompt = _planning_system_prompt(
-        scope, documentation_request(subject, description), layout
+        scope, documentation_request(subject, description), layout, domain
     )
     if metrics is not None:
         metrics.update({f"{name}_chars": len(text) for name, text in sections.items()})
@@ -965,7 +950,10 @@ def build_code_prompt(
     recalled_failures: "list[dict] | None" = None,
     scope: str = "fullstack",
     metrics: dict | None = None,
-    layout: dict | None = None,
+    *,
+    layout: dict,
+    domain: dict | None = None,
+    app_facts: str = "",
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the code-generation phase.
@@ -1000,6 +988,9 @@ def build_code_prompt(
         system prompt and the instructions; anything else means "fullstack".
     metrics:
         Optional output dict of section character counts and selected/rendered RAG counts.
+    app_facts:
+        Laravel Boost facts (versions, packages, database schema summary) of the
+        backend at the cloned HEAD; rendered only outside the frontend scope.
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
@@ -1026,6 +1017,8 @@ def build_code_prompt(
         if formatted:
             skills_section = f"\n## Skill Documentation\n{formatted}\n"
 
+    # Attempt-stable sections first, up to CACHE_BREAK; repo (re-read with the previous attempt's
+    # files), episodes and node_code's change set/failure follow it.
     sections = {
         "task": f"""\
 ## Task
@@ -1034,12 +1027,14 @@ GitLab Issue #{issue_id}: {subject}
 ### Description
 {description or "(no description provided)"}
 """,
-        "repo": repo_section,
         "plan": f"\n## Approved Implementation Plan\n{plan.strip()}\n",
         "catalog": catalog_section,
         "rag": retrieved_section,
-        "episodes": episodes_section,
         "skills": skills_section,
+        "facts": _facts_section(app_facts, scope),
+        "cache_break": CACHE_BREAK,
+        "repo": repo_section,
+        "episodes": episodes_section,
         "instructions": f"""
 ## Instructions
 Implement the approved plan above:
@@ -1052,7 +1047,7 @@ Implement the approved plan above:
     }
     user_prompt = "".join(sections.values())
     system_prompt = _coding_system_prompt(
-        scope, documentation_request(subject, description), layout
+        scope, documentation_request(subject, description), layout, domain
     )
     if metrics is not None:
         metrics.update({f"{name}_chars": len(text) for name, text in sections.items()})

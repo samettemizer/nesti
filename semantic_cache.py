@@ -3,19 +3,21 @@ semantic_cache.py – Redis-backed short-term vector memory.
 
 Two vector indices on Redis 8's built-in query engine (``FT.CREATE``):
 
-* **Solution cache** (``nesti_solution_idx``, keys ``nesti:memory:solution:<iid>``)
+* **Solution cache** (``nesti_solution_idx_v2``, keys
+  ``nesti:memory:v2:solution:<host/project>:<iid>``)
   One row per successfully merged issue: subject, stack, MR URL and the plan
   that produced it.  Written by ``node_commit``, read by ``node_plan`` —
-  tomorrow's issue sees how a similar one was solved yesterday.
+  tomorrow's issue sees how a similar one was solved yesterday, recalled
+  only within the same GitLab project.
   TTL ``NESTI_SOLUTION_TTL_DAYS`` (default 90).
 
-* **Episodic memory** (``nesti_episode_idx``, keys
-  ``nesti:memory:episode:<iid>:<attempt>:<layer>``)
+* **Episodic memory** (``nesti_episode_idx_v2``, keys
+  ``nesti:memory:v2:episode:<host/project>:<iid>:<run>:<attempt>:<layer>``)
   One row per failed attempt of the issue in flight.  Written by
   ``node_on_layer_failure``, read by ``node_code``.  The attempt that just
   failed is already verbatim in the conversation history, so recall returns
-  only the *older* attempts.  TTL ``CONVERSATION_TTL_DAYS``; dropped with
-  the conversation when the issue finishes.
+  only the *older* attempts of the same project and run.  TTL
+  ``CONVERSATION_TTL_DAYS``; dropped with the conversation when the run ends.
 
 Both indices embed through ``embedding.get_embedder()``, the same model as the
 Qdrant document memory.
@@ -47,10 +49,10 @@ from layer_output import condense
 
 logger = logging.getLogger(__name__)
 
-SOLUTION_INDEX: str = "nesti_solution_idx"
-SOLUTION_PREFIX: str = "nesti:memory:solution:"
-EPISODE_INDEX: str = "nesti_episode_idx"
-EPISODE_PREFIX: str = "nesti:memory:episode:"
+SOLUTION_INDEX: str = "nesti_solution_idx_v2"
+SOLUTION_PREFIX: str = "nesti:memory:v2:solution:"
+EPISODE_INDEX: str = "nesti_episode_idx_v2"
+EPISODE_PREFIX: str = "nesti:memory:v2:episode:"
 _PLAN_STORE_LIMIT: int = 6_000      # chars of plan persisted per solution
 _EPISODE_OUTPUT_LIMIT: int = 1_200  # chars of *condensed* layer output persisted
 
@@ -103,6 +105,11 @@ def _solution_ttl_seconds() -> int:
 def _layer_slug(layer: str) -> str:
     """``"Playwright (E2E tests)"`` → ``"playwright-e2e-tests"``."""
     return re.sub(r"[^a-z0-9]+", "-", (layer or "unknown").lower()).strip("-") or "unknown"
+
+
+def _tag(value: str) -> str:
+    """Escape TAG query punctuation (``.``, ``/``, ``-``) in a filter value."""
+    return re.sub(r"([^A-Za-z0-9_])", r"\\\1", value)
 
 
 class SemanticMemory:
@@ -169,6 +176,7 @@ class SemanticMemory:
 
     def remember_solution(
         self,
+        project: str,
         issue_id: int,
         subject: str,
         description: str,
@@ -176,18 +184,19 @@ class SemanticMemory:
         stack: str,
         mr_url: str,
     ) -> bool:
-        """Store (or overwrite) the solution of one merged issue."""
+        """Store (or overwrite) the solution of one merged issue of *project*."""
         if not self.available:
             return False
         try:
             vector = get_embedder().embed_documents([f"{subject}\n{description}"])
             if not vector:
                 return False
-            key = f"{SOLUTION_PREFIX}{issue_id}"
+            key = f"{SOLUTION_PREFIX}{project}:{issue_id}"
             pipe = self._redis.pipeline(transaction=True)
             pipe.hset(
                 key,
                 mapping={
+                    "project": project,
                     "issue_id": int(issue_id),
                     "subject": subject or "",
                     "stack": stack or "unknown",
@@ -204,11 +213,13 @@ class SemanticMemory:
             logger.warning("Failed to store solution for issue #%s: %s", issue_id, exc)
             return False
 
-    def find_similar_solutions(self, text: str, limit: int = 2) -> list[dict]:
-        """Merged issues similar to *text*, most similar first, above the score floor."""
+    def find_similar_solutions(self, project: str, text: str, limit: int = 2) -> list[dict]:
+        """Merged issues of *project* similar to *text*, most similar first, above the score floor."""
         if not text or not text.strip() or limit <= 0 or not self.available:
             return []
-        rows = self._knn(SOLUTION_INDEX, "*", text, limit, _SOLUTION_FIELDS)
+        rows = self._knn(
+            SOLUTION_INDEX, f"@project:{{{_tag(project)}}}", text, limit, _SOLUTION_FIELDS
+        )
         floor = _env_float("NESTI_SOLUTION_MIN_SCORE", _DEFAULT_SOLUTION_MIN_SCORE)
         results: list[dict] = []
         for doc, similarity in rows:
@@ -230,8 +241,10 @@ class SemanticMemory:
     # Episodic memory
     # ------------------------------------------------------------------
 
-    def remember_failure(self, issue_id: int, attempt: int, layer: str, output: str) -> bool:
-        """Store one failed attempt of *issue_id* (condensed layer output)."""
+    def remember_failure(
+        self, project: str, issue_id: int, run_id: str, attempt: int, layer: str, output: str
+    ) -> bool:
+        """Store one failed attempt of *issue_id* in run *run_id* of *project* (condensed layer output)."""
         if not self.available:
             return False
         try:
@@ -239,11 +252,13 @@ class SemanticMemory:
             vector = get_embedder().embed_documents([f"{layer} failure: {summary}"])
             if not vector:
                 return False
-            key = f"{EPISODE_PREFIX}{issue_id}:{attempt}:{_layer_slug(layer)}"
+            key = f"{EPISODE_PREFIX}{project}:{issue_id}:{run_id}:{attempt}:{_layer_slug(layer)}"
             pipe = self._redis.pipeline(transaction=True)
             pipe.hset(
                 key,
                 mapping={
+                    "project": project,
+                    "run": run_id,
                     "issue_id": int(issue_id),
                     "attempt": int(attempt),
                     "layer": layer or "unknown",
@@ -265,10 +280,10 @@ class SemanticMemory:
             return False
 
     def recall_failures(
-        self, issue_id: int, text: str, attempt: int, limit: int = 2
+        self, project: str, issue_id: int, run_id: str, text: str, attempt: int, limit: int = 2
     ) -> list[dict]:
         """
-        Older failed attempts of *issue_id* similar to *text*.
+        Older failed attempts of *issue_id* in run *run_id* of *project* similar to *text*.
 
         ``attempt`` is the attempt ABOUT to run.  Attempt ``attempt - 1`` just
         failed and its output is already verbatim in the conversation history
@@ -280,7 +295,10 @@ class SemanticMemory:
         if not self.available:
             return []
         issue = int(issue_id)
-        prefilter = f"(@issue_id:[{issue} {issue}] @attempt:[-inf {int(attempt) - 2}])"
+        prefilter = (
+            f"(@project:{{{_tag(project)}}} @run:{{{_tag(run_id)}}} "
+            f"@issue_id:[{issue} {issue}] @attempt:[-inf {int(attempt) - 2}])"
+        )
         rows = self._knn(EPISODE_INDEX, prefilter, text, limit, _EPISODE_FIELDS)
         floor = _env_float("NESTI_EPISODE_MIN_SCORE", _DEFAULT_EPISODE_MIN_SCORE)
         results: list[dict] = []
@@ -298,14 +316,15 @@ class SemanticMemory:
             )
         return results
 
-    def forget_episodes(self, issue_id: int) -> int:
-        """Delete every episode of *issue_id*; return how many were removed."""
+    def forget_episodes(self, project: str, issue_id: int, run_id: str) -> int:
+        """Delete every episode of *issue_id* in run *run_id* of *project*; return how many were removed."""
         if self._redis is None or not self._ok:
             return 0
         try:
-            # Issue-scoped pattern bounded by max_attempts × 4 layers: a handful
-            # of keys, never a database-wide scan in practice.
-            keys = self._redis.keys(f"{EPISODE_PREFIX}{int(issue_id)}:*")
+            # Run-scoped pattern bounded by max_attempts × 4 layers: a handful of keys,
+            # never a database-wide scan in practice. Identities hold no glob characters:
+            # project_from_remote and the .env project are GitLab paths, run ids are validated.
+            keys = self._redis.keys(f"{EPISODE_PREFIX}{project}:{int(issue_id)}:{run_id}:*")
             return int(self._redis.delete(*keys)) if keys else 0
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("Failed to forget episodes for issue #%s: %s", issue_id, exc)
@@ -375,6 +394,7 @@ class SemanticMemory:
                 SOLUTION_INDEX,
                 SOLUTION_PREFIX,
                 (
+                    TagField("project"),
                     NumericField("issue_id"),
                     TextField("subject"),
                     TagField("stack"),
@@ -386,6 +406,8 @@ class SemanticMemory:
                 EPISODE_INDEX,
                 EPISODE_PREFIX,
                 (
+                    TagField("project"),
+                    TagField("run", case_sensitive=True),  # run ids R1 and r1 are distinct runs
                     NumericField("issue_id"),
                     NumericField("attempt"),
                     TagField("layer"),

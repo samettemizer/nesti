@@ -39,6 +39,26 @@ services:
       nesti-qdrant:
         condition: service_started
 
+  nesti-stats:
+    # Live usage statistics page (nesti /stats): rendered from Redis on every
+    # request, so a browser refresh shows current data. Same image as the
+    # orchestrator; the entrypoint replaces main.py.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nesti-orchestrator:latest
+    container_name: nesti-stats
+    restart: unless-stopped
+    env_file:
+      - .env
+    entrypoint: ["python", "-m", "stats.server"]
+    ports:
+      # Localhost only, same rule as nesti-redis.
+      - "127.0.0.1:8790:8790"
+    depends_on:
+      nesti-redis:
+        condition: service_healthy
+
   nesti-redis:
     # Redis 8 Open Source ships the query engine (FT.CREATE, FLAT/HNSW vector
     # indexing) in the core image — semantic_cache.py needs it for the

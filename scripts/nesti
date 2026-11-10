@@ -1,12 +1,24 @@
 #!/bin/sh
-# Host-side `nesti`: forwards to the container CLI; /arch then opens the page in the host browser.
+# Host-side `nesti`: forwards to the container CLI; /arch (static file) and /stats (live nesti-stats page) then open in a new host browser window.
 set -e
+if [ "${1-}" = mcp ]; then
+    # MCP acts on the GitLab project of the client's checkout: the cwd, or the directory given.
+    NESTI_CLIENT_REMOTE=$(git -C "${2:-.}" remote get-url origin 2>/dev/null || true)
+    export NESTI_CLIENT_REMOTE
+    exec docker exec -i -e NESTI_CLIENT_REMOTE nesti-mcp python -m mcp_server.server
+fi
 here=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)
 if [ -t 0 ]; then tty=-it; else tty=-i; fi
 docker exec $tty nesti-orchestrator nesti "$@"
-if [ "${1-}" = "/arch" ] && [ "${2-}" != "--json" ]; then
-  page="$here/state/architecture.html"
-  if command -v xdg-open >/dev/null 2>&1; then xdg-open "$page" >/dev/null 2>&1 &
-  elif command -v open >/dev/null 2>&1; then open "$page"
-  else echo "Open file://$page in your browser."; fi
+case "${1-} ${2-}" in
+  "/arch --json"*) target= ;;
+  "/arch "*) target="file://$here/state/architecture.html" ;;
+  "/stats "*) target="http://127.0.0.1:8790/" ;;
+  *) target= ;;
+esac
+if [ -n "$target" ]; then
+  if [ "$(uname -s)" = Darwin ]; then open "$target"
+  elif command -v python3 >/dev/null 2>&1; then python3 -m webbrowser -n "$target" >/dev/null 2>&1 &
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$target" >/dev/null 2>&1 &
+  else echo "Open $target in your browser."; fi
 fi

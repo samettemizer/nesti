@@ -139,7 +139,7 @@ def main() -> None:
 
     from task_engine import TaskEngine
 
-    engine = TaskEngine()
+    engine = TaskEngine(poll_interval=args.poll_interval if args.loop else 0)
 
     if args.loop:
         logger.info("AI Developer started in loop mode (poll interval: %ds).", args.poll_interval)

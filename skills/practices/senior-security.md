@@ -18,7 +18,7 @@ triggers: security review, threat model, vulnerability, owasp, sql injection, xs
 3. **Mass assignment**: list writable columns in `$fillable`; never `$guarded = []` or `#[Unguarded]`. Owner, role and status columns (`user_id`, `is_admin`) are set server-side.
 4. **Whitelist output**: API responses go through a JsonResource whose `toArray()` names every field (never `parent::toArray($request)`); `password`, `remember_token` and tokens stay in `$hidden`.
 5. **SQL**: Eloquent / query builder bindings only. Never interpolate input into `whereRaw`, `selectRaw`, `orderByRaw` or `DB::select`; sort columns come from a `Rule::in([...])` whitelist (PDO cannot bind column names).
-6. **XSS**: Blade `{{ }}` and Vue text interpolation only; no `{!! !!}` or `v-html` with user data; never echo user data into the Vue-mounted `#app` markup.
+6. **XSS**: Vue text interpolation only; no `v-html` with user data; the API returns JSON through Resources, never HTML built from user input.
 7. **Secrets** live in `.env`, are read in `config/*.php` with `env()`, and everywhere else with `config('services.x.key')`.
 8. **Passwords**: `Hash::make` / `Hash::check` or the `hashed` cast. **Sensitive columns**: the `encrypted` cast on a TEXT column.
 9. **Throttle** login, registration, password reset and write endpoints (`throttle:<limiter>`).
@@ -49,7 +49,7 @@ For every new route, model, upload or form, the planner asks the six questions b
 | Spoofing | Can an unauthenticated request reach this code? | `auth` / `auth:sanctum`; session regenerate on login; throttled login |
 | Tampering | Which request fields could change data the user must not change (owner, price, role, status)? | FormRequest rules, `$fillable`, server-set values, CSRF, signed URLs |
 | Repudiation | Does a destructive or disputed action leave a trace? | `Log::info` with actor and record ids; an audit column via a new migration only if the issue asks |
-| Information disclosure | Which fields leave the server in JSON, Blade, logs or errors? | JsonResource field list, `$hidden`, generic errors, `encrypted` cast |
+| Information disclosure | Which fields leave the server in JSON, logs or errors? | JsonResource field list, `$hidden`, generic errors, `encrypted` cast |
 | Denial of service | What can one client repeat or enlarge without bound? | `throttle`, `max:` rules, `File::types(...)->max(...)`, `paginate()` not `get()` |
 | Elevation of privilege | Can a normal user reach an admin action or another user's record? | a policy method per action; roles never read from the request |
 
@@ -167,11 +167,9 @@ Route::middleware('auth:sanctum')->group(function () {
 - Inside a controller use `Gate::authorize('update', $task)` when the route has no `can`; one enforcement point per action is enough, zero is a defect.
 - To hide existence, the policy may return `Response::denyAsNotFound()`; the test then expects `assertNotFound()`.
 
-## Pattern: XSS in Blade and Vue
+## Pattern: XSS in Vue
 
-- Blade `{{ $comment->body }}` runs through `htmlspecialchars`; `{!! $comment->body !!}` does not and is never used with user data. Pass PHP data to inline JavaScript with `{{ Js::from($data) }}`, not hand-built JSON.
 - Vue text interpolation and attribute bindings escape; `v-html` does not. If the issue needs user-formatted text, render it as text with Tailwind `whitespace-pre-line`; do not add an HTML sanitizer the issue does not name.
-- Nesti-specific: Vue compiles the markup inside `<div id="app">` of `resources/views/app.blade.php` at runtime (the full `vue.esm-bundler.js` build). Anything Blade echoes there becomes a Vue template, so a stored value containing `{{ ... }}` survives `htmlspecialchars` and runs as a Vue expression. Keep `#app` to static component tags; components load user data from JSON endpoints.
 - User-supplied links: validate with `url:http,https` server-side before rendering them in `:href`, which blocks `javascript:` URLs.
 
 ```vue
@@ -267,36 +265,12 @@ class UserResource extends JsonResource
 - Errors: do not catch an exception to return `$e->getMessage()`; let the handler render it (generic when `APP_DEBUG=false`). For expected refusals use `abort(403)` / `abort(404)`.
 - Test with `assertJsonMissingPath('data.password')` and `assertJsonMissingPath('data.email')` as a different user.
 
-## Pattern: CSRF in the Vue frontend
+## Pattern: CSRF and auth in the SPA
 
-- `PreventRequestForgery` protects the `web` group. It accepts a same-origin `Sec-Fetch-Site` header, which the Laravel docs say is only sent over HTTPS; otherwise it validates the CSRF token from `_token`, `X-CSRF-TOKEN` or `X-XSRF-TOKEN`. Playwright drives plain-HTTP `http://127.0.0.1:8000`, so always send the token.
-- `resources/views/app.blade.php` already renders `<meta name="csrf-token" content="{{ csrf_token() }}">`. Send it on every state-changing web request:
-
-```js
-const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content ?? '';
-
-async function saveTask(form) {
-    const response = await fetch('/tasks', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            'X-CSRF-TOKEN': csrfToken,
-        },
-        body: JSON.stringify(form),
-    });
-
-    if (!response.ok) {
-        throw new Error(`Request failed: ${response.status}`);
-    }
-
-    return response.json();
-}
-```
-
-- `/api` routes are stateless. Cookie-based Sanctum SPA auth on `/api` requires `$middleware->statefulApi()` in `bootstrap/app.php`, which a Nesti change must not edit. Unless that call already exists, session-authenticated UI calls go to `web` routes; when it exists, request `/sanctum/csrf-cookie` once and send the `X-XSRF-TOKEN` header.
+- The SPA reaches the API over HTTP through its existing HTTP client (quoted under Existing Repository State), which already attaches the app's auth: a bearer token from storage or Sanctum cookies. New calls go through that client; never add a second `fetch` wrapper with its own auth.
+- Bearer-token APIs (`auth:sanctum` with `createToken`) are stateless and need no CSRF token. Cookie-based Sanctum SPA auth on `/api` requires `$middleware->statefulApi()` in `bootstrap/app.php`, which a Nesti change must not edit; when it exists, the client requests `/sanctum/csrf-cookie` once and sends the `X-XSRF-TOKEN` header.
 - Never add a route to the `preventRequestForgery(except: [...])` list to make a test pass.
-- Vitest: stub the request with `vi.stubGlobal('fetch', vi.fn(...))`; the test document has no meta tag, hence the `?.` fallback.
+- Vitest: stub the client module or `vi.stubGlobal('fetch', vi.fn(...))`. Playwright: the API is not running; `stubApi` from e2e/support/session answers each request.
 
 ## Testing security behaviour
 
@@ -358,13 +332,13 @@ Each new endpoint gets 401, 403 and 422 Feature tests (429 when throttled) in `t
 
 - The factory owns the relation: `'user_id' => User::factory()` in `TaskFactory::definition()`.
 - Guests on `/api`: use `getJson` / `postJson`; a plain `get` expects a redirect to a `login` route that may not exist.
-- Web forms: `assertInvalid(['email'])` covers both JSON and session errors; `assertSessionHasErrors` for redirects.
+- Validation: `assertJsonValidationErrors(['email'])` (or `assertInvalid(['email'])`) on the JSON response.
 - Throttling: loop the allowed number of requests, then assert `assertTooManyRequests()` on the next one.
 - Response hygiene: `assertJsonMissingPath('data.password')`; headers: `assertHeader('X-Content-Type-Options', 'nosniff')`.
 - Token abilities: `Sanctum::actingAs($user, ['tasks:read'])` (requires `HasApiTokens` on User).
 - Outbound HTTP: `Http::preventStrayRequests()` plus `Http::fake([...])`; the sandbox has no business calling the internet.
 - Vitest proves escaping without touching PrimeVue internals: mount with a body of `'<img src=x onerror=alert(1)>'`, then `expect(wrapper.text()).toContain('<img src=x onerror=alert(1)>')` and `expect(wrapper.find('img').exists()).toBe(false)`.
-- Playwright needs data from `DatabaseSeeder` or created through the UI inside the spec; do not plan an E2E login unless the seeder creates that user.
+- Playwright runs against stubbed API responses (`signIn` / `stubApi` from e2e/support/session): security is proven in PHPUnit; a spec only shows the UI's reaction to a stubbed 401, 403 or 422.
 
 ## Secure code review checklist (Laravel + Vue)
 
@@ -376,7 +350,7 @@ Each new endpoint gets 401, 403 and 422 Feature tests (429 when throttled) in `t
 - **Files**: `File::types()` / `mimes` with a size limit; random names; private disk; downloads authorized.
 - **Auth**: `Auth::attempt` + session regenerate; generic failure message; throttled; logout invalidates the session.
 - **Config**: `env()` only in `config/*.php`; no keys or passwords in code, seeders or tests; seeders use factories with Faker.
-- **Vue**: no `v-html` with user data; no user data echoed inside `#app`; CSRF token sent; validation and permission checks repeated server-side; PrimeVue components from `primevue/<name>`, no deprecated components.
+- **Vue**: no `v-html` with user data; API calls through the SPA's existing HTTP client; validation and permission checks repeated server-side; PrimeVue components from `primevue/<name>`, no deprecated components.
 - **Tests**: 401, 403, 422 (and 429 when throttled) cases exist for each new endpoint.
 
 ## Severity triage
@@ -416,10 +390,10 @@ class SecurityHeaders
 ```
 
 - Add headers only when the issue asks for hardening. `$response->headers->set` also works on file downloads and streamed responses.
-- Global registration lives in `bootstrap/app.php`, which a Nesti change does not edit; attach the middleware to route groups instead: `Route::middleware([SecurityHeaders::class])->group(function () { ... });` in `routes/web.php` and `routes/api.php`.
+- Global registration lives in `bootstrap/app.php`, which a Nesti change does not edit; attach the middleware to route groups instead: `Route::middleware([SecurityHeaders::class])->group(function () { ... });` in `routes/api.php`.
 - `Strict-Transport-Security` only when the issue states the app is served over HTTPS; the sandbox serves plain HTTP.
-- Content-Security-Policy: do not add one unless the issue asks. The scaffold compiles the in-DOM `#app` template at runtime, which needs `'unsafe-eval'`, and PrimeVue injects `<style>` elements whose nonce is configured only at PrimeVue setup in `app.js`. A strict policy blanks the page and fails Playwright. When required, generate the script nonce with `Vite::useCspNonce()` in the middleware and build the header from `Vite::cspNonce()`.
-- Test: `$this->get('/')->assertHeader('X-Frame-Options', 'DENY');`.
+- Content-Security-Policy: do not add one unless the issue asks. Pages come from the SPA's own host, not from Laravel, so a CSP header on API responses protects no page; the SPA's policy belongs to whatever serves its build.
+- Test: `$this->actingAs($user)->getJson('/api/tasks')->assertHeader('X-Frame-Options', 'DENY');`.
 
 ## Cryptography
 

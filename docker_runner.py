@@ -4,8 +4,8 @@ Docker runner – executes generated code inside an isolated sandbox container.
 Responsibilities:
 - Write generated files into a temporary workspace directory.
 - Mount that workspace into a Docker container.
-- Run one of four container recipes — Laravel/PHPUnit tests, OpenAPI (Scramble)
-  export, greenfield bootstrap, or Scramble install — inside the container.
+- Run one of the container recipes — Laravel/PHPUnit tests, OpenAPI (Scramble)
+  export, greenfield bootstrap, Scramble install or starter-kit install — inside the container.
 - Return stdout/stderr and a boolean success flag.
 
 The AI developer never runs code on the host machine directly.
@@ -14,6 +14,10 @@ The AI developer never runs code on the host machine directly.
 import logging
 import os
 import re
+import secrets
+import time
+import xml.etree.ElementTree as ET
+from collections.abc import Iterable
 from pathlib import Path
 
 import docker
@@ -60,7 +64,7 @@ _TEST_COMMAND = [
         _TRAP_OWNER,
         "composer install --no-interaction --prefer-dist --no-progress;",
         "if [ -f artisan ]; then",
-        'export DB_CONNECTION=sqlite DB_DATABASE="$PWD/database/database.sqlite";',
+        '[ "$DB_CONNECTION" = pgsql ] || export DB_CONNECTION=sqlite DB_DATABASE="$PWD/database/database.sqlite";',
         "[ -f .env ] || cp .env.example .env;",
         "php artisan key:generate --force;",
         "php artisan config:clear;",
@@ -70,8 +74,7 @@ _TEST_COMMAND = [
         # already-applied table collides with the "pending" new migration
         # ("table already exists") and every later attempt fails on state the
         # model cannot see. The file is a gitignored test artifact.
-        "rm -f database/database.sqlite;",
-        "touch database/database.sqlite;",
+        'if [ "$DB_CONNECTION" = sqlite ]; then rm -f database/database.sqlite; touch database/database.sqlite; fi;',
         "php artisan migrate --force;",
         "php artisan test;",
         "else",
@@ -79,6 +82,33 @@ _TEST_COMMAND = [
         "composer dump-autoload;",
         "./vendor/bin/phpunit --testdox;",
         "fi",
+    ]),
+]
+
+APP_FACTS_MARK = "@@NESTI-FACTS@@"
+
+# Laravel Boost ApplicationInfo ({} → e30=) and DatabaseSchema ({"summary": true}), each between
+# APP_FACTS_MARK lines. Migrations run against the throwaway sandbox database only, exactly as
+# the PHPUnit recipe does.
+_APP_FACTS_COMMAND = [
+    "bash",
+    "-lc",
+    " ".join([
+        "set -e;",
+        _CAPTURE_OWNER,
+        _TRAP_OWNER,
+        "composer install --no-interaction --prefer-dist --no-progress;",
+        '[ "$DB_CONNECTION" = pgsql ] || export DB_CONNECTION=sqlite DB_DATABASE="$PWD/database/database.sqlite";',
+        "[ -f .env ] || cp .env.example .env;",
+        "php artisan key:generate --force;",
+        "php artisan config:clear;",
+        'if [ "$DB_CONNECTION" = sqlite ]; then rm -f database/database.sqlite; touch database/database.sqlite; fi;',
+        "php artisan migrate --force;",
+        f"echo '{APP_FACTS_MARK}';",
+        "php artisan boost:execute-tool 'Laravel\\Boost\\Mcp\\Tools\\ApplicationInfo' e30=;",
+        f"echo '{APP_FACTS_MARK}';",
+        "php artisan boost:execute-tool 'Laravel\\Boost\\Mcp\\Tools\\DatabaseSchema' eyJzdW1tYXJ5IjogdHJ1ZX0=;",
+        f"echo '{APP_FACTS_MARK}'",
     ]),
 ]
 
@@ -95,6 +125,23 @@ _OPENAPI_COMMAND = [
         "php artisan config:clear;",
         "php artisan scramble:analyze || echo \"NESTI: scramble:analyze reported issues (advisory)\";",
         "php artisan scramble:export --path=openapi.json;",
+        "php artisan route:list --json > storage/app/nesti-routes.json",
+    ]),
+]
+
+# The registered routes alone: the OpenAPI gate's HEAD baseline for a project
+# whose API routes carry no /api prefix (no Scramble steps needed).
+_ROUTE_LIST_COMMAND = [
+    "bash",
+    "-lc",
+    " ".join([
+        "set -e;",
+        _CAPTURE_OWNER,
+        _TRAP_OWNER,
+        "composer install --no-interaction --prefer-dist --no-progress;",
+        "[ -f .env ] || cp .env.example .env;",
+        "php artisan key:generate --force;",
+        "php artisan config:clear;",
         "php artisan route:list --json > storage/app/nesti-routes.json",
     ]),
 ]
@@ -117,8 +164,9 @@ _BOOTSTRAP_COMMAND_TEMPLATE = [
         "php artisan key:generate --force;",
         "touch database/database.sqlite;",
         "php artisan install:api --no-interaction;",
-        "composer require --no-interaction dedoc/scramble;",
-        "php artisan vendor:publish --provider=\"Dedoc\\\\Scramble\\\\ScrambleServiceProvider\" --tag=\"scramble-config\"",
+        "composer require --no-interaction dedoc/scramble spatie/laravel-permission;",
+        "php artisan vendor:publish --provider=\"Dedoc\\\\Scramble\\\\ScrambleServiceProvider\" --tag=\"scramble-config\";",
+        "php artisan vendor:publish --provider=\"Spatie\\\\Permission\\\\PermissionServiceProvider\"",
     ]),
 ]
 
@@ -134,6 +182,21 @@ _SCRAMBLE_INSTALL_COMMAND = [
     ]),
 ]
 
+# Starter-kit prerequisites, appended by DockerRunner.run_starter_install per boolean flag.
+_STARTER_INSTALL_BASE = " ".join([
+    "set -e;",
+    _CAPTURE_OWNER,
+    _TRAP_OWNER,
+    "composer install --no-interaction --prefer-dist --no-progress;",
+    "[ -f .env ] || cp .env.example .env;",
+    "php artisan key:generate --force;",
+])
+_STARTER_INSTALL_API = "php artisan install:api --without-migration-prompt --no-interaction;"
+_STARTER_PUBLISH_SANCTUM = "php artisan vendor:publish --tag=sanctum-migrations --no-interaction;"
+_STARTER_PUBLISH_PERMISSION = (
+    "php artisan vendor:publish --provider=\"Spatie\\\\Permission\\\\PermissionServiceProvider\" --no-interaction;"
+)
+
 # Boost commands register only under APP_ENV=local; the cache paths keep the
 # app's own bootstrap/cache untouched.
 _BOOST_ENV = {
@@ -143,6 +206,29 @@ _BOOST_ENV = {
     "APP_SERVICES_CACHE": "/tmp/nesti-services.php", "APP_PACKAGES_CACHE": "/tmp/nesti-packages.php",
     "APP_EVENTS_CACHE": "/tmp/nesti-events.php",
 }
+
+# PHPUnit sidecar for a phpunit.xml that declares DB_CONNECTION=pgsql.
+_POSTGRES_IMAGE = "postgres:15"
+_PG_READY_TIMEOUT = 60
+_PG_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
+
+
+def _pgsql_settings(app_root: str) -> dict[str, str] | None:
+    """Return the phpunit.xml DB name/user when it declares pgsql, else None."""
+    for name in ("phpunit.xml", "phpunit.xml.dist"):
+        path = Path(app_root, name)
+        if path.is_file():
+            break
+    else:
+        return None
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return None
+    env = {e.get("name"): e.get("value", "") for e in root.iter() if e.tag in ("env", "server")}
+    if env.get("DB_CONNECTION") != "pgsql":
+        return None
+    return {key: env.get(key) or "testing" for key in ("DB_DATABASE", "DB_USERNAME")}
 
 
 class DockerRunner:
@@ -169,7 +255,10 @@ class DockerRunner:
             success – True if the test suite exited with code 0.
             output  – Combined stdout + stderr from the container.
         """
-        return self._run(workspace_path, _TEST_COMMAND, self.timeout, "phpunit")
+        settings = _pgsql_settings(workspace_path)
+        if settings is None:
+            return self._run(workspace_path, _TEST_COMMAND, self.timeout, "phpunit")
+        return self._run_with_postgres(workspace_path, settings)
 
     def run_openapi_export(self, workspace_path: str) -> tuple[bool, str]:
         """
@@ -183,10 +272,20 @@ class DockerRunner:
         """
         return self._run(workspace_path, _OPENAPI_COMMAND, self.timeout, "openapi")
 
+    def run_route_list(self, workspace_path: str) -> tuple[bool, str]:
+        """
+        Mount *workspace_path* and dump ``route:list --json`` to
+        ``storage/app/nesti-routes.json``.
+
+        Returns ``(success, output)`` — success is True on exit code 0.
+        """
+        return self._run(workspace_path, _ROUTE_LIST_COMMAND, self.timeout, "route-list")
+
     def run_bootstrap(self, repo_path: str) -> tuple[bool, str]:
         """
-        Scaffold a greenfield Laravel app (pinned to ``NESTI_LARAVEL_VERSION``)
-        plus the Scramble package into *repo_path*.
+        Scaffold a greenfield Laravel API (pinned to ``NESTI_LARAVEL_VERSION``)
+        into *repo_path*: Sanctum via ``install:api``, Scramble and
+        spatie/laravel-permission with their published config and migration.
 
         Returns ``(success, output)`` — success is True on exit code 0.
         """
@@ -205,6 +304,25 @@ class DockerRunner:
             repo_path, _SCRAMBLE_INSTALL_COMMAND, self.bootstrap_timeout, "scramble-install"
         )
 
+    def run_starter_install(
+        self, app_path: str, *, install_api: bool, publish_sanctum: bool, publish_permission: bool
+    ) -> tuple[bool, str]:
+        """
+        Install the starter kit's prerequisites into the existing Laravel app at *app_path*:
+        ``install:api`` (Sanctum + routes/api.php), the Sanctum migration and the
+        spatie/laravel-permission migration + config, each only when flagged.
+        Flags are booleans so no caller-supplied text reaches the shell.
+
+        Returns ``(success, output)`` — success is True on exit code 0.
+        """
+        steps = [step for flag, step in (
+            (install_api, _STARTER_INSTALL_API),
+            (publish_sanctum, _STARTER_PUBLISH_SANCTUM),
+            (publish_permission, _STARTER_PUBLISH_PERMISSION),
+        ) if flag]
+        script = " ".join([_STARTER_INSTALL_BASE, *steps])
+        return self._run(app_path, ["bash", "-lc", script], self.bootstrap_timeout, "starter-install")
+
     def run_boost_script(self, app_path: str, script: str, *, network: bool) -> tuple[bool, str]:
         """
         Run a Laravel Boost *script* in the real app at *app_path* as its owner.
@@ -218,9 +336,91 @@ class DockerRunner:
             network_disabled=not network,
         )
 
+    def run_app_facts(self, workspace_path: str) -> tuple[bool, str]:
+        """
+        Print Boost's ApplicationInfo and DatabaseSchema summary of the Laravel app at
+        *workspace_path*, each segment delimited by APP_FACTS_MARK, after migrating a
+        throwaway database (the pgsql sidecar when phpunit.xml declares pgsql).
+
+        Returns ``(success, output)`` — success is True on exit code 0.
+        """
+        settings = _pgsql_settings(workspace_path)
+        if settings is None:
+            return self._run(workspace_path, _APP_FACTS_COMMAND, self.timeout, "app-facts",
+                             environment=_BOOST_ENV)
+        return self._run_with_postgres(workspace_path, settings, command=_APP_FACTS_COMMAND,
+                                       label="app-facts", environment=_BOOST_ENV)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _run_with_postgres(
+        self, workspace_path: str, settings: dict[str, str], *,
+        command: list[str] = _TEST_COMMAND, label: str = "phpunit",
+        environment: dict[str, str] | None = None,
+    ) -> tuple[bool, str]:
+        """
+        Run *command* (default: the PHPUnit recipe) against a disposable PostgreSQL sidecar.
+
+        A per-run ``nesti-run-<hex>`` network and ``nesti-pg-<hex>`` container
+        hold a non-superuser login role owning the phpunit.xml database; both
+        are removed in ``finally`` on every path (Absolute Rule 8). Never raises.
+        """
+        database, username = settings["DB_DATABASE"], settings["DB_USERNAME"]
+        if not all(_PG_IDENTIFIER.fullmatch(name) for name in (database, username)):
+            return False, f"phpunit.xml DB_DATABASE/DB_USERNAME must be plain PostgreSQL identifiers: {database!r}, {username!r}."
+        host = f"nesti-pg-{secrets.token_hex(6)}"
+        password = secrets.token_hex(16)
+        network = None
+        try:
+            network = self.client.networks.create(host.replace("-pg-", "-run-"), driver="bridge")
+            sidecar = self.client.containers.run(
+                image=_POSTGRES_IMAGE,
+                name=host,
+                network=network.name,
+                environment={"POSTGRES_PASSWORD": secrets.token_hex(16)},
+                detach=True,
+            )
+            # TCP, not the socket: the image's temporary init server listens on the socket only.
+            deadline = time.monotonic() + _PG_READY_TIMEOUT
+            while sidecar.exec_run(["pg_isready", "-h", "127.0.0.1", "-U", "postgres"]).exit_code != 0:
+                if time.monotonic() >= deadline:
+                    msg = f"PostgreSQL sidecar not ready after {_PG_READY_TIMEOUT}s."
+                    logger.error(msg)
+                    return False, msg
+                time.sleep(1)
+            created = sidecar.exec_run([
+                "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1",
+                "-c", f"CREATE ROLE \"{username}\" LOGIN PASSWORD '{password}'",
+                "-c", f'CREATE DATABASE "{database}" OWNER "{username}"',
+            ])
+            if created.exit_code != 0:
+                msg = "PostgreSQL sidecar setup failed: " + created.output.decode("utf-8", errors="replace")
+                logger.error(msg)
+                return False, msg
+            pg_environment = {
+                "DB_CONNECTION": "pgsql", "DB_HOST": host, "DB_PORT": "5432",
+                "DB_DATABASE": database, "DB_USERNAME": username, "DB_PASSWORD": password,
+            }
+            return self._run(workspace_path, command, self.timeout, label,
+                             environment={**(environment or {}), **pg_environment}, network=network.name)
+        except Exception as exc:  # pylint: disable=broad-except
+            msg = f"PostgreSQL sidecar failed: {exc}"
+            logger.error(msg)
+            return False, msg
+        finally:
+            # By name: containers.run can raise after creating the container.
+            # v=True: postgres:15 declares a VOLUME, which would outlive the container.
+            try:
+                self.client.containers.get(host).remove(force=True, v=True)
+            except Exception:  # pylint: disable=broad-except
+                pass
+            if network is not None:
+                try:
+                    network.remove()
+                except Exception:  # pylint: disable=broad-except
+                    pass
 
     def _run(
         self,
@@ -232,6 +432,7 @@ class DockerRunner:
         user: str | None = None,
         environment: dict[str, str] | None = None,
         network_disabled: bool = False,
+        network: str | None = None,
     ) -> tuple[bool, str]:
         """
         Run *command* inside the sandbox image against *workspace_path*.
@@ -258,6 +459,7 @@ class DockerRunner:
                 user=user,
                 environment=environment,
                 network_disabled=network_disabled,
+                network=network,
                 remove=False,
                 stdout=True,
                 stderr=True,
@@ -294,15 +496,19 @@ class DockerRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def write_files(llm_output: str, workspace_path: str) -> tuple[bool, list[str]]:
+    def write_files(llm_output: str, workspace_path: str,
+                    skeletons: Iterable[str] = ()) -> tuple[bool, list[str]]:
         """Apply FILE bodies and explicit DELETE directives inside the workspace.
 
         Return whether any operations were accepted and their repo-relative
         paths, including deletions for test gates and retry restoration.
         Validate the complete response before mutation; invalid declarations
         raise ValueError. DELETE is idempotent but never removes directories,
-        symlinks, Git metadata or migrations.
+        symlinks, Git metadata or migrations. A FILE block for a path in
+        *skeletons* (quoted to the coder with method bodies elided) raises
+        ValueError; DELETE stays allowed.
         """
+        skeletons = frozenset(skeletons)
         matches = list(_FILE_CHANGE_PATTERN.finditer(llm_output))
         for header in _FILE_CHANGE_HEADER.finditer(llm_output):
             if not any(match.start() <= header.start() < match.end() for match in matches):
@@ -323,6 +529,10 @@ class DockerRunner:
             path = relative.as_posix()
             if path in operations:
                 raise ValueError(f"Duplicate or conflicting file changes for {path}.")
+            if not deleting and path in skeletons:
+                raise ValueError(
+                    f"{path} was quoted as a skeleton with method bodies elided, so its FILE block would drop code; "
+                    "the next attempt quotes it complete.")
             if deleting and any(relative.parts[i:i + 2] == ("database", "migrations")
                                 for i in range(len(relative.parts) - 1)):
                 raise ValueError(f"Migrations cannot be deleted: {path}.")
