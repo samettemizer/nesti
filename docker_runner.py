@@ -17,6 +17,7 @@ import re
 import secrets
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
 from pathlib import Path
 
 import docker
@@ -495,15 +496,19 @@ class DockerRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def write_files(llm_output: str, workspace_path: str) -> tuple[bool, list[str]]:
+    def write_files(llm_output: str, workspace_path: str,
+                    skeletons: Iterable[str] = ()) -> tuple[bool, list[str]]:
         """Apply FILE bodies and explicit DELETE directives inside the workspace.
 
         Return whether any operations were accepted and their repo-relative
         paths, including deletions for test gates and retry restoration.
         Validate the complete response before mutation; invalid declarations
         raise ValueError. DELETE is idempotent but never removes directories,
-        symlinks, Git metadata or migrations.
+        symlinks, Git metadata or migrations. A FILE block for a path in
+        *skeletons* (quoted to the coder with method bodies elided) raises
+        ValueError; DELETE stays allowed.
         """
+        skeletons = frozenset(skeletons)
         matches = list(_FILE_CHANGE_PATTERN.finditer(llm_output))
         for header in _FILE_CHANGE_HEADER.finditer(llm_output):
             if not any(match.start() <= header.start() < match.end() for match in matches):
@@ -524,6 +529,10 @@ class DockerRunner:
             path = relative.as_posix()
             if path in operations:
                 raise ValueError(f"Duplicate or conflicting file changes for {path}.")
+            if not deleting and path in skeletons:
+                raise ValueError(
+                    f"{path} was quoted as a skeleton with method bodies elided, so its FILE block would drop code; "
+                    "the next attempt quotes it complete.")
             if deleting and any(relative.parts[i:i + 2] == ("database", "migrations")
                                 for i in range(len(relative.parts) - 1)):
                 raise ValueError(f"Migrations cannot be deleted: {path}.")

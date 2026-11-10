@@ -2703,6 +2703,55 @@ try:
 finally:
     shutil.rmtree(conv, ignore_errors=True)
 
+print("\n── Coding prompt: tree-sitter PHP skeletons of reference files ──")
+import code_skeleton                                     # noqa: E402
+_sk_body = "".join(f"        $step{i} = {i};\n" for i in range(6))
+sk = tempfile.mkdtemp(prefix="nesti-skel-")
+try:
+    _put(sk, "backend/artisan")
+    _put(sk, "backend/routes/api.php",
+         "<?php\nRoute::get('/orders', [App\\Http\\Controllers\\OrderController::class, 'index']);\n")
+    _put(sk, "backend/app/Http/Controllers/OrderController.php",
+         "<?php\nclass OrderController\n{\n"
+         "    public function index(): array\n    {\n" + _sk_body + "        return ['ELIDED_MARKER'];\n    }\n\n"
+         "    public function rules(): array\n    {\n" + _sk_body + "        return ['RULES_MARKER'];\n    }\n}\n")
+    _put(sk, "backend/tests/Feature/OrderTest.php",
+         "<?php\nclass OrderTest extends TestCase\n{\n"
+         "    public function test_lists(): void\n    {\n" + _sk_body
+         + "        $this->getJson('/orders?HTTP_MARKER');\n    }\n\n"
+         "    private function seed(): void\n    {\n" + _sk_body + "        $x = 'SEED_MARKER';\n    }\n}\n")
+    _sk_layout = {"backend": "backend", "frontend": None}
+    _sk_controller = "backend/app/Http/Controllers/OrderController.php"
+    _sk_before = Path(sk, _sk_controller).read_text()
+    try:
+        DockerRunner.write_files(f"### FILE: {_sk_controller}\n```php\n<?php\n```\n", sk, [_sk_controller])
+        _sk_error = ""
+    except ValueError as exc:
+        _sk_error = str(exc)
+    check("skeleton" in _sk_error and Path(sk, _sk_controller).read_text() == _sk_before,
+          "write_files refuses a FILE block for a skeleton-quoted file and leaves it untouched")
+    if code_skeleton._parser() is not None:
+        _task = "List the orders"
+        _plain = nodes._repo_inventory(sk, _sk_layout, "backend", _task)
+        check("ELIDED_MARKER" in _plain and "SEED_MARKER" in _plain,
+              "without skeletons (plan prompt) reference files stay complete")
+        _skel: list[str] = []
+        _ctx = nodes._repo_inventory(sk, _sk_layout, "backend", _task, skeletons=_skel)
+        check("ELIDED_MARKER" not in _ctx and "SEED_MARKER" not in _ctx,
+              "skeletons elide long reference method bodies")
+        check("RULES_MARKER" in _ctx and "HTTP_MARKER" in _ctx and "(skeleton: long method bodies elided" in _ctx,
+              "skeletons keep rules() and the first HTTP test body, labelled as skeleton")
+        check(sorted(_skel) == [_sk_controller, "backend/tests/Feature/OrderTest.php"],
+              f"skeleton paths are reported with their prefix (got {_skel})")
+        _named: list[str] = []
+        _ctx = nodes._repo_inventory(sk, _sk_layout, "backend", "Fix OrderController.php", skeletons=_named)
+        check("ELIDED_MARKER" in _ctx and _sk_controller not in _named,
+              "a file the task names stays complete")
+    else:
+        print("  (skipped: php grammar not downloaded)")
+finally:
+    shutil.rmtree(sk, ignore_errors=True)
+
 print("\n── OpenAPI gate: /api-prefixed versus unprefixed (HEAD baseline) ──")
 import graph.tools as _gt                                # noqa: E402
 from git import Repo as _Repo                            # noqa: E402

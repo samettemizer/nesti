@@ -23,3 +23,6 @@ qdrant-client>=1.19,<1.20
 # baked into both images at build time (see Dockerfile).
 fastembed>=0.5,<1
 plotly>=7.1,<8
+# PHP skeletons for the coding prompt (code_skeleton.py). Pinned exactly: the
+# Dockerfile bakes the grammar into a cache path keyed by this version.
+tree-sitter-language-pack==1.25.0

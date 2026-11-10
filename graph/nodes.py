@@ -88,6 +88,7 @@ from conversation_store import ConversationStore
 from prompt_builder import (
     build_plan_prompt, build_code_prompt, drop_injected_chunks, format_catalog_for_prompt,
 )
+import code_skeleton
 from layer_output import condense
 from telegram_notifier import notify as telegram_notify
 
@@ -431,16 +432,23 @@ def _inventory_listing(directory: Path) -> list[str]:
 
 def _quoted_entry_files(
     root: Path, referenced_files: list[tuple[str, str]], prefix: str,
-    quoted: tuple[tuple[str, str], ...],
+    quoted: tuple[tuple[str, str], ...], skeleton_paths: frozenset[str] = frozenset(),
+    skeletons: list[str] | None = None,
 ) -> list[str]:
-    """Quote complete task targets and entry bodies within one budget, never fragments."""
+    """
+    Quote complete task targets and entry bodies within one budget, never fragments.
+
+    With *skeletons* (a list), PHP files in *skeleton_paths* are quoted as tree-sitter
+    skeletons, and the prefixed paths whose skeleton quote is emitted are appended to it.
+    """
     files = dict((referenced_files or []) + list(quoted))
-    entries: list[tuple[str | None, str]] = []
+    entries: list[tuple[str | None, str, str | None]] = []
     for relative, language in files.items():
         path = root / relative
+        skeletal = skeletons is not None and relative in skeleton_paths and language == "php"
         relative = prefix + relative
         if path.is_symlink():
-            entries.append((None, f"\n{relative}: exists, body omitted (symbolic link)."))
+            entries.append((None, f"\n{relative}: exists, body omitted (symbolic link).", None))
             continue
         if not path.is_file():
             continue
@@ -449,8 +457,12 @@ def _quoted_entry_files(
         except (OSError, UnicodeDecodeError) as exc:
             entries.append((None,
                 f"\n{relative}: exists, body omitted (unreadable: {type(exc).__name__}). "
-                "Do not recreate it."))
+                "Do not recreate it.", None))
             continue
+        label, skeleton_path = "complete", None
+        if skeletal and (skeleton := code_skeleton.php_skeleton(body, _HTTP_TEST_CALL)) is not None:
+            body, skeleton_path = skeleton, relative
+            label = "skeleton: long method bodies elided as { … }; reference only, never emit a FILE block for it"
         if len(body) > _MAX_QUOTED_FILE_CHARS:
             telegram_notify(
                 f"⚠️ Nodes :: _MAX_QUOTED_FILE_CHARS limit:{_MAX_QUOTED_FILE_CHARS} exceeded: <b>{len(body)}</b>"
@@ -458,24 +470,26 @@ def _quoted_entry_files(
             )
             entries.append((None,
                 f"\n{relative}: exists, body omitted ({len(body)} characters, over the "
-                f"{_MAX_QUOTED_FILE_CHARS}-character quote limit). Do not recreate it from memory."))
+                f"{_MAX_QUOTED_FILE_CHARS}-character quote limit). Do not recreate it from memory.", None))
             continue
-        quote = f"\nCurrent {relative} (complete):\n```{language}\n{body}\n```"
+        quote = f"\nCurrent {relative} ({label}):\n```{language}\n{body}\n```"
         omitted = (
             f"\n{relative}: exists, body omitted (the {_MAX_QUOTED_TOTAL_CHARS}-character "
             "quote budget is spent). Do not recreate it from memory."
         )
-        entries.append((quote, omitted))
+        entries.append((quote, omitted, skeleton_path))
 
     # Reserve every omission notice first so later files can always be named;
     # headings, fences, separators and notices all count toward the budget.
-    remaining = _MAX_QUOTED_TOTAL_CHARS - len("\n\n".join(omitted for _, omitted in entries))
+    remaining = _MAX_QUOTED_TOTAL_CHARS - len("\n\n".join(omitted for _, omitted, _ in entries))
     sections: list[str] = []
-    for quote, omitted in entries:
+    for quote, omitted, skeleton_path in entries:
         extra = len(quote) - len(omitted) if quote is not None else 0
         if quote is not None and extra <= remaining:
             sections.append(quote)
             remaining -= extra
+            if skeleton_path is not None and skeletons is not None:
+                skeletons.append(skeleton_path)
         else:
             sections.append(omitted)
     return sections
@@ -595,6 +609,7 @@ def _domain_quotes(backend: Path, domain: dict | None) -> tuple[tuple[str, str],
 def _repo_inventory(
     repo_path: str, layout: dict, scope: str = "fullstack", task_text: str = "",
     previous_files: list[str] | None = None, domain: dict | None = None,
+    skeletons: list[str] | None = None,
 ) -> str:
     """
     Describe what the cloned repository already contains, for the prompts.
@@ -620,6 +635,10 @@ def _repo_inventory(
     shared sign-in helper. API
     class references also supply validation, serialization and pagination
     contracts; a response field alone does not establish a writable field.
+    With *skeletons* (a list; coding prompt only) the reference quotes nobody
+    named — the example Feature test, API contract classes and the chosen
+    domain's files — become tree-sitter PHP skeletons, and their prefixed paths
+    are appended to it.
 
     Never raises: an unreadable workspace yields an empty string and the
     prompts are built without the section, exactly as before; one unreadable
@@ -641,7 +660,8 @@ def _repo_inventory(
             scope, task_text, previous_files,
             _INVENTORY_DIRS + custom,
             _BACKEND_QUOTED_FILES, _INVENTORY_ROUTE_FILES,
-            extra_quoted=_domain_quotes(backend, domain) if scope != "frontend" else (),
+            reference_quoted=_domain_quotes(backend, domain) if scope != "frontend" else (),
+            skeletons=skeletons,
         )
         if scope != "backend" and layout.get("frontend"):
             lines += _inventory_lines(
@@ -670,6 +690,7 @@ def _inventory_lines(
     root: Path, prefix: str, scope: str, task_text: str, previous_files: list[str] | None,
     dirs: tuple[tuple[str, int], ...], quoted: tuple[tuple[str, str], ...],
     route_files: tuple[str, ...], extra_quoted: tuple[tuple[str, str], ...] = (),
+    reference_quoted: tuple[tuple[str, str], ...] = (), skeletons: list[str] | None = None,
 ) -> list[str]:
     """Inventory lines for one application folder; every emitted path is *prefix* + relative."""
     if not root.is_dir():
@@ -789,10 +810,14 @@ def _inventory_lines(
         lines.append(quote)
         remaining -= len(quote)
 
+    convention: tuple[tuple[str, str], ...] = ()
     if scope != "frontend" and route_files:
-        quoted += ((("tests/TestCase.php", "php"),) + _convention_test(root, task_text)
-                   + _scramble_filter_provider(root))
-    lines += _quoted_entry_files(root, referenced_files + api_files, prefix, quoted + extra_quoted)
+        convention = _convention_test(root, task_text)
+        quoted += (("tests/TestCase.php", "php"),) + convention + _scramble_filter_provider(root)
+    named = {path for path, _ in referenced_files}
+    skeleton_paths = frozenset({p for p, _ in [*api_files, *convention, *reference_quoted]} - named)
+    lines += _quoted_entry_files(root, referenced_files + api_files, prefix,
+                                 quoted + extra_quoted + reference_quoted, skeleton_paths, skeletons)
     return lines
 
 
@@ -1277,9 +1302,10 @@ def node_code(state: IssueState) -> dict:
         layer, last_output = _last_failure_output(state)
         failure = _store.format_test_failure(last_output, layer)
     inventory_text = haystack + "\n" + failure
+    skeletons: list[str] | None = [] if code_skeleton.enabled() else None
     repo_context = _repo_inventory(
         state.get("repo_path", ""), state["layout"], scope, inventory_text, previous_files,
-        domain=state.get("domain"),
+        domain=state.get("domain"), skeletons=skeletons,
     )
 
     # memory.  A narrow scope filters the doc search from the first
@@ -1347,7 +1373,7 @@ def node_code(state: IssueState) -> dict:
         user_prompt += feedback
     metrics.update(
         change_set_chars=change_set_chars, latest_failure_chars=len(feedback),
-        user_chars=len(user_prompt),
+        user_chars=len(user_prompt), skeleton_files=len(skeletons or []),
     )
     memory_counts["retrieved_chunks"] = metrics["rag_rendered"]
     logger.info("Context code · issue #%s · attempt %d · %s", issue_id, attempt, metrics)
@@ -1384,7 +1410,7 @@ def node_code(state: IssueState) -> dict:
     # Static file application needs neither a Docker client nor a container.
     apply_error = ""
     try:
-        files_written, written = DockerRunner.write_files(code_response, state["repo_path"])
+        files_written, written = DockerRunner.write_files(code_response, state["repo_path"], skeletons or ())
     except ValueError as exc:
         files_written, written = False, []
         apply_error = f"File changes rejected: {exc}"
