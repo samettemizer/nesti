@@ -101,8 +101,6 @@ const TOKC = ["#6b8afd","#5ad8e6","#f5b453","#e94fbd"], TOKN = ["Uncached input"
 const COSTN = ["Input","Cache read","Cache write","Output"], OKC = "#5ad8e6", BADC = "#f87171";
 const now = D.generated * 1000, HOUR = 3600e3, DAY = 24 * HOUR;
 const RANGES = {"1h": HOUR, "24h": DAY, "7d": 7 * DAY, "30d": 30 * DAY, "90d": 90 * DAY, "All": Infinity};
-const RTXT = {"1h": "in the last hour", "24h": "in the last 24 hours", "7d": "in the last 7 days",
-  "30d": "in the last 30 days", "90d": "in the last 90 days", "All": "since recording began"};
 const TABS = {overview: "Overview", projects: "Projects", models: "Models", providers: "Providers", costs: "Costs",
   requests: "Requests", errors: "Errors", traces: "Traces", tools: "Tools"};
 const ui = {tab: "overview", range: "7d", project: "", seg: {}, open: {}, q: {}, status: "All", hourProvider: "", tool: ""};
@@ -385,7 +383,7 @@ const VIEWS = {
       + `<h4>By role</h4>` + mix(roles.map(([, l]) => toks(l)), roles.map(([, , c]) => c))
       + roles.map(([n, l, c]) => `<div class="line"><span><i class="dot" style="background:${c}"></i>${n} <span class="muted mono">${fmtInt(l.length)} req</span></span><span class="mono">${fmtTok(toks(l))} &nbsp; ${fmtPct(div(toks(l), a.tokens))}</span></div>`).join("");
     const latest = newest(L).slice(0, 8);
-    return head("Stats overview", `Everything Nesti did across your issues ${RTXT[ui.range]}.`)
+    return head("Stats overview", "Everything Nesti did across your issues.")
       + `<div class="kpis k5">${kpi("API-equivalent cost", fmtUSD(a.cost), "", series(L, costs), PAL[1])}`
       + kpi("Requests", fmtInt(a.n), `${fmtInt(a.failed)} failed`, series(L, cnt))
       + kpi("Tokens", fmtTok(a.tokens), `${fmtTok(a.O)} output`, series(L, toks))
@@ -405,7 +403,7 @@ const VIEWS = {
   projects() {
     const a = agg(L), rows = projectGroups(), byReq = [...rows].sort((x, y) => y.a.n - x.a.n);
     const maxC = rows.length ? rows[0].a.cost : 0, maxN = byReq.length ? byReq[0].a.n : 1;
-    return head("Projects", `Usage per project ${RTXT[ui.range]}.`)
+    return head("Projects", "Usage per project.")
       + `<div class="kpis k5">${kpi("Projects", fmtInt(rows.length))}`
       + kpi("Requests", fmtInt(a.n), `${fmtInt(a.failed)} failed`) + kpi("API-equivalent cost", fmtUSD(a.cost))
       + kpi("Tokens", fmtTok(a.tokens)) + kpi("Cache rate", fmtPct(a.cacheRate)) + `</div>`
@@ -435,7 +433,7 @@ const VIEWS = {
             {type: "scatter", mode: "lines+markers", name: "Avg duration", x, y: per.map(p => p.avgDur), yaxis: "y2", line: {color: "#8a8a8f", dash: "dash"}}],
           {xaxis: timeAxis(), yaxis2: {overlaying: "y", side: "right", ticksuffix: "s", tickformat: ".1f", showgrid: false, zerolinecolor: "#26262a"}, margin: {t: 10, l: 45, r: 45, b: 30}}) + `</div></div>`;
     };
-    return head("Models", `Which models did the work ${RTXT[ui.range]}, and how fast they answered.`)
+    return head("Models", "Which models did the work and how fast they answered.")
       + `<div class="kpis k4">${kpi("Models used", fmtInt(byModel.size), `across ${fmtInt(new Set(L.map(e => e.provider)).size)} providers`)}`
       + kpi("Most used", top ? esc(top) : "–", top ? `${fmtPct(byModel.get(top).length / L.length)} of requests · ${esc(topProv)}` : "")
       + kpi("Requests", fmtInt(a.n), `${fmtInt(a.failed)} failed`, series(L, cnt))
@@ -465,7 +463,7 @@ const VIEWS = {
       const s = agg(g.get(k)), parts = [s.U, s.CR, s.CW, s.O];
       return mix(parts, TOKC) + legend(TOKN.map((n, i) => [n, TOKC[i], `${fmtTok(parts[i])} · ${fmtPct(div(parts[i], s.tokens))}`]));
     };
-    return head("Providers", `Burn and reliability per provider ${RTXT[ui.range]} — consumer subscriptions and platform APIs side by side.`)
+    return head("Providers", "Burn and reliability per provider — consumer subscriptions and platform APIs side by side.")
       + `<div class="kpis k5">${kpi("Providers", fmtInt(g.size), `Most tokens: ${esc(order[0] || "–")}`)}`
       + kpi("Requests", fmtInt(a.n), `${fmtInt(a.failed)} failed`, series(L, cnt))
       + kpi("Tokens", fmtTok(a.tokens), "", series(L, toks))
@@ -497,7 +495,7 @@ const VIEWS = {
       : [0, 3, 1, 2].map(j => ({type: "bar", name: COSTN[j], x, y: series(L, l => sum(l.map(e => e.parts[j]))), marker: {color: TOKC[j]}}));
     const where = mix(cp, TOKC) + `<div style="margin-top:12px">${[0, 3, 1, 2].map(j => `<div class="line"><span><i class="dot" style="background:${TOKC[j]}"></i>${COSTN[j]}</span><span class="mono">${fmtUSD(cp[j])} &nbsp; ${fmtPct(div(cp[j], a.cost))}</span></div>`).join("")}`
       + `<div class="line" style="border-top:1px solid var(--bd)"><b>Total</b><b class="mono">${fmtUSD(a.cost)}</b></div></div>`;
-    return head("Costs", `What ${RTXT[ui.range]} of usage would cost at public API rates (OpenRouter catalog at generation time). Subscription and local usage without a public price is counted as unpriced, not free.`)
+    return head("Costs", "Usage priced at public API rates (OpenRouter catalog at generation time). Usage without a public price counts as unpriced, not free.")
       + (Object.keys(D.prices).length ? "" : `<div class="warn">Price catalog unavailable when this page was generated.</div>`)
       + `<div class="kpis k5">${kpi("API-equivalent estimate", fmtUSD(a.cost), `${fmtInt(a.n)} requests`, series(L, costs), PAL[1])}`
       + kpi("Average per day", fmtUSD(div(a.cost, days)), `over ${fmtInt(days)} active days`)
@@ -522,7 +520,7 @@ const VIEWS = {
     const q = p => durs.length ? durs[Math.min(durs.length - 1, Math.floor(p * durs.length))] : null;
     const chips = `<div class="seg">${[["All", L.length], ["OK", L.length - a.failed], ["Failed", a.failed]].map(([s, n]) =>
       `<button data-act="filter" data-k="status" data-v="${s}" class="${ui.status === s ? "on" : ""}">${s} <span class="muted">${fmtInt(n)}</span></button>`).join("")}</div>`;
-    return head("Requests", `Every model call Nesti made ${RTXT[ui.range]}, newest first.`)
+    return head("Requests", "Every model call, newest first.")
       + `<div class="kpis k5">${kpi("Requests", fmtInt(a.n), L.length ? `since ${ago(a.first)}` : "")}`
       + kpi("Failed", fmtInt(a.failed), `${fmtPct(a.errRate)} of requests`)
       + kpi("Tokens", fmtTok(a.tokens)) + kpi("API-equivalent cost", fmtUSD(a.cost))
@@ -535,7 +533,7 @@ const VIEWS = {
     const fl = L.filter(e => !e.ok), sigs = group(fl, e => e.sig), order = rank(sigs, cnt);
     const bm = group(fl, e => e.model + "|" + e.provider), mOrder = rank(bm, cnt), models = [...new Set(fl.map(e => e.model))];
     const last = fl.reduce((m, e) => Math.max(m, e.t), 0), max = order.length ? sigs.get(order[0]).length : 1;
-    return head("Errors", `Failed model requests ${RTXT[ui.range]}, grouped by error signature.`)
+    return head("Errors", "Failed model requests, grouped by error signature.")
       + `<div class="kpis k4">${kpi("Failures", fmtInt(fl.length))}`
       + kpi("Signatures", fmtInt(sigs.size), order.length ? `top: ${fmtInt(max)} failures` : "")
       + kpi("Affected models", fmtInt(models.length), esc(models.slice(0, 3).join(", ")))
@@ -555,7 +553,7 @@ const VIEWS = {
   },
 
   traces() {
-    return head("Traces", `Issue runs ${RTXT[ui.range]}. Open one to inspect its timeline.`)
+    return head("Traces", "Issue runs. Open one to inspect its timeline.")
       + card("Sessions", "Newest first", `<div id="traces-log">${LOGS.traces()}</div>`, search("traces", "Filter by title, project, model…"));
   },
 
@@ -564,7 +562,7 @@ const VIEWS = {
     if (!tg.has(ui.tool)) ui.tool = "";
     const g = group(ui.tool ? tg.get(ui.tool) : T, e => e.tool + "|" + (e.model || "")), keys = rank(g, cnt);
     const max = keys.length ? g.get(keys[0]).length : 1;
-    return head("Tools", `Pipeline tool runs ${RTXT[ui.range]}, attributed to the model whose output they processed. A test layer whose suite fails counts as an error.`)
+    return head("Tools", "Pipeline tool runs, attributed to the model whose output they processed. A failing test suite counts as an error.")
       + card("Tool runs", "Grouped by tool and model", keys.length ? table(
           [["Tool"], ["Model"], ["Calls", "n"], ["Errors", "n"], ["Avg duration", "n"], ["Last used", "n"]],
           keys.map(k => {
