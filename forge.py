@@ -8,8 +8,11 @@ forge through ``term()``. ``NESTI_FORGE`` selects the forge (default ``gitlab``)
 
 The orchestrator acts on ``GITLAB_PROJECT_PATH`` (GitHub: ``NESTI_GITHUB_REPOSITORY``) from ``.env``. An MCP server
 process serves one client connection and acts on that client's project, read
-from the client checkout's git remote (``bind_client``); without a resolvable
-remote it refuses project tools instead of falling back to ``.env``.
+from the client checkout's git remote (``bind_client``): the remote's host picks
+the forge (``NESTI_GITHUB_URL``'s host, when ``NESTI_GITHUB_TOKEN`` is set, or
+``GITLAB_URL``'s), and a bound process's ``kind()`` is that forge, not
+``NESTI_FORGE``. Without a resolvable remote it refuses project tools instead of
+falling back to ``.env``.
 """
 
 import hashlib
@@ -31,7 +34,7 @@ _TERMS = {
 }
 FAILED_RUN_RE = re.compile(r"^<!-- NESTI_FAILED_RUN_V1 [0-9a-f]{64} -->$", re.M)
 
-# None in the orchestrator; in an MCP process {"path": ..., "default_branch"?: ...} or {"error": ...}.
+# None in the orchestrator; in an MCP process {"forge", "path", "default_branch"?} or {"error": ...}.
 _bound: dict | None = None
 
 
@@ -84,7 +87,9 @@ class OpenMergeRequestError(RuntimeError):
 
 
 def kind() -> str:
-    """The configured forge (``NESTI_FORGE``, default ``gitlab``); ``ValueError`` for an unsupported one."""
+    """The bound client's forge, else ``NESTI_FORGE`` (default ``gitlab``); ``ValueError`` for an unsupported one."""
+    if _bound and "forge" in _bound:
+        return _bound["forge"]
     value = os.environ.get("NESTI_FORGE", "").strip().lower() or "gitlab"
     if value not in _TERMS:
         raise ValueError(f"NESTI_FORGE={value!r} is not supported; use one of: {', '.join(_TERMS)}")
@@ -124,19 +129,28 @@ def repo_client() -> RepoClient:
     return GitLabClient()
 
 
-def project_from_remote(remote: str, gitlab_url: str) -> str:
-    """Return ``namespace/…/project`` for a git remote on ``gitlab_url``'s host; ``ValueError`` otherwise."""
+def _github_url() -> str:
+    return os.environ.get("NESTI_GITHUB_URL") or "https://github.com"
+
+
+def _split_remote(remote: str) -> tuple[str, str]:
+    """``(host, path)`` of a URL or scp-style git remote; ``ValueError`` when it is neither."""
     remote = remote.strip()
     if not remote:
         raise ValueError("no git remote was passed")
     if "://" in remote:
         parts = urlsplit(remote)
-        host, path = parts.hostname or "", parts.path
-    else:
-        match = re.fullmatch(r"(?:[^@/]+@)?([^:/]+):(.+)", remote)
-        if not match:
-            raise ValueError("the git remote is neither a URL nor host:path")
-        host, path = match.groups()
+        return parts.hostname or "", parts.path
+    match = re.fullmatch(r"(?:[^@/]+@)?([^:/]+):(.+)", remote)
+    if not match:
+        raise ValueError("the git remote is neither a URL nor host:path")
+    host, path = match.groups()
+    return host, path
+
+
+def project_from_remote(remote: str, gitlab_url: str) -> str:
+    """Return ``namespace/…/project`` for a git remote on ``gitlab_url``'s host; ``ValueError`` otherwise."""
+    host, path = _split_remote(remote)
     gitlab = urlsplit(gitlab_url)
     if host.lower() != (gitlab.hostname or "").lower():
         raise ValueError(
@@ -146,21 +160,36 @@ def project_from_remote(remote: str, gitlab_url: str) -> str:
     if (prefix := gitlab.path.strip("/")) and path.startswith(prefix + "/"):
         path = path[len(prefix) + 1:]
     path = path.removesuffix(".git").strip("/")
-    # GitLab paths are [A-Za-z0-9_.-] segments; anything else (e.g. `*`, `[ab]`) would glob Redis keys.
+    # Forge paths are [A-Za-z0-9_.-] segments; anything else (e.g. `*`, `[ab]`) would glob Redis keys.
     if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", path):
-        raise ValueError(f"the git remote path {path!r} is not a GitLab namespace/project path")
+        raise ValueError(f"the git remote path {path!r} is not a namespace/project path")
     return path
 
 
 def bind_client(remote: str) -> None:
-    """Bind this (MCP) process to the GitLab project of the client's git remote, or to an error."""
+    """Bind this (MCP) process to the forge and project of the client's git remote, or to an error."""
     global _bound
+    forges = {}
+    if os.environ.get("NESTI_GITHUB_TOKEN"):
+        forges["github"] = ("NESTI_GITHUB_URL", _github_url())
+    if os.environ.get("GITLAB_URL"):
+        forges["gitlab"] = ("GITLAB_URL", os.environ["GITLAB_URL"])
     try:
-        _bound = {"path": project_from_remote(remote, os.environ["GITLAB_URL"])}
+        host = _split_remote(remote)[0].lower()
+        name = next(
+            (name for name, (_, url) in forges.items() if host == (urlsplit(url).hostname or "").lower()),
+            None,
+        )
+        if name is None:
+            known = " or ".join(f"{var}'s {urlsplit(url).hostname}" for var, url in forges.values())
+            raise ValueError(
+                f"the git remote is on {host or 'an unknown host'}, not on {known or 'a configured forge'}"
+            )
+        _bound = {"forge": name, "path": project_from_remote(remote, forges[name][1])}
         logger.info("Nesti MCP acts on the client's project %s.", identity())
-    except (KeyError, ValueError) as exc:
+    except ValueError as exc:
         _bound = {
-            "error": f"Nesti MCP does not know this client's GitLab project: {exc}. "
+            "error": f"Nesti MCP does not know this client's project: {exc}. "
             "Start it with `nesti mcp` inside the project's git checkout."
         }
         logger.warning(_bound["error"])
@@ -181,28 +210,33 @@ def path() -> str:
 
 
 def default_branch() -> str:
-    """The acted-on project's target branch: ``.env`` for the orchestrator, GitLab's default for a client."""
+    """The acted-on project's target branch: ``.env`` for the orchestrator, the forge's default for a client."""
     if _bound is None:
         if kind() == "github":
             return os.environ.get("NESTI_GITHUB_DEFAULT_BRANCH", "main")
         return os.environ.get("GITLAB_DEFAULT_BRANCH", "main")
     project = path()
     if "default_branch" not in _bound:
-        response = requests.get(
-            f"{os.environ['GITLAB_URL'].rstrip('/')}/api/v4/projects/{quote(project, safe='')}",
-            headers={"PRIVATE-TOKEN": os.environ["GITLAB_TOKEN"]},
-            verify=os.environ.get("GITLAB_SSL_VERIFY", "true").lower() != "false",
-            timeout=15,
-        )
-        response.raise_for_status()
+        if kind() == "github":
+            from github_issues_client import api_session, api_url, raise_for_status  # it imports this module
+
+            with api_session() as session:
+                response = session.get(f"{api_url()}/repos/{project}", timeout=15)
+            raise_for_status(response)
+        else:
+            response = requests.get(
+                f"{os.environ['GITLAB_URL'].rstrip('/')}/api/v4/projects/{quote(project, safe='')}",
+                headers={"PRIVATE-TOKEN": os.environ["GITLAB_TOKEN"]},
+                verify=os.environ.get("GITLAB_SSL_VERIFY", "true").lower() != "false",
+                timeout=15,
+            )
+            response.raise_for_status()
         _bound["default_branch"] = response.json()["default_branch"] or "main"
     return _bound["default_branch"]
 
 
 def identity() -> str:
     """``host/namespace/project`` in lower case, e.g. ``gitlab.com/acme/shop``; scopes Redis records."""
-    if _bound is None and kind() == "github":
-        url = os.environ.get("NESTI_GITHUB_URL") or "https://github.com"
-    else:
-        url = os.environ["GITLAB_URL"]
-    return f"{urlsplit(url).hostname}/{path()}".lower()
+    project = path()  # first: an unresolved client raises its own error
+    url = _github_url() if kind() == "github" else os.environ["GITLAB_URL"]
+    return f"{urlsplit(url).hostname}/{project}".lower()

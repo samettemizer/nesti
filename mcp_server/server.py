@@ -1,7 +1,7 @@
 """
 mcp_server/server.py – Nesti MCP Server.
 
-Exposes GitLab Issues, GitLab, Docker, skill, quota, vector-memory and usage
+Exposes GitLab or GitHub issue and repository, Docker, skill, quota, vector-memory and usage
 statistics tools via the Model Context Protocol.
 Compatible with Claude Code CLI, VS Code Claude extension, and Cursor.
 

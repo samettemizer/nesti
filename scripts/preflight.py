@@ -4,8 +4,9 @@ scripts/preflight.py – verify every external dependency before a live run.
 
 Prints one line per check and exits non-zero on the first HARD failure, so a
 live run is never started against a half-configured environment.  Checks are
-ordered cheapest-first: configuration, then GitLab Issues, then the GitLab
-repository, then a consumer-first LLM probe, then the local Docker/corpus state.
+ordered cheapest-first: configuration, then the forge's (GitLab or GitHub)
+issues, then its repository, then a consumer-first LLM probe, then the local
+Docker/corpus state.
 
 Usage:
     python scripts/preflight.py                 # everything
@@ -20,6 +21,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 # scripts/ is sys.path[0] when run as a file; the project modules live one up.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -35,11 +37,16 @@ import forge  # noqa: E402
 _REQUEST_TIMEOUT = 15
 _PLACEHOLDER_MARKERS = ("your_", "_here", "changeme", "xxx")
 
-_REQUIRED_VARS = (
-    "GITLAB_URL",
-    "GITLAB_TOKEN",
-    "GITLAB_PROJECT_PATH",
-)
+_REQUIRED_VARS = {
+    "gitlab": ("GITLAB_URL", "GITLAB_TOKEN", "GITLAB_PROJECT_PATH"),
+    "github": ("NESTI_GITHUB_TOKEN", "NESTI_GITHUB_REPOSITORY"),
+}
+
+# Per forge: where the issue tracker is enabled, and the right issue creation needs.
+_ISSUE_HINTS = {
+    "gitlab": ("Settings → General → Visibility", "at least Reporter rights"),
+    "github": ("Settings → General → Features", "the Issues: read and write permission"),
+}
 
 _SANDBOX_IMAGE_VARS = (
     ("DOCKER_SANDBOX_PHP_IMAGE", "nesti-sandbox-php"),
@@ -80,13 +87,18 @@ def _is_placeholder(value: str) -> bool:
 
 def check_configuration() -> None:
     print("\n── Configuration ──")
-    for name in _REQUIRED_VARS:
+    try:
+        kind = forge.kind()
+    except ValueError as exc:
+        _fail("NESTI_FORGE", str(exc))
+    _ok("NESTI_FORGE", kind)
+    for name in _REQUIRED_VARS[kind]:
         value = os.environ.get(name, "")
         if not value.strip():
             _fail(f"{name} present", "missing from .env")
         if _is_placeholder(value):
             _fail(f"{name} configured", f"still a placeholder ({value[:24]!r})")
-        shown = value if name.endswith(("URL", "PATH", "PROJECT_ID")) else f"set ({len(value)} chars)"
+        shown = value if name.endswith(("URL", "PATH", "PROJECT_ID", "REPOSITORY")) else f"set ({len(value)} chars)"
         _ok(name, shown)
 
     for provider, default in (("OPENROUTER", "false"), ("DEEPSEEK", "true"), ("ANTHROPIC", "false")):
@@ -106,27 +118,28 @@ def check_configuration() -> None:
 
 def check_issues() -> None:
     """
-    Verify the GitLab Issues intake end to end.
+    Verify the forge's issue intake end to end.
 
     The lifecycle probe replaces the old Redmine workflow probe and exists for
     the same reason: a token that can read issues but not label or close them
     produces a run that looks healthy and then strands its issue.  The probe
-    drives GitLabIssuesClient itself, so it exercises the exact code the
+    drives the forge's issue client itself, so it exercises the exact code the
     orchestrator uses rather than a parallel re-implementation.
     """
-    print("\n── GitLab Issues ──")
+    print(f"\n── {forge.term('forge')} Issues ──")
     client = forge.issue_client()
     _ok("Opt-in label", f"{client.issue_label!r} (lock: {client.in_progress_label!r})")
 
     project = _project_info(client, "Project reachable")
+    level = project.get("issues_access_level")  # GitLab only
     if not project.get("issues_enabled", False):
         _fail(
             "Issues enabled",
             f"the issue tracker is disabled on {client.project_path} "
-            f"(issues_access_level={project.get('issues_access_level')!r}); "
-            f"enable it in Settings → General → Visibility",
+            + (f"(issues_access_level={level!r}); " if level is not None else "")
+            + f"enable it in {_ISSUE_HINTS[forge.kind()][0]}",
         )
-    _ok("Issues enabled", f"access level {project.get('issues_access_level')}")
+    _ok("Issues enabled", f"access level {level}" if level is not None else "")
 
     try:
         pending = client.list_pending()
@@ -153,7 +166,7 @@ def _probe_issue_lifecycle(client: forge.IssueClient) -> None:
     except Exception as exc:  # pylint: disable=broad-except
         _fail(
             "Issue creation",
-            f"{exc} — the token needs at least Reporter rights on {client.project_path}",
+            f"{exc} — the token needs {_ISSUE_HINTS[forge.kind()][1]} on {client.project_path}",
         )
     iid, web_url = probe["iid"], probe.get("web_url", "")
     _ok("Issue creation", f"probe issue #{iid}")
@@ -172,7 +185,7 @@ def _probe_issue_lifecycle(client: forge.IssueClient) -> None:
 
     if not client.close_issue(iid, note="preflight: probing the success path"):
         _fail("Close (success path)",
-              "a successful run could open its MR but never close the issue")
+              f"a successful run could open its {forge.term('mr')} but never close the issue")
     _ok("Close (success path)", f"probe issue #{iid} left closed – {web_url}")
 
 
@@ -181,7 +194,7 @@ def _project_info(client, label: str) -> dict:
     try:
         return client.project_info()
     except requests.HTTPError as exc:
-        _fail(label, f"HTTP {exc.response.status_code}")
+        _fail(label, f"GET {exc.response.url} → HTTP {exc.response.status_code}")
     except Exception as exc:  # pylint: disable=broad-except
         _fail(label, f"{type(exc).__name__}: {exc}")
 
@@ -204,6 +217,54 @@ def check_gitlab() -> None:
             f"highest access_level {best} < {_MIN_PUSH_ACCESS_LEVEL} (Developer)",
         )
     _ok("Token may push", f"access_level {best}")
+
+
+def _github_get(session, url: str, label: str, allowed: tuple[int, ...] = ()) -> requests.Response:
+    """GET *url*: a 2xx or *allowed* response is returned, anything else is a hard failure under *label*."""
+    try:
+        response = session.get(url, timeout=_REQUEST_TIMEOUT)
+    except Exception as exc:  # pylint: disable=broad-except
+        _fail(label, f"GET {url} → {type(exc).__name__}: {exc}")
+    if not response.ok and response.status_code not in allowed:
+        _fail(label, f"GET {url} → HTTP {response.status_code}")
+    return response
+
+
+def check_github() -> None:
+    from github_issues_client import api_session, api_url  # a GitLab run never needs it
+
+    print(f"\n── {forge.term('forge')} ──")
+    repo = _project_info(forge.issue_client(), "GitHub repository reachable")
+    _ok("GitHub repository", repo["path_with_namespace"])
+    if not (repo.get("permissions") or {}).get("push"):
+        _fail("Token may push", "permissions.push is false – the token needs Contents: read and write")
+    _ok("Token may push", "permissions.push")
+
+    branch, base = forge.default_branch(), f"{api_url()}/repos/{forge.path()}"
+    with api_session() as session:
+        if _github_get(session, f"{base}/branches/{quote(branch)}", "Target branch exists", (404,)).ok:
+            _ok("Target branch", branch)
+        else:
+            # An empty repository has no branch yet; the first run pushes its initial commit there.
+            listing = _github_get(session, f"{base}/branches?per_page=1", "Target branch exists", (409,))
+            if listing.ok and listing.json():
+                _fail("Target branch exists",
+                      f"{branch!r} is not a branch of {forge.path()} – check NESTI_GITHUB_DEFAULT_BRANCH")
+            _ok("Target branch", f"{branch} (empty repository; the first run creates it)")
+        variables = _github_get(session, f"{base}/actions/variables?per_page=1", "Actions variables", (403, 404))
+
+    if repo.get("delete_branch_on_merge"):
+        _ok("Delete head branches", "on")
+    else:
+        _warn("Delete head branches",
+              "off – merged PR branches stay; Nesti does not change the setting "
+              "(Settings → General → Pull Requests)")
+    if variables.ok:
+        _ok("Actions variables", "readable (poll heartbeat)")
+    else:
+        _warn("Actions variables",
+              f"HTTP {variables.status_code} – no Variables permission; the poll heartbeat "
+              "warns once and runs without it")
 
 
 def check_llm() -> None:
@@ -340,7 +401,7 @@ def main() -> int:
     print("Nesti preflight")
     check_configuration()
     check_issues()
-    check_gitlab()
+    check_github() if forge.kind() == "github" else check_gitlab()
     if args.skip_llm:
         print("\n── LLM cascade ──\n  SKIP  --skip-llm")
     else:

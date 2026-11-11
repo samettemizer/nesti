@@ -7,12 +7,16 @@ rate limits). No network.
 Run:  .venv/bin/python test_issue_clients.py
 """
 
+import contextlib
+import importlib.util
+import io
 import json
 import logging
 import os
 import sys
 from copy import deepcopy
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import MagicMock, call, patch
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 import requests
@@ -58,6 +62,10 @@ class _Response:
 
     def json(self):
         return deepcopy(self._payload)
+
+    @property
+    def ok(self):
+        return self.status_code < 400
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -550,6 +558,108 @@ def github_only() -> None:
         s.failures.clear()
 
 
+def _fake_session(get) -> MagicMock:
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.get.side_effect = get
+    return session
+
+
+def client_binding() -> None:
+    print("\n── MCP: the remote's host picks the forge ──")
+    os.environ["NESTI_FORGE"] = "gitlab"  # a bound client's forge wins over the orchestrator setting
+    try:
+        session = _fake_session(lambda url, timeout: _Response({"default_branch": "develop"}))
+        with patch.object(ghc, "api_session", return_value=session):
+            forge.bind_client("git@github.com:Acme/Shop.git")
+            check(forge.kind() == "github" and forge.term("mr") == "PR" and forge.path() == "Acme/Shop"
+                  and forge.identity() == "github.com/acme/shop"
+                  and isinstance(forge.issue_client(), ghc.GitHubIssuesClient),
+                  "a github.com remote binds to GitHub: owner/repo, identity github.com/owner/repo")
+            check(forge.default_branch() == "develop" and forge.default_branch() == "develop"
+                  and session.get.call_args_list == [call("https://api.github.test/repos/Acme/Shop", timeout=15)],
+                  "a bound GitHub client targets the repository's default branch, fetched once")
+        forge.bind_client("https://gitlab.test/ai/hello-world.git")
+        check(forge.kind() == "gitlab" and forge.identity() == "gitlab.test/ai/hello-world",
+              "a GITLAB_URL-host remote binds to GitLab")
+
+        def refusal(remote: str) -> str:
+            forge.bind_client(remote)
+            try:
+                forge.path()
+            except ValueError as exc:
+                return str(exc)
+            return ""
+
+        error = refusal("https://example.org/a/b.git")
+        check("on example.org, not on NESTI_GITHUB_URL's github.com or GITLAB_URL's gitlab.test" in error
+              and "nesti mcp" in error, "a remote on neither forge's host is refused")
+        check("not a namespace/project path" in refusal("https://github.com/acme/*"),
+              "a wildcard GitHub remote is refused (no Redis glob)")
+        with patch.dict(os.environ):
+            del os.environ["GITLAB_URL"]
+            forge.bind_client("https://github.com/acme/shop")
+            check(forge.kind() == "github" and forge.identity() == "github.com/acme/shop",
+                  "a GitHub-only environment (no GITLAB_URL) binds a github remote")
+            os.environ["GITLAB_URL"] = "https://gitlab.test"
+            del os.environ["NESTI_GITHUB_TOKEN"]
+            check("on github.com, not on GITLAB_URL's gitlab.test" in refusal("https://github.com/acme/shop"),
+                  "without NESTI_GITHUB_TOKEN a github remote keeps the GitLab-only refusal")
+    finally:
+        forge._bound = None
+
+
+def preflight_checks() -> None:
+    print("\n── preflight: forge checks ──")
+    spec = importlib.util.spec_from_file_location(
+        "preflight", Path(__file__).resolve().parent / "scripts" / "preflight.py")
+    preflight = importlib.util.module_from_spec(spec)
+    with patch("dotenv.load_dotenv"):  # never read the developer's real .env
+        spec.loader.exec_module(preflight)
+
+    def run(check_fn, repo: dict | Exception, routes: dict | None = None) -> tuple[bool, str]:
+        """*check_fn* over a fake project record and {url suffix: response}; returns (failed, output)."""
+        client = MagicMock()
+        if isinstance(repo, Exception):
+            client.project_info.side_effect = repo
+        else:
+            client.project_info.return_value = {"path_with_namespace": "acme/shop", **repo}
+        session = _fake_session(
+            lambda url, timeout: next(r for suffix, r in (routes or {}).items() if url.endswith(suffix)))
+        out = io.StringIO()
+        with patch.object(forge, "issue_client", return_value=client), \
+                patch.object(ghc, "api_session", return_value=session), contextlib.redirect_stdout(out):
+            try:
+                check_fn()
+            except SystemExit:
+                return True, out.getvalue()
+        return False, out.getvalue()
+
+    os.environ["NESTI_FORGE"] = "github"
+    push = {"permissions": {"push": True}}
+    healthy = {"/branches/main": _Response({"name": "main"}),
+               "/actions/variables?per_page=1": _Response({"variables": []})}
+    failed, out = run(preflight.check_github, {"permissions": {"push": False}}, healthy)
+    check(failed and "FAIL  Token may push" in out, "check_github fails without push permission")
+    failed, out = run(preflight.check_github, {**push, "delete_branch_on_merge": False},
+                      {**healthy, "/actions/variables?per_page=1": _Response({}, 403)})
+    check(not failed and "WARN  Delete head branches" in out and "WARN  Actions variables – HTTP 403" in out
+          and "OK    Target branch – main" in out and "── GitHub ──" in out,
+          "check_github warns on delete_branch_on_merge false and a 403 variables endpoint")
+    failed, out = run(preflight.check_github, push,
+                      {**healthy, "/branches/main": _Response({}, 404),
+                       "/branches?per_page=1": _Response([{"name": "develop"}])})
+    check(failed and "FAIL  Target branch exists" in out, "check_github fails on a missing target branch")
+    failed, out = run(preflight.check_github, {**push, "delete_branch_on_merge": True},
+                      {**healthy, "/branches/main": _Response({}, 404), "/branches?per_page=1": _Response([])})
+    check(not failed and "empty repository" in out and "OK    Delete head branches" in out,
+          "an empty repository passes the target-branch check (the first run creates it)")
+    os.environ.pop("NESTI_FORGE")
+    url = "https://gitlab.test/api/v4/projects/ai%2Fhello-world"
+    failed, out = run(preflight.check_gitlab, requests.HTTPError(response=_Response({}, 404, url=url)))
+    check(failed and f"GET {url} → HTTP 404" in out, "an unreachable project names the URL it fetched")
+
+
 def gitlab_default() -> None:
     os.environ.pop("NESTI_FORGE", None)
     print("\n── NESTI_FORGE unset ──")
@@ -561,6 +671,8 @@ def gitlab_default() -> None:
 for _name in FORGES:
     scenarios(_name)
 github_only()
+client_binding()
+preflight_checks()
 gitlab_default()
 
 print(f"\n{'All issue-client checks passed.' if not _failures else f'{_failures} check(s) FAILED.'}")
