@@ -53,6 +53,14 @@ change; otherwise Nesti leaves it untouched.
 
 ---
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=ua7AfRvcorw">
+    <img src="./assets/remotion-video-challenge.png" alt="Nesti Remotion video challenge — watch on YouTube" width="760" />
+  </a>
+</p>
+
+Use Nesti on its own, or pair it with the [nestiworks](https://github.com/samettemizer/nestiworks/tree/main/laravel) plugin to take on escalated tasks.
+
 ## Issue Intake (GitLab or GitHub Issues)
 
 Write the issue in English and add the opt-in label (`GITLAB_ISSUE_LABEL`, or
