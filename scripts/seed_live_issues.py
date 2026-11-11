@@ -12,7 +12,7 @@ Idempotent: an issue whose title already exists as an OPEN issue carrying the
 opt-in label is skipped, so re-running after a partial seed never duplicates
 work. GitLab titles are not unique, so the match is on exact title.
 
-Creation goes through GitLabIssuesClient.create_issue, the verified
+Creation goes through the forge issue client's create_issue, the verified
 single-POST path.
 
 Usage:
@@ -33,8 +33,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Imported after load_dotenv, like the orchestrator does: the client resolves
-# its GitLab configuration from the environment.
-from gitlab_issues_client import GitLabIssuesClient  # noqa: E402
+# its forge configuration from the environment.
+import forge  # noqa: E402
 
 
 ISSUES: tuple[dict[str, str], ...] = (
@@ -105,12 +105,7 @@ Acceptance Criteria:
 )
 
 
-def _client() -> GitLabIssuesClient:
-    """Reuse the orchestrator's client for config, auth and the label scheme."""
-    return GitLabIssuesClient()
-
-
-def _existing_open_titles(client: GitLabIssuesClient) -> dict[str, int]:
+def _existing_open_titles(client: forge.IssueClient) -> dict[str, int]:
     """Map title → iid for every open issue already carrying the opt-in label."""
     return {
         issue["subject"]: issue["iid"]
@@ -124,7 +119,7 @@ def main() -> int:
                         help="print what would be created without calling GitLab")
     args = parser.parse_args()
 
-    client = _client()
+    client = forge.issue_client()
 
     if args.dry_run:
         print(

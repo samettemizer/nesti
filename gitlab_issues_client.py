@@ -48,7 +48,7 @@ from collections.abc import Iterator
 
 import requests
 
-import gitlab_project
+import forge
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class GitLabIssuesClient:
     def __init__(self) -> None:
         self.base_url = os.environ["GITLAB_URL"].rstrip("/")
         self.token = os.environ["GITLAB_TOKEN"]
-        self.project_path = gitlab_project.path()
+        self.project_path = forge.path()
         self.issue_label = (
             os.environ.get("GITLAB_ISSUE_LABEL", _DEFAULT_ISSUE_LABEL).strip()
             or _DEFAULT_ISSUE_LABEL
@@ -209,7 +209,7 @@ class GitLabIssuesClient:
 
     def _target_head(self) -> str | None:
         """The target branch's HEAD sha, or None when the branch does not exist (404)."""
-        branch = quote(gitlab_project.default_branch(), safe="")
+        branch = quote(forge.default_branch(), safe="")
         response = self.session.get(
             f"{self._project_api}/repository/branches/{branch}", timeout=_REQUEST_TIMEOUT
         )
@@ -236,6 +236,12 @@ class GitLabIssuesClient:
     def get_issue(self, iid: int) -> dict:
         """Fetch one issue by its project-scoped iid, in intake shape."""
         return self._normalise(self._get_raw(iid))
+
+    def project_info(self) -> dict:
+        """The GitLab project record (``GET /projects/:id``); raises on a non-2xx answer."""
+        response = self.session.get(self._project_api, timeout=_REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return response.json()
 
     def list_issues(
         self, *, state: str = "opened", labels: list[str] | None = None
@@ -406,7 +412,7 @@ class GitLabIssuesClient:
         return [
             {"id": n.get("id"), "author": (n.get("author") or {}).get("username"),
              "author_id": (n.get("author") or {}).get("id"),
-             "created_at": n.get("created_at"), "body": n.get("body")}
+             "created_at": n.get("created_at"), "body": n.get("body"), "trusted": True}
             for n in self._paginate(f"{self._project_api}/issues/{iid}/notes",
                                     {"sort": "asc", "order_by": "created_at"})
             if not n.get("system")

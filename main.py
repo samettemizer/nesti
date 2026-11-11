@@ -25,6 +25,8 @@ load_dotenv()
 
 import requests  # noqa: E402
 
+import forge  # noqa: E402
+
 logger = logging.getLogger(__name__)
 _QDRANT_STARTUP_TIMEOUT = 60
 
@@ -77,7 +79,7 @@ def _prepare_project(loop: bool, poll_interval: int) -> None:
             record = ensure_layout(root)
             break
         except Exception as exc:
-            logger.exception("Project layout unavailable; GitLab polling disabled: %s", exc)
+            logger.exception(f"Project layout unavailable; {forge.term('forge')} polling disabled: %s", exc)
             if not loop:
                 sys.exit(1)
             time.sleep(poll_interval)
@@ -128,7 +130,7 @@ def main() -> None:
             from scripts.index_skills import main as index_skills
 
             if index_skills([]) != 0:
-                raise RuntimeError("Skill indexing failed; refusing to poll GitLab.")
+                raise RuntimeError(f"Skill indexing failed; refusing to poll {forge.term('forge')}.")
         except Exception as exc:
             logger.exception("Startup indexing failed: %s", exc)
             sys.exit(1)

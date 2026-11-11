@@ -20,7 +20,6 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import quote
 
 # scripts/ is sys.path[0] when run as a file; the project modules live one up.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -31,7 +30,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import skill_catalog  # noqa: E402  (after load_dotenv, like the orchestrator)
-from gitlab_issues_client import GitLabIssuesClient  # noqa: E402
+import forge  # noqa: E402
 
 _REQUEST_TIMEOUT = 15
 _PLACEHOLDER_MARKERS = ("your_", "_here", "changeme", "xxx")
@@ -116,16 +115,10 @@ def check_issues() -> None:
     orchestrator uses rather than a parallel re-implementation.
     """
     print("\n── GitLab Issues ──")
-    client = GitLabIssuesClient()
+    client = forge.issue_client()
     _ok("Opt-in label", f"{client.issue_label!r} (lock: {client.in_progress_label!r})")
 
-    try:
-        response = client.session.get(client._project_api, timeout=_REQUEST_TIMEOUT)
-    except Exception as exc:  # pylint: disable=broad-except
-        _fail("Project reachable", f"{type(exc).__name__}: {exc}")
-    if response.status_code != 200:
-        _fail("Project reachable", f"HTTP {response.status_code}")
-    project = response.json()
+    project = _project_info(client, "Project reachable")
     if not project.get("issues_enabled", False):
         _fail(
             "Issues enabled",
@@ -148,7 +141,7 @@ def check_issues() -> None:
     _probe_issue_lifecycle(client)
 
 
-def _probe_issue_lifecycle(client: GitLabIssuesClient) -> None:
+def _probe_issue_lifecycle(client: forge.IssueClient) -> None:
     """Create a throwaway issue and drive it through the whole lifecycle."""
     try:
         probe = client.create_issue(
@@ -183,23 +176,19 @@ def _probe_issue_lifecycle(client: GitLabIssuesClient) -> None:
     _ok("Close (success path)", f"probe issue #{iid} left closed – {web_url}")
 
 
+def _project_info(client, label: str) -> dict:
+    """The forge project record from *client*, or a hard failure under *label*."""
+    try:
+        return client.project_info()
+    except requests.HTTPError as exc:
+        _fail(label, f"HTTP {exc.response.status_code}")
+    except Exception as exc:  # pylint: disable=broad-except
+        _fail(label, f"{type(exc).__name__}: {exc}")
+
+
 def check_gitlab() -> None:
     print("\n── GitLab ──")
-    base = os.environ["GITLAB_URL"].rstrip("/")
-    path = quote(os.environ["GITLAB_PROJECT_PATH"], safe="")
-    url = f"{base}/api/v4/projects/{path}"
-    session = requests.Session()
-    session.headers.update({"PRIVATE-TOKEN": os.environ["GITLAB_TOKEN"]})
-    session.verify = os.environ.get("GITLAB_SSL_VERIFY", "true").lower() != "false"
-
-    try:
-        response = session.get(url, timeout=_REQUEST_TIMEOUT)
-    except Exception as exc:  # pylint: disable=broad-except
-        _fail("GitLab project reachable", f"GET {url} → {type(exc).__name__}: {exc}")
-    if response.status_code != 200:
-        _fail("GitLab project reachable", f"GET {url} → HTTP {response.status_code}")
-
-    project = response.json()
+    project = _project_info(forge.issue_client(), "GitLab project reachable")
     _ok("GitLab project", project["path_with_namespace"])
     _ok("Default branch", project.get("default_branch") or "(empty repository)")
 

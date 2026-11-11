@@ -36,7 +36,7 @@ os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"   # unreachable → memory fal
 os.environ["MAX_CODE_RETRIES"] = "2"                 # → max_attempts = 3
 os.environ["NESTI_STACK"] = "auto"                   # exercise real detection
 os.environ["NESTI_RERANKER_ENABLED"] = "false"
-os.environ["GITLAB_URL"] = "https://gitlab.test"       # scopes Redis keys (gitlab_project.identity)
+os.environ["GITLAB_URL"] = "https://gitlab.test"       # scopes Redis keys (forge.identity)
 os.environ["GITLAB_PROJECT_PATH"] = "ai/hello-world"
 os.environ.pop("TELEGRAM_BOT_TOKEN", None)
 os.environ.pop("TELEGRAM_CHAT_ID", None)
@@ -2156,8 +2156,8 @@ check(_rerun_pending() == [30, 31], "the latest trusted marker decides, older ma
 print("\n── Scenario 12d-omp: OMP escalation issue tools ──")
 import graph.tools as _issue_tools  # noqa: E402
 omp_http = _IssueHTTP()
-_real_issue_client = _issue_tools.GitLabIssuesClient
-_issue_tools.GitLabIssuesClient = omp_http.client
+_real_issue_client = _issue_tools.forge.issue_client
+_issue_tools.forge.issue_client = omp_http.client
 created = _issue_tools.tool_issue_create("OMP task", "Scope: backend\n\nDo it.")
 check(created["success"] and "labels" not in omp_http.requests[0][2],
       "issue_create sends no labels")
@@ -2183,7 +2183,13 @@ resolved = _issue_tools.tool_issue_resolve(omp_http.add_issue(32, [])["iid"], "m
 check(resolved["success"] and omp_http.issues[32]["state"] == "closed"
       and omp_http.notes[32][-1]["body"] == "omp-developer / model: m",
       "issue_resolve closes with the model comment")
-_issue_tools.GitLabIssuesClient = _real_issue_client
+check(omp_http.notes[32] and all(n["trusted"] is True for n in omp_http.client().list_notes(32)),
+      "GitLab notes are always trusted")
+_issue_tools.forge.issue_client = _real_issue_client
+with patch.dict(os.environ, {"NESTI_FORGE": "bogus"}):
+    _bogus = _issue_tools.tool_issue_get(1)
+check(not _bogus["success"] and "NESTI_FORGE='bogus' is not supported" in _bogus["error"],
+      "an unknown NESTI_FORGE is a clear tool error, never a silent GitLab fallback")
 
 http.add_issue(10, ["nesti", "nesti::in-progress", "human"])
 ordinary_put = http.put
@@ -3694,7 +3700,7 @@ check(_hb.swap_poll_heartbeat("y") == "x"
 
 # ═════ MCP: each client connection acts on its own GitLab project ═════
 print("\n── MCP client project binding ──")
-import gitlab_project  # noqa: E402
+import forge  # noqa: E402
 import gitlab_client  # noqa: E402
 import graph.tools as _bind_tools  # noqa: E402
 
@@ -3704,26 +3710,26 @@ _remotes = {
     "git@gitlab.com:group/sub/proj.git": "group/sub/proj",
     "ssh://git@gitlab.com:2222/group/proj.git": "group/proj",
 }
-check(all(gitlab_project.project_from_remote(r, "https://gitlab.com") == p
+check(all(forge.project_from_remote(r, "https://gitlab.com") == p
           for r, p in _remotes.items())
-      and gitlab_project.project_from_remote(
+      and forge.project_from_remote(
           "https://example.com/gitlab/g/p.git", "https://example.com/gitlab") == "g/p",
       "https, credentialed, scp, ssh-with-port and sub-path remotes resolve to namespace/project")
 _bad = []
 for _remote in ("", "https://gitlab.com/shop", "https://u:SECRET@github.com/x/y.git"):
     try:
-        gitlab_project.project_from_remote(_remote, "https://gitlab.com")
+        forge.project_from_remote(_remote, "https://gitlab.com")
     except ValueError as exc:
         _bad.append(str(exc))
 check(len(_bad) == 3 and "github.com" in _bad[2] and not any("SECRET" in m for m in _bad),
       "empty, namespace-less and foreign-host remotes are refused without echoing credentials")
 try:
-    gitlab_project.bind_client("git@gitlab.test:Group/Proj.git")
-    check(gitlab_project.path() == "Group/Proj"
-          and gitlab_project.identity() == "gitlab.test/group/proj"
+    forge.bind_client("git@gitlab.test:Group/Proj.git")
+    check(forge.path() == "Group/Proj"
+          and forge.identity() == "gitlab.test/group/proj"
           and gic.GitLabIssuesClient().project_path == "Group/Proj",
           "a bound client acts on its remote's project, not GITLAB_PROJECT_PATH")
-    with patch("gitlab_project.requests.get") as _get:
+    with patch("forge.requests.get") as _get:
         _get.return_value.json.return_value = {"default_branch": "develop"}
         check(gitlab_client.GitLabClient().default_branch == "develop",
               "a bound client targets its project's GitLab default branch")
@@ -3736,20 +3742,20 @@ try:
     check(not _layout["success"] and "gitlab.test/other/proj" in _layout["error"]
           and "gitlab.test/group/proj" in _layout["error"] and _own["success"],
           "project_layout serves only the layout recorded for the client's project")
-    gitlab_project.bind_client("")
+    forge.bind_client("")
     _refused = _bind_tools.tool_issue_list_pending()
     check(not _refused["success"] and "nesti mcp" in _refused["error"],
           "a client without a resolvable project is refused, never served .env's project")
     _globbed = []
     for _remote in ("https://gitlab.test/acme/*", "git@gitlab.test:acme/[ab].git"):
-        gitlab_project.bind_client(_remote)
+        forge.bind_client(_remote)
         with patch("graph.tools.get_semantic_memory") as _memory:
             _globbed.append((_bind_tools.tool_memory_forget_episodes(1, "r")["success"],
                              _memory.called))
     check(_globbed == [(False, False), (False, False)],
           "a wildcard remote is refused before Redis, so it cannot delete other projects' episodes")
 finally:
-    gitlab_project._bound = None
+    forge._bound = None
 
 # ═════ Static acceptance checks ═════
 print("\n── Static acceptance checks ──")

@@ -33,7 +33,8 @@ docker_runner.py             PHP sandbox (+ postgres:15 sidecar when phpunit.xml
                              OpenAPI export, bootstrap, Boost application facts, FILE-block writer
 frontend_runner.py           Vitest + Playwright sandboxes
 gitlab_issues_client.py      issue intake + label lock; gitlab_client.py: repo + MR
-gitlab_project.py            acted-on GitLab project: .env (orchestrator) or the MCP client's git remote;
+forge.py                     forge client Protocols + factory (NESTI_FORGE, default gitlab), display words
+                             (term), acted-on project: .env (orchestrator) or the MCP client's git remote;
                              identity() scopes every per-issue Redis key
 skill_catalog.py             offline corpus selection; skill_loader.py: issue URLs
 embedding.py, vector_store.py, semantic_cache.py   vector memory
@@ -238,6 +239,10 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     stay out of the inventory listings, API contracts and `routes/<dir>/` quotes
     (shared files outside every domain stay). `node_detect_domain` logs exactly
     one `DOMAIN:` line per run, domains comma-joined.
+37. **Forge-specific code lives only in `*_client.py` and `forge.py`.** Every
+    other module builds its clients through `forge.issue_client()` /
+    `forge.repo_client()` and names the forge in log lines, notes and prompts
+    through `forge.term()` ("GitLab", "MR", "Merge Request").
 
 ---
 
@@ -258,6 +263,7 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `graph/tools.py` | `docker_runner.py` | `run_app_facts()` → `(bool, str)` |
 | `graph/tools.py` | `docker_runner.py` | `run_openapi_export()` / `run_bootstrap()` / `run_scramble_install()` → `(bool, str)` |
 | `graph/tools.py` | `frontend_runner.py` | `run_vitest()` / `run_playwright()` → `(bool, str)` |
+| `graph/tools.py`, scripts | `forge.py` | `issue_client()` / `repo_client()` → a fresh client per call; an unsupported `NESTI_FORGE` raises `ValueError`; notes carry `trusted` (always `True` on GitLab) |
 | `graph/tools.py` | `gitlab_issues_client.py` | `lock/close/reopen/pause/resume_issue()` → `bool`, verified by independent GET; `post_note()` (via `issue_domain`) → note id, read back by GET, raises on failure |
 | `graph/tools.py` | `issue_domain.py` | `answer()` → `list[str]` (`[]` = no answer); `ask()` posts the question + pauses, raises `RuntimeError` when the pause is unverified; `reconcile()` → `{resumed, asked, waiting, errors}` |
 | `task_engine.py` | `graph/tools.py` | `tool_issue_reconcile_domain_questions()` before `tool_issue_list_pending()`; failure logged, never aborts the poll |

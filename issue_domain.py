@@ -26,6 +26,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import forge
 import project_layout
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ _FILE_SUFFIX_RE = re.compile(r"\.(?:php|vue|js|ts|json|md|css|html|xml|ya?ml)$",
 # Separators are mutually exclusive (comma / "and" / bare whitespace), so a long gap cannot backtrack exponentially.
 _NUMBERS_RE = re.compile(r"\s*\d+[.)]?(?:(?:\s*,\s*|\s+and\s+|\s+)\d+[.)]?)*\s*(?:,\s*)?", re.I)
 _CLASSIFY_SYSTEM = (
-    "You decide which backend domain of a Laravel application a GitLab issue changes. The backend "
+    "You decide which backend domain of a Laravel application a %s issue changes. The backend "
     "splits its code into the domains the user lists. Answer with ONE JSON object and nothing else: "
     '{"domains": ["<name>", ...], "reason": "<one sentence>"}. List every domain the requested backend '
     "change could plausibly belong to, with names exactly as listed: several when it fits more than one, "
@@ -238,9 +239,9 @@ def classify(subject: str, description: str, catalog: dict, llm) -> tuple[list[s
                      f"classes {', '.join(d['classes'][:12]) or 'none'}")
     unowned = [uri for uri, owners in catalog["routes"] if not owners][:20]
     lines.append(f"Routes outside every domain: {', '.join(unowned) or 'none'}")
-    user = "\n".join(lines) + f"\n\nGitLab issue: {subject}\n{description}"
+    user = "\n".join(lines) + f"\n\n{forge.term('forge')} issue: {subject}\n{description}"
     try:
-        reply = llm.generate_plan(_CLASSIFY_SYSTEM, user)
+        reply = llm.generate_plan(_CLASSIFY_SYSTEM % forge.term("forge"), user)
     except Exception as exc:  # pylint: disable=broad-except
         return [], f"classification failed: {exc}"
     match = re.search(r"\{.*\}", reply or "", re.S)

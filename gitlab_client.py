@@ -19,7 +19,7 @@ import re
 import git
 import requests
 
-import gitlab_project
+import forge
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +31,12 @@ class GitLabClient:
     def __init__(self):
         self.gitlab_url = os.environ["GITLAB_URL"].rstrip("/")
         self.token = os.environ["GITLAB_TOKEN"]
-        self.project_path = gitlab_project.path()
-        self.default_branch = gitlab_project.default_branch()
+        self.project_path = forge.path()
+        self.default_branch = forge.default_branch()
         # GITLAB_REPO_SSH names the orchestrator's project; a bound MCP client clones its own over HTTPS.
         self.use_ssh = (
             os.environ.get("GITLAB_USE_SSH", "false").lower() == "true"
-            and not gitlab_project.client_bound()
+            and not forge.client_bound()
         )
         self.repo_url = (
             os.environ.get("GITLAB_REPO_SSH")
