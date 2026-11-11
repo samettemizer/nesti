@@ -49,6 +49,7 @@ class IssueClient(Protocol):
     def get_issue(self, iid: int) -> dict: ...
     def project_info(self) -> dict:
         """The forge's project record; carries at least ``path_with_namespace``, ``default_branch``, ``issues_enabled``."""
+        ...
     def list_issues(self, *, state: str = "opened", labels: list[str] | None = None) -> list[dict]: ...
     def list_pending(self, limit: int = 25) -> list[dict]: ...
     def get_next_issue(self) -> dict | None: ...
@@ -172,7 +173,9 @@ def bind_client(remote: str) -> None:
     forges = {}
     if os.environ.get("NESTI_GITHUB_TOKEN"):
         forges["github"] = ("NESTI_GITHUB_URL", _github_url())
-    if os.environ.get("GITLAB_URL"):
+    gitlab_token = os.environ.get("GITLAB_TOKEN", "").strip()
+    # .env.example's GitLab placeholders must not claim gitlab.com on a GitHub-only install.
+    if os.environ.get("GITLAB_URL") and gitlab_token and not gitlab_token.startswith("your_"):
         forges["gitlab"] = ("GITLAB_URL", os.environ["GITLAB_URL"])
     try:
         host = _split_remote(remote)[0].lower()

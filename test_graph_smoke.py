@@ -1304,6 +1304,10 @@ _sol = _pb._format_solutions_section(
     [{"issue_id": 5, "subject": "s", "similarity": 0.9, "mr_url": "u", "plan": _long_plan}], 4000)
 check("### Issue #5: s" in _sol and "truncated" in _sol and len(_sol) < 4000 + 400,
       "an over-budget past plan is cut to fit rather than silently dropped")
+with patch.dict(os.environ, {"NESTI_FORGE": "github"}):
+    _sol_gh = _pb._format_solutions_section([{"issue_id": 5, "subject": "s", "mr_url": "u", "plan": "p"}], 4000)
+check("(similarity 0.9, MR u)" in _sol and "(similarity 0, PR u)" in _sol_gh,
+      "a past solution names its MR on GitLab and its PR on GitHub")
 
 from scripts.index_skills import chunk_document, _MAX_CHUNK_CHARS  # noqa: E402
 _doc = "# Title\n\n## Alpha\n\n" + "a" * 300 + "\n\n## Beta\n\n" + "b" * 400 + "\n"
@@ -3567,7 +3571,7 @@ with tempfile.TemporaryDirectory(prefix="nesti-g0b-") as _root, \
         patch.dict(os.environ, _g0b_env(_root, ssh=True)):
     _bare, _client, _repo, _branch = _g0b_setup(_root)
     _old = _g0b_leftover(_repo, _branch)
-    for _n, _mr in enumerate(({"iid": 7}, {"iid": 7, "web_url": None})):
+    for _n, _mr in enumerate(({"iid": 7}, {"iid": 7, "web_url": None}, {"iid": 7, "web_url": ""})):
         Path(_repo.working_tree_dir, f"thing{_n}.txt").write_text("thing")
         try:
             with patch("requests.Session.get", _g0b_mrs([_mr])):

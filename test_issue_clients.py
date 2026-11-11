@@ -42,6 +42,7 @@ from github_client import GitHubClient  # noqa: E402
 
 NESTI_USER = 15
 _failures = 0
+GITHUB_REQUESTS: list[tuple] = []  # (method, json) of every GitHub request in the whole suite
 
 
 def check(condition: bool, message: str) -> None:
@@ -230,6 +231,10 @@ class GitLabFake(_Fake):
 class GitHubFake(_Fake):
     UNLOCK = ("DELETE", "/labels/")
     BASE = "https://api.github.test/repos/acme/shop"
+
+    def _call(self, method, url, params=None, json=None, **kw):
+        GITHUB_REQUESTS.append((method, deepcopy(json)))
+        return super()._call(method, url, params, json, **kw)
 
     def _issue(self, i):
         record = {"number": i["n"], "id": i["n"] + 5000, "title": i["title"], "body": i["body"] or None,
@@ -480,6 +485,12 @@ def github_only() -> None:
     check(writes == [("POST", "labels"), ("POST", "comments"), ("PATCH", "31"),
                      ("DELETE", "nesti%3A%3Ain-progress")],
           "lock POSTs the label; close: comment → PATCH state → DELETE lock (URL-encoded)")
+    s.add_issue(35, ["nesti", "nesti::in-progress"], state="closed")
+    s.requests.clear()
+    check(c.close_issue(35) and s.issues[35]["state"] == "closed"
+          and [(r[0], unquote(r[1].rsplit("/", 1)[-1])) for r in s.requests if r[0] != "GET"]
+          == [("DELETE", "nesti::in-progress")],
+          "an already closed issue is not re-PATCHed (its state reason stays); the lock is still dropped")
     s.add_issue(32, ["nesti", "nesti::in-progress"])
     s.requests.clear()
     c.pause_issue(32)
@@ -494,10 +505,6 @@ def github_only() -> None:
     check([r[0] for r in s.requests if r[0] != "GET"] == ["PATCH", "POST"], "handoff: PATCH body → POST label")
     s.add_issue(34, ["nesti", "nesti::in-progress"])
     c.reopen_issue(34, note="failed")
-    everything = s.requests
-    check(not any(r[0] == "PUT" for r in everything)
-          and not any(r[0] == "PATCH" and "labels" in (r[3] or {}) for r in everything),
-          "no call ever replaces the label set (no PUT, no PATCH with labels)")
 
     print("── github: 65,536-character limit ──")
     marker = forge.failed_run_marker("Issue 34", "", "h1")
@@ -514,6 +521,16 @@ def github_only() -> None:
     padded = "y" * (ghc.BODY_LIMIT - 10) + " " * 100
     check(ghc.fit_body(padded) == "y" * (ghc.BODY_LIMIT - 10),
           "a body over the limit only by trailing whitespace is just stripped, never duplicated")
+    created = c.create_issue("Long", "d" * 70_000 + "\nEND")
+    check(len(s.issues[created["id"]]["body"]) <= ghc.BODY_LIMIT and created["description"].endswith("END"),
+          "create_issue fits the description and reads back the fitted text")
+    s.add_issue(36, [], body="b" * 70_000)
+    s.add_issue(37, [], body="b" * 70_000)
+    long_appendix = "## Appendix\n" + "a" * 40_000 + "\nAPPENDIX-END"
+    check(c.handoff_issue(36, "## Appendix\nAPPENDIX-END") and c.handoff_issue(37, long_appendix)
+          and all(len(s.issues[n]["body"]) <= ghc.BODY_LIMIT
+                  and s.issues[n]["body"].rstrip().endswith("APPENDIX-END") for n in (36, 37)),
+          "handoff fits the resulting body, keeps the appendix tail and reads back an appendix longer than it")
 
     print("── github: trust ──")
     s = Store()
@@ -555,6 +572,15 @@ def github_only() -> None:
         with patch.object(tools.forge, "issue_client", lambda: c):
             check(tools.tool_issue_list_pending()["success"] is False,
                   f"HTTP {status}: tool_issue_list_pending fails, so the poll is skipped")
+        s.failures.clear()
+    for method_name, call_post, fragment in (("post_note", lambda: c.post_note(42, "hi"), "/comments"),
+                                             ("create_issue", lambda: c.create_issue("T", "D"), "/acme/shop/issues")):
+        s.fail("POST", fragment, 429, {"Retry-After": "60"})
+        try:
+            call_post()
+            check(False, f"HTTP 429 on {method_name}'s POST raises")
+        except requests.HTTPError as exc:
+            check("Retry-After=60" in str(exc), f"HTTP 429 on {method_name}'s POST raises with Retry-After=60")
         s.failures.clear()
 
 
@@ -605,6 +631,11 @@ def client_binding() -> None:
             del os.environ["NESTI_GITHUB_TOKEN"]
             check("on github.com, not on GITLAB_URL's gitlab.test" in refusal("https://github.com/acme/shop"),
                   "without NESTI_GITHUB_TOKEN a github remote keeps the GitLab-only refusal")
+            os.environ["NESTI_GITHUB_TOKEN"] = "t"
+            os.environ["GITLAB_TOKEN"] = "your_gitlab_personal_access_token_here"
+            error = refusal("https://gitlab.test/ai/hello-world.git")
+            check("on gitlab.test, not on NESTI_GITHUB_URL's github.com" in error and "GITLAB_URL" not in error,
+                  "a placeholder GITLAB_TOKEN never binds GitLab (clean refusal, not a later 401)")
     finally:
         forge._bound = None
 
@@ -617,8 +648,11 @@ def preflight_checks() -> None:
     with patch("dotenv.load_dotenv"):  # never read the developer's real .env
         spec.loader.exec_module(preflight)
 
-    def run(check_fn, repo: dict | Exception, routes: dict | None = None) -> tuple[bool, str]:
-        """*check_fn* over a fake project record and {url suffix: response}; returns (failed, output)."""
+    sessions = []
+
+    def run(check_fn, repo: dict | Exception, routes: dict | None = None,
+            writes: dict | None = None) -> tuple[bool, str]:
+        """*check_fn* over a fake project record, {url suffix: GET response} and {method: write response}."""
         client = MagicMock()
         if isinstance(repo, Exception):
             client.project_info.side_effect = repo
@@ -626,6 +660,11 @@ def preflight_checks() -> None:
             client.project_info.return_value = {"path_with_namespace": "acme/shop", **repo}
         session = _fake_session(
             lambda url, timeout: next(r for suffix, r in (routes or {}).items() if url.endswith(suffix)))
+        for method, response in {"patch": _Response({}, 204), "post": _Response({}, 201),
+                                 "delete": _Response({}, 204), **(writes or {})}.items():
+            getattr(session, method).configure_mock(
+                return_value=response, side_effect=response if isinstance(response, Exception) else None)
+        sessions.append(session)
         out = io.StringIO()
         with patch.object(forge, "issue_client", return_value=client), \
                 patch.object(ghc, "api_session", return_value=session), contextlib.redirect_stdout(out):
@@ -637,12 +676,13 @@ def preflight_checks() -> None:
 
     os.environ["NESTI_FORGE"] = "github"
     push = {"permissions": {"push": True}}
+    heartbeat = "/actions/variables/NESTI_POLL_HEARTBEAT"
     healthy = {"/branches/main": _Response({"name": "main"}),
-               "/actions/variables?per_page=1": _Response({"variables": []})}
+               heartbeat: _Response({"name": "NESTI_POLL_HEARTBEAT", "value": "beat"})}
     failed, out = run(preflight.check_github, {"permissions": {"push": False}}, healthy)
     check(failed and "FAIL  Token may push" in out, "check_github fails without push permission")
     failed, out = run(preflight.check_github, {**push, "delete_branch_on_merge": False},
-                      {**healthy, "/actions/variables?per_page=1": _Response({}, 403)})
+                      {**healthy, heartbeat: _Response({}, 403)})
     check(not failed and "WARN  Delete head branches" in out and "WARN  Actions variables – HTTP 403" in out
           and "OK    Target branch – main" in out and "── GitHub ──" in out,
           "check_github warns on delete_branch_on_merge false and a 403 variables endpoint")
@@ -654,6 +694,32 @@ def preflight_checks() -> None:
                       {**healthy, "/branches/main": _Response({}, 404), "/branches?per_page=1": _Response([])})
     check(not failed and "empty repository" in out and "OK    Delete head branches" in out,
           "an empty repository passes the target-branch check (the first run creates it)")
+    failed, out = run(preflight.check_github, push, healthy, {"patch": _Response({}, 403)})
+    check(not failed and "WARN  Actions variables – HTTP 403" in out,
+          "check_github warns when the token may read but not write Actions variables")
+    failed, out = run(preflight.check_github, push, healthy)
+    patched = sessions[-1].patch.call_args
+    _, out_absent = run(preflight.check_github, push, {**healthy, heartbeat: _Response({}, 404)})
+    absent = sessions[-1]
+    check(not failed and "OK    Actions variables – writable" in out and "OK    Actions variables – writable" in out_absent
+          and patched.args[0].endswith(heartbeat)
+          and patched.kwargs["json"] == {"name": "NESTI_POLL_HEARTBEAT", "value": "beat"}
+          and absent.post.call_args.kwargs["json"]["name"] == "NESTI_PREFLIGHT_PROBE"
+          and absent.delete.call_args.args[0].endswith("/actions/variables/NESTI_PREFLIGHT_PROBE")
+          and not absent.patch.called,
+          "the write probe rewrites the heartbeat unchanged, or creates and deletes a throwaway variable")
+    _, out = run(preflight.check_github, push, {**healthy, heartbeat: _Response({}, 404)},
+                 {"post": _Response({"message": "Already exists"}, 409)})
+    check("OK    Actions variables – writable" in out
+          and sessions[-1].delete.call_args.args[0].endswith("/actions/variables/NESTI_PREFLIGHT_PROBE"),
+          "a leftover probe variable (409) is deleted, which proves write access and clears it")
+    failed, out = run(preflight.check_github, push, healthy, {"patch": requests.ConnectionError("down")})
+    check(not failed and "WARN  Actions variables – ConnectionError: down;" in out,
+          "a connection error in the write probe is a WARN line, not a traceback")
+    with patch.dict(os.environ, {"NESTI_GITHUB_REPOSITORY": "owner/repo"}):
+        failed, out = run(preflight.check_configuration, {})
+    check(failed and "FAIL  NESTI_GITHUB_REPOSITORY configured" in out,
+          "the .env.example repository placeholder owner/repo fails the configuration check")
     os.environ.pop("NESTI_FORGE")
     url = "https://gitlab.test/api/v4/projects/ai%2Fhello-world"
     failed, out = run(preflight.check_gitlab, requests.HTTPError(response=_Response({}, 404, url=url)))
@@ -674,6 +740,9 @@ github_only()
 client_binding()
 preflight_checks()
 gitlab_default()
+check(any(m == "PATCH" for m, _ in GITHUB_REQUESTS)
+      and not any(m == "PUT" or (m == "PATCH" and "labels" in (body or {})) for m, body in GITHUB_REQUESTS),
+      "no GitHub call in the whole suite replaces the label set (no PUT, no PATCH with labels)")
 
 print(f"\n{'All issue-client checks passed.' if not _failures else f'{_failures} check(s) FAILED.'}")
 sys.exit(1 if _failures else 0)

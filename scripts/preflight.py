@@ -57,6 +57,9 @@ _SANDBOX_IMAGE_VARS = (
 # GitLab access levels: 30 = Developer, the floor for pushing a branch.
 _MIN_PUSH_ACCESS_LEVEL = 30
 
+# Throwaway Actions variable proving write access when no poll heartbeat exists yet.
+_VARIABLE_PROBE = "NESTI_PREFLIGHT_PROBE"
+
 _failures = 0
 _warnings = 0
 
@@ -96,7 +99,7 @@ def check_configuration() -> None:
         value = os.environ.get(name, "")
         if not value.strip():
             _fail(f"{name} present", "missing from .env")
-        if _is_placeholder(value):
+        if _is_placeholder(value) or (name == "NESTI_GITHUB_REPOSITORY" and value.strip().lower() == "owner/repo"):
             _fail(f"{name} configured", f"still a placeholder ({value[:24]!r})")
         shown = value if name.endswith(("URL", "PATH", "PROJECT_ID", "REPOSITORY")) else f"set ({len(value)} chars)"
         _ok(name, shown)
@@ -231,7 +234,7 @@ def _github_get(session, url: str, label: str, allowed: tuple[int, ...] = ()) ->
 
 
 def check_github() -> None:
-    from github_issues_client import api_session, api_url  # a GitLab run never needs it
+    from github_issues_client import _POLL_HEARTBEAT_VARIABLE, api_session, api_url  # a GitLab run never needs it
 
     print(f"\n── {forge.term('forge')} ──")
     repo = _project_info(forge.issue_client(), "GitHub repository reachable")
@@ -251,7 +254,26 @@ def check_github() -> None:
                 _fail("Target branch exists",
                       f"{branch!r} is not a branch of {forge.path()} – check NESTI_GITHUB_DEFAULT_BRANCH")
             _ok("Target branch", f"{branch} (empty repository; the first run creates it)")
-        variables = _github_get(session, f"{base}/actions/variables?per_page=1", "Actions variables", (403, 404))
+        heartbeat = f"{base}/actions/variables/{_POLL_HEARTBEAT_VARIABLE}"
+        variables = _github_get(session, heartbeat, "Actions variables", (403, 404))
+        try:
+            if variables.ok:
+                # The unchanged value proves write access; a running poller still reads its own heartbeat.
+                variables = session.patch(heartbeat, json={"name": _POLL_HEARTBEAT_VARIABLE,
+                                                           "value": variables.json()["value"]},
+                                          timeout=_REQUEST_TIMEOUT)
+            elif variables.status_code == 404:
+                # No poller ran yet: probe with a throwaway variable rather than seed a fake heartbeat.
+                variables = session.post(f"{base}/actions/variables",
+                                         json={"name": _VARIABLE_PROBE, "value": "preflight"},
+                                         timeout=_REQUEST_TIMEOUT)
+                if variables.ok or variables.status_code == 409:  # 409: an earlier run's probe is left over
+                    variables = session.delete(f"{base}/actions/variables/{_VARIABLE_PROBE}",
+                                               timeout=_REQUEST_TIMEOUT)
+            problem = None if variables.ok else (
+                f"HTTP {variables.status_code} – needs the Variables: read and write permission")
+        except Exception as exc:  # pylint: disable=broad-except
+            problem = f"{type(exc).__name__}: {exc}"
 
     if repo.get("delete_branch_on_merge"):
         _ok("Delete head branches", "on")
@@ -259,12 +281,11 @@ def check_github() -> None:
         _warn("Delete head branches",
               "off – merged PR branches stay; Nesti does not change the setting "
               "(Settings → General → Pull Requests)")
-    if variables.ok:
-        _ok("Actions variables", "readable (poll heartbeat)")
+    if problem is None:
+        _ok("Actions variables", "writable (poll heartbeat)")
     else:
         _warn("Actions variables",
-              f"HTTP {variables.status_code} – no Variables permission; the poll heartbeat "
-              "warns once and runs without it")
+              f"{problem}; the second-poller check is skipped and a warning is logged on every poll")
 
 
 def check_llm() -> None:

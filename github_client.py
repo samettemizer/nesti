@@ -64,6 +64,8 @@ class GitHubClient(git_auth.GitRepoClient):
         response = self._session.post(f"{self._repo_api}/pulls", json=payload, timeout=_REQUEST_TIMEOUT)
         if response.status_code in (200, 201):
             pr = self._mr_shape(response.json())
+            if not pr["web_url"]:
+                raise RuntimeError(f"{forge.term('mr')} opened from {branch_name} came back without an html_url.")
         elif response.status_code == 422 and "already exists" in response.text:
             pr = self._open_pull(branch_name)
         else:

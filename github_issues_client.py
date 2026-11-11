@@ -202,10 +202,7 @@ class GitHubIssuesClient:
                 f"{self._repo_api}/issues/{number}/comments",
                 json={"body": fit_body(body)}, timeout=_REQUEST_TIMEOUT,
             )
-            if response.status_code not in (200, 201):
-                logger.warning("Could not comment on issue #%s – HTTP %s",
-                               number, response.status_code)
-                return False
+            raise_for_status(response)
             return True
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("Could not comment on issue #%s: %s", number, exc)
@@ -377,13 +374,15 @@ class GitHubIssuesClient:
 
         Not atomic; the order is fixed so a half-done close leaves the issue
         closed and still locked (never back in the pending pool). With
-        *require_note* a failed comment aborts before the issue closes.
+        *require_note* a failed comment aborts before the issue closes. An
+        already closed issue keeps its state and state reason.
         """
         if note and not self._comment(iid, note) and require_note:
             logger.error("Issue #%s left open: the required note was not posted.", iid)
             return False
         try:
-            self._patch(iid, {"state": "closed", "state_reason": "completed"})
+            if self._get_raw(iid).get("state") != "closed":
+                self._patch(iid, {"state": "closed", "state_reason": "completed"})
             self._remove_label(iid, self.in_progress_label)
             updated = self._get_raw(iid)
         except Exception as exc:  # pylint: disable=broad-except
@@ -407,7 +406,8 @@ class GitHubIssuesClient:
             logger.error("Issue #%s not handed off: %s, so it would never be pending.", iid, reason)
             return False
         try:
-            self._patch(iid, {"body": (raw.get("body") or "").rstrip() + "\n\n" + appendix.strip() + "\n"})
+            body = fit_body((raw.get("body") or "").rstrip() + "\n\n" + appendix.strip() + "\n")
+            self._patch(iid, {"body": body})
             self._add_label(iid, self.issue_label)
             updated = self._get_raw(iid)
         except Exception as exc:  # pylint: disable=broad-except
@@ -415,7 +415,7 @@ class GitHubIssuesClient:
             return False
         if (updated.get("state") != "open"
                 or self.issue_label not in self._labels(updated)
-                or not _normalise_text(updated.get("body")).endswith(_normalise_text(appendix.strip()))):
+                or _normalise_text(updated.get("body")) != _normalise_text(body)):
             logger.error("Issue #%s hand-off did not read back.", iid)
             return False
         logger.info("Issue #%s handed off (label %r added).", iid, self.issue_label)
@@ -433,13 +433,12 @@ class GitHubIssuesClient:
         ]
 
     def post_note(self, iid: int, body: str) -> int:
-        """Post one comment (fitted to the body limit), verify it by GET; return its id. Raises RuntimeError."""
+        """Post one comment (fitted to the body limit), verify it by GET; return its id. Raises on failure."""
         body = fit_body(body)
         response = self.session.post(
             f"{self._repo_api}/issues/{iid}/comments", json={"body": body}, timeout=_REQUEST_TIMEOUT
         )
-        if not 200 <= response.status_code < 300:
-            raise RuntimeError(f"Note on issue #{iid} failed: HTTP {response.status_code}")
+        raise_for_status(response)
         note_id = response.json().get("id")
         if not isinstance(note_id, int) or isinstance(note_id, bool) or note_id <= 0:
             raise RuntimeError(f"Note on issue #{iid} returned no id")
@@ -559,16 +558,17 @@ class GitHubIssuesClient:
         """
         Create one issue (exactly one POST, never retried) and verify it.
 
-        Returns the normalised read-back; raises RuntimeError on a non-2xx
-        answer or a read-back that lacks the title, description or labels
-        (GitHub silently drops labels for a token without push rights).
+        The description is fitted to the body limit. Returns the normalised
+        read-back; raises ``requests.HTTPError`` on a non-2xx answer and
+        RuntimeError on a read-back that lacks the title, description or
+        labels (GitHub silently drops labels for a token without push rights).
         """
+        description = fit_body(description)
         payload: dict = {"title": title, "body": description}
         if labels:
             payload["labels"] = list(labels)
         response = self.session.post(f"{self._repo_api}/issues", json=payload, timeout=_REQUEST_TIMEOUT)
-        if not 200 <= response.status_code < 300:
-            raise RuntimeError(f"Issue creation failed: HTTP {response.status_code}: {response.text[:300]}")
+        raise_for_status(response)
         number = response.json().get("number")
         if type(number) is not int or number <= 0:
             raise RuntimeError("Issue creation returned no number")

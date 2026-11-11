@@ -62,6 +62,7 @@ import math
 import os
 from pathlib import Path
 
+import forge
 from issue_scope import SCOPES, documentation_request
 from skill_loader import Skill, format_skills_for_prompt
 
@@ -759,7 +760,7 @@ def _format_solutions_section(solutions: "list[dict] | None", char_budget: int) 
     for solution in solutions:
         header = (
             f"### Issue #{solution.get('issue_id', '?')}: {solution.get('subject', '')}  "
-            f"(similarity {solution.get('similarity', 0)}, MR {solution.get('mr_url', '')})\n"
+            f"(similarity {solution.get('similarity', 0)}, {forge.term('mr')} {solution.get('mr_url', '')})\n"
         )
         plan = (solution.get("plan") or "").strip()
         if not plan:

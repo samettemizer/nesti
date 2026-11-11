@@ -214,6 +214,15 @@ check(mr["web_url"] == pr["html_url"]
       and gh._session.calls[1][2] == {"head": "acme:feature/issue-7-add-thing", "state": "open"},
       "422 already exists returns the open PR for owner:branch")
 
+import graph.tools as tools  # noqa: E402
+for answer, get, case in ((_Response({"message": "A pull request already exists for acme:b."}, 422), [_Response([])],
+                           "422 already exists whose lookup finds no open PR"),
+                          (_Response({"number": 12}, 201), [], "201 without html_url")):
+    gh._session = _Session(post=[answer], get=get)
+    with patch.object(tools.forge, "repo_client", lambda: gh):
+        check(tools.tool_gitlab_open_mr("b", 7, "Add thing", "d")["success"] is False,
+              f"{case} fails the open-MR tool")
+
 provider = "**AI provider:** claude — subscription (model `opus`)"
 gh._session = _Session(post=[_Response(pr, 201)])
 gh.open_merge_request("b", 7, "Add thing", f"## Summary\n{provider}\n\n" + "z" * 70_000 + "\n\nTEST TAIL")

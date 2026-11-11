@@ -20,7 +20,7 @@ Return shape convention (all tools follow this):
 
 Notes
 ─────
-• GitLabClient.create_branch / commit_and_push operate on a ``git.Repo``
+• The repository client's create_branch / commit_and_push operate on a ``git.Repo``
   object.  Because MCP tools may only accept plain arguments, these wrappers
   re-open the repository from ``repo_path`` internally.
 
@@ -32,7 +32,7 @@ Notes
 • tool_laravel_bootstrap and tool_starter_kit are the only tools that *write*
   into the repository besides DockerRunner.write_files.  They apply the
   templates shipped in ``templates/laravel/`` and ``templates/starter/``: a
-  greenfield GitLab repository becomes a Laravel 13 API in ``webservice/``, and
+  greenfield repository becomes a Laravel 13 API in ``webservice/``, and
   a SPA-less Laravel API gains a Sakai PrimeVue SPA, inside a single run.
 """
 
@@ -95,7 +95,7 @@ _API_TOUCH_RE = re.compile(
 )
 
 # Written by the openapi recipe; storage/app is git-ignored by Laravel, so the
-# route dump never lands in the Merge Request.
+# route dump never lands in the MR/PR.
 _ROUTE_DUMP_REL = "storage/app/nesti-routes.json"
 
 # HTTP verbs Laravel registers implicitly; they never appear in OpenAPI.
@@ -142,14 +142,14 @@ _PACKAGE_DEV_DEPENDENCIES = {
 _PACKAGE_SCRIPTS = {"test": "vitest run"}
 
 # The Laravel 13 skeleton does not ignore the sqlite file the sandbox creates,
-# so without this the database would land in the Merge Request.  openapi.json
+# so without this the database would land in the MR/PR.  openapi.json
 # is deliberately absent: it is a committed deliverable.
 _GITIGNORE_LINES = ("/database/*.sqlite*", "/.phpunit.cache")
 
 _VALID_STACKS = ("php", "vue", "fullstack")
 
-# Intake lifecycle vocabulary. GitLab has no "in progress" or "paused" issue
-# state, so GitLabIssuesClient expresses these words as labels plus
+# Intake lifecycle vocabulary. Neither forge has an "in progress" or "paused"
+# issue state, so the issue clients express these words as labels plus
 # open/closed — the strings stay stable so every node and MCP client is
 # unaffected.
 _VALID_STATUSES = ("in_progress", "closed", "new", "paused")
@@ -168,7 +168,7 @@ def _err(message) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Issue intake tools (GitLab Issues)
+# Issue intake tools (the forge's issues)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tool_issue_get(issue_id: int) -> dict:
@@ -206,7 +206,7 @@ def tool_issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
     result: {"issue_id": int, "status": str}
 
     The vocabulary is deliberately the words the pipeline has always used;
-    GitLab expresses them as labels plus open/closed state:
+    the forges express them as labels plus open/closed state:
       in_progress → add    <label>::in-progress (only while the issue is pending)
       closed      → remove <label>::in-progress, close, comment
       new         → remove <label>::in-progress, reopen, comment (back to the
@@ -420,7 +420,7 @@ def tool_gitlab_commit_and_push(repo_path: str, branch_name: str, message: str) 
 
 
 def tool_gitlab_open_mr(branch_name: str, issue_id: int, subject: str, description: str) -> dict:
-    """Open a GitLab Merge Request.  result: {"mr_url": str, "mr": dict}."""
+    """Open a Merge Request (GitLab) or Pull Request (GitHub).  result: {"mr_url": str, "mr": dict}."""
     try:
         mr = forge.repo_client().open_merge_request(
             branch_name=branch_name,
@@ -670,7 +670,7 @@ def _merge_package_json(repo_path: str) -> list[str]:
             data = json.loads(raw) or {}
         except Exception as exc:  # pylint: disable=broad-except
             raise ValueError(f"package.json is not valid JSON: {exc}") from exc
-        # Keep a foreign repository's indentation so the MR diff stays minimal.
+        # Keep a foreign repository's indentation so the MR/PR diff stays minimal.
         if match := re.search(r"\n( +)\"", raw):
             indent = len(match.group(1))
 

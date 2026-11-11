@@ -21,14 +21,14 @@ frontend-only change never runs PHPUnit, and a change that did not touch the
 API surface never pays for a Scramble export.
 
 TaskEngine only:
-  1. Polls GitLab Issues for the next pending issue (via graph.tools – no
-     direct GitLabIssuesClient / GitLabClient / DockerRunner imports here).
+  1. Polls the forge's issues for the next pending issue (via graph.tools – no
+     direct issue client / repository client / DockerRunner imports here).
   2. Seeds the initial IssueState and invokes the compiled graph.
   3. Acts as the crash net: if the graph itself raises, the issue is
      reopened and a Telegram alert is sent (a paused issue refuses that
      reopen, so a crash never undoes a hold).
-  4. In loop mode, swaps the project's poll heartbeat (a GitLab CI/CD
-     variable) first and alerts when another instance polls the same project.
+  4. In loop mode, swaps the project's poll heartbeat (a GitLab CI/CD or GitHub
+     Actions variable) first and alerts when another instance polls the same project.
 
 main.py constructs TaskEngine(poll_interval=…) and calls run_once().
 """
