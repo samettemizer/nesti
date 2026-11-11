@@ -36,6 +36,8 @@ gitlab_issues_client.py      issue intake + label lock; gitlab_client.py: repo +
 forge.py                     forge client Protocols + factory (NESTI_FORGE, default gitlab), display words
                              (term), acted-on project: .env (orchestrator) or the MCP client's git remote;
                              identity() scopes every per-issue Redis key
+git_auth.py                  forge-neutral git auth: per-call http.extraHeader env (never in the remote
+                             URL / .git/config) + credential redaction of git error text
 skill_catalog.py             offline corpus selection; skill_loader.py: issue URLs
 embedding.py, vector_store.py, semantic_cache.py   vector memory
 reranker.py                  opt-in CPU rerank of retrieved docs (NESTI_RERANKER_ENABLED);

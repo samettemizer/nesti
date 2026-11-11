@@ -411,6 +411,9 @@ def tool_gitlab_commit_and_push(repo_path: str, branch_name: str, message: str) 
         repo = git.Repo(repo_path)
         pushed = forge.repo_client().commit_and_push(repo, branch_name, message)
         return _ok({"pushed": pushed})
+    except forge.OpenMergeRequestError as exc:
+        logger.warning("tool_gitlab_commit_and_push(%s) stopped: %s", branch_name, exc)
+        return {**_err(exc), "mr_url": exc.url}
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_gitlab_commit_and_push(%s) failed: %s", branch_name, exc)
         return _err(exc)

@@ -3446,6 +3446,161 @@ with tempfile.TemporaryDirectory(prefix="nesti-s35-") as s35:
         GitLabClient().clone(str(Path(s35, "second")))
         check(len(list(_bare.iter_commits("main"))) == 1, "cloning a non-empty repository adds no commit")
 
+# ═════ G0b: token-less git, redaction, verified push, existing remote branch ═════
+print("\n── G0b: token-less git, redaction, verified push, existing remote branch ──")
+import base64  # noqa: E402
+import gitlab_client  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+_G0B_TOKEN = "glpat-G0bSecretToken"
+
+
+def _g0b_env(root, ssh):
+    """HTTPS mode clones file://<root>/acme/shop.git; SSH mode clones the same bare path directly."""
+    return {"GITLAB_URL": f"file://{root}", "GITLAB_TOKEN": _G0B_TOKEN, "GITLAB_PROJECT_PATH": "acme/shop",
+            "GITLAB_USE_SSH": str(ssh).lower(), "GITLAB_REPO_SSH": str(Path(root, "acme", "shop.git")),
+            "GITLAB_DEFAULT_BRANCH": "main"}
+
+
+def _g0b_setup(root):
+    """An empty bare origin, cloned by GitLabClient (initial commit pushed), on an issue branch."""
+    bare = _git.Repo.init(Path(root, "acme", "shop.git"), bare=True, mkdir=True)
+    client = gitlab_client.GitLabClient()
+    repo = client.clone(str(Path(root, "clone")))
+    return bare, client, repo, client.create_branch(repo, 7, "Add thing")
+
+
+def _g0b_sha(bare, branch):
+    return bare.git.for_each_ref("--format=%(objectname)", f"refs/heads/{branch}")
+
+
+def _g0b_leftover(repo, branch):
+    """Push an earlier run's commit to *branch*, then reset the clone back to main."""
+    Path(repo.working_tree_dir, "old.txt").write_text("old run")
+    repo.git.add(A=True)
+    repo.git.commit("-m", "leftover")
+    repo.git.push("origin", f"{branch}:{branch}")
+    sha = repo.head.commit.hexsha
+    repo.git.reset("--hard", "main")
+    return sha
+
+
+def _g0b_mrs(items):
+    """A requests.Session.get stand-in answering the open-MR lookup with *items*."""
+    response = MagicMock()
+    response.json.return_value = items
+    return MagicMock(return_value=response)
+
+
+# G0b item 1 (+ Y6): HTTPS mode keeps the token out of .git/config.
+with tempfile.TemporaryDirectory(prefix="nesti-g0b-") as _root, \
+        patch.dict(os.environ, {**_g0b_env(_root, ssh=False),
+                                "NESTI_GIT_AUTHOR_NAME": "", "NESTI_GIT_AUTHOR_EMAIL": ""}):
+    _bare, _client, _repo, _branch = _g0b_setup(_root)
+    check(len(list(_bare.iter_commits("main"))) == 1,
+          "HTTPS mode: an empty repository still gets its initial commit on main")
+    Path(_repo.working_tree_dir, "thing.txt").write_text("thing")
+    check(_client.commit_and_push(_repo, _branch, "feat: thing")
+          and _g0b_sha(_bare, _branch) == _repo.head.commit.hexsha, "HTTPS mode: the issue branch is pushed")
+    check(_repo.remote("origin").url == f"file://{_root}/acme/shop.git"
+          and _G0B_TOKEN not in Path(_repo.git_dir, "config").read_text(),
+          "HTTPS mode: the remote URL is token-less and .git/config holds no token after clone + push")
+    _cfg = _repo.config_reader()
+    check((_cfg.get_value("user", "name"), _cfg.get_value("user", "email"))
+          == ("AI Developer", "nesti@yourdomain.com"),
+          "empty NESTI_GIT_AUTHOR_NAME/EMAIL fall back to AI Developer <nesti@yourdomain.com>")
+
+# G0b item 2: the auth header goes through the per-call environment; git error text is redacted.
+import git_auth  # noqa: E402
+with patch.dict(os.environ, {"GITLAB_URL": "https://gitlab.test", "GITLAB_TOKEN": _G0B_TOKEN,
+                             "GITLAB_USE_SSH": "false"}):
+    _gl = gitlab_client.GitLabClient()
+_basic = base64.b64encode(f"oauth2:{_G0B_TOKEN}".encode()).decode()
+_header = f"Authorization: Basic {_basic}"
+check(_gl._git_env == git_auth.env("https://gitlab.test/", _header),
+      "GitLab sends install.sh's header (Basic base64(oauth2:<token>)), scoped to the GitLab URL")
+check(_git.Git().config("--get-urlmatch", "http.extraHeader", "https://gitlab.test/acme/shop.git",
+                        env=_gl._git_env) == _header, "git_auth.env reaches git for the forge URL")
+try:
+    _git.Git().config("--get-urlmatch", "http.extraHeader", "https://other.test/acme/shop.git", env=_gl._git_env)
+    _leaks = True
+except _git.GitCommandError:
+    _leaks = False
+check(not _leaks, "the auth header is never configured for another host")
+_masked = git_auth.redact(f"error 1 of 1: 'https://oauth2:{_G0B_TOKEN}@gitlab.test/a.git' '{_header}' "
+                          f"{_basic} {_G0B_TOKEN}", *_gl._git_secrets)
+check("1" in _basic and _masked == "error 1 of 1: 'https://***@gitlab.test/a.git' '***' *** ***",
+      "redact masks URL userinfo, the whole header, the credential and the token; other text stays intact")
+
+# G0b item 3: a rejected push raises instead of logging "Pushed".
+with tempfile.TemporaryDirectory(prefix="nesti-g0b-") as _root, \
+        patch.dict(os.environ, _g0b_env(_root, ssh=True)):
+    _bare, _client, _repo, _branch = _g0b_setup(_root)
+    _hook = Path(_bare.git_dir, "hooks", "pre-receive")
+    _hook.write_text("#!/bin/sh\nexit 1\n")
+    _hook.chmod(0o755)
+    Path(_repo.working_tree_dir, "thing.txt").write_text("thing")
+    try:
+        _client.commit_and_push(_repo, _branch, "feat: thing")
+        _raised = False
+    except RuntimeError:
+        _raised = True
+    check(_raised and not _g0b_sha(_bare, _branch), "a push the remote rejects raises")
+
+# G0b item 4a: a leftover remote branch without an open MR is overwritten (leased).
+with tempfile.TemporaryDirectory(prefix="nesti-g0b-") as _root, \
+        patch.dict(os.environ, {**_g0b_env(_root, ssh=True), "NESTI_GIT_AUTHOR_NAME": "Nesti Bot",
+                                "NESTI_GIT_AUTHOR_EMAIL": "bot@example.invalid"}):
+    _bare, _client, _repo, _branch = _g0b_setup(_root)
+    _old = _g0b_leftover(_repo, _branch)
+    Path(_repo.working_tree_dir, "thing.txt").write_text("thing")
+    with patch("requests.Session.get", _g0b_mrs([])):
+        _client.commit_and_push(_repo, _branch, "feat: thing")
+    check(_g0b_sha(_bare, _branch) == _repo.head.commit.hexsha != _old,
+          "a leftover remote branch without an open MR is overwritten")
+    _author = _bare.commit(_g0b_sha(_bare, _branch)).author
+    check((_author.name, _author.email) == ("Nesti Bot", "bot@example.invalid"),
+          "NESTI_GIT_AUTHOR_NAME/EMAIL author the pushed commit")
+
+# G0b item 4a': an open MR listed without its link fails closed (no force push).
+with tempfile.TemporaryDirectory(prefix="nesti-g0b-") as _root, \
+        patch.dict(os.environ, _g0b_env(_root, ssh=True)):
+    _bare, _client, _repo, _branch = _g0b_setup(_root)
+    _old = _g0b_leftover(_repo, _branch)
+    for _n, _mr in enumerate(({"iid": 7}, {"iid": 7, "web_url": None})):
+        Path(_repo.working_tree_dir, f"thing{_n}.txt").write_text("thing")
+        try:
+            with patch("requests.Session.get", _g0b_mrs([_mr])):
+                _client.commit_and_push(_repo, _branch, "feat: thing")
+            _raised = False
+        except RuntimeError:
+            _raised = True
+        check(_raised and _g0b_sha(_bare, _branch) == _old, f"an open MR {_mr} without a web_url stops the push")
+
+# G0b item 4b: an open MR on the branch stops the run before push; the note links it.
+with tempfile.TemporaryDirectory(prefix="nesti-g0b-") as _root, \
+        patch.dict(os.environ, _g0b_env(_root, ssh=True)):
+    _bare, _client, _repo, _branch = _g0b_setup(_root)
+    _old = _g0b_leftover(_repo, _branch)
+    Path(_repo.working_tree_dir, "thing.txt").write_text("thing")
+    _url = "https://gitlab.test/acme/shop/-/merge_requests/7"
+    _notes, _opened, _get = [], [], _g0b_mrs([{"web_url": _url}])
+    with patch("requests.Session.get", _get), \
+            patch.object(nodes, "tool_gitlab_commit_and_push", _gt.tool_gitlab_commit_and_push), \
+            patch.object(nodes, "tool_gitlab_open_mr",
+                         lambda **kw: _opened.append(kw) or {"success": False, "error": "unexpected"}), \
+            patch.object(nodes, "tool_issue_set_status",
+                         lambda issue_id, status, note="": _notes.append((status, note)) or {"success": True}):
+        nodes.node_commit({"issue_id": 7, "subject": "Add thing", "repo_path": _repo.working_tree_dir,
+                           "branch_name": _branch, "base_sha": _repo.heads.main.commit.hexsha,
+                           "issue": {"subject": "Add thing", "description": "d"}, "run_id": "g0b"})
+    check(_g0b_sha(_bare, _branch) == _old and not _opened, "an open MR on the branch: nothing pushed, no MR opened")
+    check(len(_notes) == 1 and _notes[0][0] == "new" and _url in _notes[0][1]
+          and "NESTI_FAILED_RUN_V1" in _notes[0][1],
+          "the reopen note links the open MR and carries the failed-run marker")
+    check(_get.call_args.kwargs["params"] == {"source_branch": _branch, "state": "opened"},
+          "the open-MR lookup asks GitLab for open MRs from the issue branch")
+
 
 def _git_clone(setup):
     """A fake clone: *setup* writes the tree, then one initial commit (empty for greenfield)."""

@@ -67,6 +67,14 @@ class RepoClient(Protocol):
     ) -> dict | None: ...
 
 
+class OpenMergeRequestError(RuntimeError):
+    """The issue branch is already under an open merge/pull request; nothing was pushed."""
+
+    def __init__(self, message: str, url: str) -> None:
+        super().__init__(message)
+        self.url = url
+
+
 def kind() -> str:
     """The configured forge (``NESTI_FORGE``, default ``gitlab``); ``ValueError`` for an unsupported one."""
     value = os.environ.get("NESTI_FORGE", "").strip().lower() or "gitlab"

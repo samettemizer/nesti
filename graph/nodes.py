@@ -1763,7 +1763,14 @@ def node_commit(state: IssueState) -> dict:
             f"💥 Commit/push failed for issue <b>#{issue_id}</b> – "
             f"<i>{subject}</i>\n<code>{pushed['error']}</code>"
         )
-        tool_issue_set_status(issue_id, "new", note=f"AI Developer crashed: {pushed['error']}")
+        note = f"AI Developer crashed: {pushed['error']}"
+        if pushed.get("mr_url") and state.get("base_sha"):
+            # The open MR stays until a human acts; re-running every poll would only repeat this note.
+            issue = state.get("issue") or {}
+            note += "\n\n" + failed_run_marker(
+                issue.get("subject", "") or "", issue.get("description", "") or "", state["base_sha"]
+            )
+        tool_issue_set_status(issue_id, "new", note=note)
         logger.debug("← node_commit (push error)")
         return {"failure_reason": reason, "error": pushed["error"]}
 
