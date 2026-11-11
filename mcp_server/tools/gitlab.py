@@ -1,6 +1,6 @@
-"""mcp_server/tools/gitlab.py – GitLab tools exposed over MCP.
+"""mcp_server/tools/gitlab.py – GitLab or GitHub repository tools exposed over MCP.
 
-Thin wrappers around the GitLab functions in ``graph/tools.py``.  All git
+Thin wrappers around the repository functions in ``graph/tools.py``.  All git
 state is re-opened from ``repo_path`` inside the underlying tools, so every
 call here works with plain string/int arguments only.
 """
@@ -16,7 +16,7 @@ from graph.tools import (
 
 @app.tool()
 def gitlab_clone(target_path: str) -> dict:
-    """Clone the configured GitLab repository into target_path."""
+    """Clone the client's GitLab or GitHub repository into target_path."""
     return tool_gitlab_clone(target_path)
 
 
@@ -43,7 +43,7 @@ def gitlab_open_merge_request(
     description: str = "",
 ) -> dict:
     """
-    Open a GitLab Merge Request from branch_name into the default branch.
-    Returns the MR web_url on success.
+    Open a GitLab Merge Request / GitHub Pull Request (MR/PR) from branch_name
+    into the default branch. Returns the MR/PR web_url on success.
     """
     return tool_gitlab_open_mr(branch_name, issue_id, subject, description)

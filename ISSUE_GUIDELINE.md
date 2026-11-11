@@ -1,7 +1,7 @@
-# GitLab Issue Writing Guideline
+# Issue Writing Guideline
 
-This document explains how to write GitLab issues for Nesti and how the
-orchestrator interprets them.
+This document explains how to write GitLab or GitHub issues for Nesti and how
+the orchestrator interprets them.
 
 ---
 
@@ -37,25 +37,30 @@ removes an unnecessary translation layer.
 
 ## The Label Workflow
 
-Nesti uses GitLab Issues for task intake. Intake is **opt-in by label** — an
-unlabelled issue is treated as human discussion and never touched.
+Nesti uses GitLab Issues or GitHub Issues (`NESTI_FORGE`) for task intake.
+Intake is **opt-in by label** — an unlabelled issue is treated as human
+discussion and never touched.
 
 ### How it works
 
-1. **Opt in.** Add the label configured by `GITLAB_ISSUE_LABEL` (default:
-   `nesti`) to your issue. Without this label Nesti will never see the issue.
+1. **Opt in.** Add the label configured by `GITLAB_ISSUE_LABEL` (GitHub:
+   `NESTI_GITHUB_ISSUE_LABEL`; default: `nesti`) to your issue. Without this
+   label Nesti will never see the issue.
 2. **Pickup.** The orchestrator polls the project and processes **one issue at
    a time, oldest `iid` first**, among issues that are open, carry the opt-in
    label, and do **not** carry the lock label. The issue text is captured at
    pickup; edits made after this point are invisible to the running job.
 3. **Lock.** Nesti adds the scoped label `nesti::in-progress`. This is Nesti's
-   lock — do not add or remove it by hand while a run is active. GitLab scoped
-   labels (the `::` form) are mutually exclusive within their scope, so the
-   lock is always single-valued.
+   lock — do not add or remove it by hand while a run is active. On GitLab,
+   scoped labels (the `::` form) are mutually exclusive within their scope, so
+   the lock is always single-valued.
 4. **Success.** Nesti removes the lock label, posts a comment containing the
    Merge Request URL, and closes the issue. The MR body starts with the GitLab
    closing keyword `Closes #<iid>`, so the issue and MR are cross-linked
-   automatically.
+   automatically. On GitHub Nesti opens a Pull Request instead; its
+   `Closes #<number>` links and auto-closes the issue only when the PR targets
+   the repository's default branch, and Nesti closes the issue itself when the
+   PR opens either way.
 5. **Failure.** After all retries are exhausted (or after an unexpected crash),
    Nesti removes the lock label and posts a failure comment with the last test
    output. The issue returns to the pending pool. After failed coding
@@ -79,6 +84,18 @@ Issue numbers throughout this guide and in Nesti's logs are the project-scoped
 
 One issue produces at most one Merge Request. Unrelated features belong in
 separate issues.
+
+### On GitHub
+
+- **Author trust.** Only issues whose author is an `OWNER`, `MEMBER` or
+  `COLLABORATOR` of the repository are picked up; an opted-in issue from
+  anyone else is skipped. To run an outside request, a maintainer re-opens it
+  as a new issue under their own name. Organization members with private
+  membership can appear to the bot as `CONTRIBUTOR` or `NONE`: make the
+  membership public or add them as collaborators.
+- **No scoped labels.** `nesti::in-progress` and `nesti::pause` are plain
+  labels, not mutually exclusive. An issue carrying both is treated as
+  paused.
 
 ---
 

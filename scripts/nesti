@@ -2,7 +2,7 @@
 # Host-side `nesti`: forwards to the container CLI; /arch (static file) and /stats (live nesti-stats page) then open in a new host browser window.
 set -e
 if [ "${1-}" = mcp ]; then
-    # MCP acts on the GitLab project of the client's checkout: the cwd, or the directory given.
+    # MCP acts on the GitLab project or GitHub repository of the client's checkout: the cwd, or the directory given.
     NESTI_CLIENT_REMOTE=$(git -C "${2:-.}" remote get-url origin 2>/dev/null || true)
     export NESTI_CLIENT_REMOTE
     exec docker exec -i -e NESTI_CLIENT_REMOTE nesti-mcp python -m mcp_server.server

@@ -21,14 +21,14 @@ frontend-only change never runs PHPUnit, and a change that did not touch the
 API surface never pays for a Scramble export.
 
 TaskEngine only:
-  1. Polls GitLab Issues for the next pending issue (via graph.tools – no
-     direct GitLabIssuesClient / GitLabClient / DockerRunner imports here).
+  1. Polls the forge's issues for the next pending issue (via graph.tools – no
+     direct issue client / repository client / DockerRunner imports here).
   2. Seeds the initial IssueState and invokes the compiled graph.
   3. Acts as the crash net: if the graph itself raises, the issue is
      reopened and a Telegram alert is sent (a paused issue refuses that
      reopen, so a crash never undoes a hold).
-  4. In loop mode, swaps the project's poll heartbeat (a GitLab CI/CD
-     variable) first and alerts when another instance polls the same project.
+  4. In loop mode, swaps the project's poll heartbeat (a GitLab CI/CD or GitHub
+     Actions variable) first and alerts when another instance polls the same project.
 
 main.py constructs TaskEngine(poll_interval=…) and calls run_once().
 """
@@ -49,7 +49,7 @@ from graph.tools import (
     tool_issue_reconcile_domain_questions,
     tool_issue_swap_poll_heartbeat,
 )
-import gitlab_project
+import forge
 import stats
 from telegram_notifier import notify as telegram_notify
 
@@ -92,7 +92,7 @@ class TaskEngine:
         if self._foreign_polls == _FOREIGN_POLLS_TO_WARN:
             message = (
                 f"Multiple Nesti instances are running for the same project "
-                f"{gitlab_project.identity()}: this instance {self._instance}, "
+                f"{forge.identity()}: this instance {self._instance}, "
                 f"other instance {other}."
             )
             logger.warning(message)
@@ -117,7 +117,7 @@ class TaskEngine:
         # ── 2. Fetch next pending issue ───────────────────────────────────
         listing = tool_issue_list_pending()
         if not listing["success"]:
-            logger.error("Failed to query GitLab for pending issues: %s", listing["error"])
+            logger.error(f"Failed to query {forge.term('forge')} for pending issues: %s", listing["error"])
             return False
 
         issues = listing["result"]
@@ -193,10 +193,10 @@ class TaskEngine:
                 config={"recursion_limit": max(25, 17 + 9 * max_attempts)},
             )
             if final_state.get("mr_url"):
-                logger.info("Issue #%s done – MR: %s", issue_id, final_state["mr_url"])
+                logger.info(f"Issue #%s done – {forge.term('mr')}: %s", issue_id, final_state["mr_url"])
                 return True
             logger.info(
-                "Issue #%s finished without MR: %s",
+                f"Issue #%s finished without {forge.term('mr')}: %s",
                 issue_id,
                 final_state.get("failure_reason") or final_state.get("error") or "unknown",
             )
