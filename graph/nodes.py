@@ -79,7 +79,8 @@ from graph.tools import (
     tool_issue_domain_answer, tool_issue_ask_domain, tool_app_facts,
     _STACK_SCAN_PRUNE,
 )
-from gitlab_issues_client import failed_run_marker
+import forge
+from forge import failed_run_marker
 from issue_domain import classify as classify_domain, detect as detect_domain, domain_catalog, selection
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
@@ -999,7 +1000,7 @@ def node_detect_domain(state: IssueState) -> dict:
     issue_id = state["issue_id"]
 
     def log(value: str, basis: str) -> None:
-        logger.info("DOMAIN: %s · GitLab issue #%s · %s", value, issue_id, basis)
+        logger.info(f"DOMAIN: %s · {forge.term('forge')} issue #%s · %s", value, issue_id, basis)
 
     if (state.get("layout") or {}).get("backend") is None:
         log("none", "greenfield repository")
@@ -1019,7 +1020,7 @@ def node_detect_domain(state: IssueState) -> dict:
     if not answered["success"]:
         shutil.rmtree(state.get("workspace") or "", ignore_errors=True)
         raise RuntimeError(f"Domain answer lookup failed: {answered['error']}")
-    domains, basis = answered["result"], "answered in GitLab"
+    domains, basis = answered["result"], f"answered in {forge.term('forge')}"
     if not domains:
         decision = detect_domain(subject, description, catalog)
         domains, basis = list(decision.domains), decision.basis
@@ -1104,7 +1105,7 @@ def node_bootstrap(state: IssueState) -> dict:
             basis = f"issue asks for a user interface ({decision.evidence()})"
         else:
             verdict, basis = "skipped", f"no frontend request ({decision.evidence()})"
-    logger.info("STARTER: %s · GitLab issue #%s · %s", verdict, state["issue_id"], basis)
+    logger.info(f"STARTER: %s · {forge.term('forge')} issue #%s · %s", verdict, state["issue_id"], basis)
 
     files = _commit_bootstrap(repo, "Nesti bootstrap\n\n" + "\n".join(reasons))
     logger.debug("← node_bootstrap (created=%s)", detail["created"])
@@ -1162,7 +1163,7 @@ def _log_scope(issue_id: int, scope: str, decision: ScopeDecision, planner: str)
     ("no declaration" / "failed" when there is none).
     """
     logger.info(
-        "SCOPE: %s · GitLab issue #%s · issue text: %s (%s) · planner: %s",
+        f"SCOPE: %s · {forge.term('forge')} issue #%s · issue text: %s (%s) · planner: %s",
         scope, issue_id, decision.scope, decision.evidence(), planner,
     )
 
@@ -1179,7 +1180,7 @@ def _app_facts(state: IssueState, scope: str) -> str:
             verdict, basis = ("exported" if facts else "skipped"), result["result"]["reason"]
         else:
             verdict, basis = "failed", (result["error"].splitlines() or [""])[0]
-    logger.info("APP FACTS: %s · GitLab issue #%s · %s", verdict, state["issue_id"], basis)
+    logger.info(f"APP FACTS: %s · {forge.term('forge')} issue #%s · %s", verdict, state["issue_id"], basis)
     return facts
 
 
@@ -1544,7 +1545,7 @@ def _log_layer_verdict(layer: str, passed: bool, state: IssueState, reason: str 
     misattribute the run.
     """
     message = (
-        f"{layer} %s · GitLab issue #%s · attempt %d/%d · provider: %s · "
+        f"{layer} %s · {forge.term('forge')} issue #%s · attempt %d/%d · provider: %s · "
         "model: %s · %s" + (" · reason: %s" if reason else "")
     )
     args = [
@@ -1762,7 +1763,14 @@ def node_commit(state: IssueState) -> dict:
             f"💥 Commit/push failed for issue <b>#{issue_id}</b> – "
             f"<i>{subject}</i>\n<code>{pushed['error']}</code>"
         )
-        tool_issue_set_status(issue_id, "new", note=f"AI Developer crashed: {pushed['error']}")
+        note = f"AI Developer crashed: {pushed['error']}"
+        if pushed.get("mr_url") and state.get("base_sha"):
+            # The open MR stays until a human acts; re-running every poll would only repeat this note.
+            issue = state.get("issue") or {}
+            note += "\n\n" + failed_run_marker(
+                issue.get("subject", "") or "", issue.get("description", "") or "", state["base_sha"]
+            )
+        tool_issue_set_status(issue_id, "new", note=note)
         logger.debug("← node_commit (push error)")
         return {"failure_reason": reason, "error": pushed["error"]}
 
@@ -1801,13 +1809,13 @@ def node_commit(state: IssueState) -> dict:
     if not mr["success"]:
         # parity: MR failure is logged and run_once returns False;
         # the issue stays in-progress for a human to inspect.
-        logger.error("MR creation failed for issue #%s: %s", issue_id, mr["error"])
+        logger.error(f"{forge.term('mr')} creation failed for issue #%s: %s", issue_id, mr["error"])
         logger.debug("← node_commit (MR failed)")
-        return {"failure_reason": f"MR creation failed: {mr['error']}"}
+        return {"failure_reason": f"{forge.term('mr')} creation failed: {mr['error']}"}
 
     mr_url = mr["result"]["mr_url"]
     tool_issue_set_status(
-        issue_id, "closed", note=f"AI Developer opened MR: {mr_url}"
+        issue_id, "closed", note=f"AI Developer opened {forge.term('mr')}: {mr_url}"
     )
     # self-updating loop: the plan that produced this MR becomes the
     # next similar issue's "past experience".  Episodes die with the run —

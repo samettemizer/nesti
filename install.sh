@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Nesti setup wizard: .env, GitLab check, project checkout, containers, provider logins.
+# Nesti setup wizard: .env, forge check, project checkout, containers, provider logins.
 set -Eeuo pipefail
 
 STEP="start"
@@ -9,7 +9,7 @@ usage() {
     cat <<'EOF'
 Usage: ./install.sh [--yes] [--help]
 
-Configures Nesti for one GitLab project and starts its containers.
+Configures Nesti for one GitLab project or GitHub repository and starts its containers.
 
   --yes   take every default without prompting (defaults come from the
           environment variable of the same name, then .env, then .env.example)
@@ -20,8 +20,9 @@ Checkout paths accept C:/..., C:\..., or /c/...; containers use the
 equivalent /run/desktop/mnt/host/c/... path, saved in .env.
 The Windows launcher preserves Docker arguments in new shell sessions.
 
-Example (non-interactive):
+Examples (non-interactive):
   GITLAB_TOKEN=... GITLAB_PROJECT_PATH=group/project ./install.sh --yes
+  NESTI_FORGE=github NESTI_GITHUB_TOKEN=... NESTI_GITHUB_REPOSITORY=owner/repo ./install.sh --yes
 EOF
 }
 
@@ -173,6 +174,8 @@ yes_no() {
 
 valid_url() { [[ "$1" =~ ^https?://[^/[:space:]]+ ]]; }
 valid_project() { [[ "$1" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]]; }
+valid_repository() { [[ "$1" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "  must be owner/repo" >&2; return 1; }; }
+valid_forge() { [ "$1" = gitlab ] || [ "$1" = github ] || { echo "  choose gitlab or github" >&2; return 1; }; }
 valid_nonempty() { [ -n "$1" ]; }
 # Convert saved Docker Desktop paths back to local paths when re-running setup.
 local_project_path() {
@@ -212,18 +215,43 @@ chmod 600 "$ENV_FILE"
 
 # --- 3. Prompts ----------------------------------------------------------------
 STEP="prompts"
-ask GITLAB_URL "GitLab URL (e.g. https://gitlab.com or https://gitlab.yourdomain.com)" valid_url
-GITLAB_URL=${REPLY_VALUE%/}
-ask_secret GITLAB_TOKEN "GitLab token (api scope)" required
-GITLAB_TOKEN=$REPLY_VALUE
-ask GITLAB_PROJECT_PATH "GitLab project path (namespace/project)" valid_project
-GITLAB_PROJECT_PATH=$REPLY_VALUE
-ask GITLAB_DEFAULT_BRANCH "Default branch" valid_nonempty
-GITLAB_DEFAULT_BRANCH=$REPLY_VALUE
-ask GITLAB_ISSUE_LABEL "Opt-in issue label" valid_nonempty
-GITLAB_ISSUE_LABEL=$REPLY_VALUE
+ask NESTI_FORGE "Forge (gitlab or github)" valid_forge
+NESTI_FORGE=$REPLY_VALUE
+if [ "$NESTI_FORGE" = github ]; then
+    FORGE_NAME=GitHub
+    ask NESTI_GITHUB_URL "GitHub URL" valid_url
+    NESTI_GITHUB_URL=${REPLY_VALUE%/}
+    ask NESTI_GITHUB_API_URL "GitHub API URL" valid_url
+    NESTI_GITHUB_API_URL=${REPLY_VALUE%/}
+    ask_secret NESTI_GITHUB_TOKEN "GitHub token (fine-grained PAT of Nesti's bot account)" required
+    NESTI_GITHUB_TOKEN=$REPLY_VALUE
+    ask NESTI_GITHUB_REPOSITORY "GitHub repository (owner/repo)" valid_repository
+    NESTI_GITHUB_REPOSITORY=$REPLY_VALUE
+    ask NESTI_GITHUB_DEFAULT_BRANCH "Default branch" valid_nonempty
+    NESTI_GITHUB_DEFAULT_BRANCH=$REPLY_VALUE
+    ask NESTI_GITHUB_ISSUE_LABEL "Opt-in issue label" valid_nonempty
+    NESTI_GITHUB_ISSUE_LABEL=$REPLY_VALUE
+    REPO_PATH=$NESTI_GITHUB_REPOSITORY
+    PROJECT_URL="$NESTI_GITHUB_URL/$NESTI_GITHUB_REPOSITORY"
+    ISSUE_LABEL=$NESTI_GITHUB_ISSUE_LABEL
+else
+    FORGE_NAME=GitLab
+    ask GITLAB_URL "GitLab URL (e.g. https://gitlab.com or https://gitlab.yourdomain.com)" valid_url
+    GITLAB_URL=${REPLY_VALUE%/}
+    ask_secret GITLAB_TOKEN "GitLab token (api scope)" required
+    GITLAB_TOKEN=$REPLY_VALUE
+    ask GITLAB_PROJECT_PATH "GitLab project path (namespace/project)" valid_project
+    GITLAB_PROJECT_PATH=$REPLY_VALUE
+    ask GITLAB_DEFAULT_BRANCH "Default branch" valid_nonempty
+    GITLAB_DEFAULT_BRANCH=$REPLY_VALUE
+    ask GITLAB_ISSUE_LABEL "Opt-in issue label" valid_nonempty
+    GITLAB_ISSUE_LABEL=$REPLY_VALUE
+    REPO_PATH=$GITLAB_PROJECT_PATH
+    PROJECT_URL="$GITLAB_URL/$GITLAB_PROJECT_PATH"
+    ISSUE_LABEL=$GITLAB_ISSUE_LABEL
+fi
 
-PROJECT_NAME=${GITLAB_PROJECT_PATH##*/}
+PROJECT_NAME=${REPO_PATH##*/}
 if [ -z "${NESTI_PROJECT_PATH-}" ]; then
     # The saved path only stays the default while it still names this project.
     current_path=$(file_get NESTI_PROJECT_PATH "$ENV_FILE")
@@ -246,18 +274,28 @@ export NESTI_PROJECT_PATH
 ask NESTI_CONSUMER_PRIORITY "Consumer subscriptions priority" valid_consumers
 NESTI_CONSUMER_PRIORITY=$REPLY_VALUE
 
-env_set GITLAB_URL "$GITLAB_URL"
-env_set GITLAB_TOKEN "$GITLAB_TOKEN"
-env_set GITLAB_PROJECT_PATH "$GITLAB_PROJECT_PATH"
-env_set GITLAB_DEFAULT_BRANCH "$GITLAB_DEFAULT_BRANCH"
-env_set GITLAB_ISSUE_LABEL "$GITLAB_ISSUE_LABEL"
+env_set NESTI_FORGE "$NESTI_FORGE"
+if [ "$NESTI_FORGE" = github ]; then
+    env_set NESTI_GITHUB_URL "$NESTI_GITHUB_URL"
+    env_set NESTI_GITHUB_API_URL "$NESTI_GITHUB_API_URL"
+    env_set NESTI_GITHUB_TOKEN "$NESTI_GITHUB_TOKEN"
+    env_set NESTI_GITHUB_REPOSITORY "$NESTI_GITHUB_REPOSITORY"
+    env_set NESTI_GITHUB_DEFAULT_BRANCH "$NESTI_GITHUB_DEFAULT_BRANCH"
+    env_set NESTI_GITHUB_ISSUE_LABEL "$NESTI_GITHUB_ISSUE_LABEL"
+else
+    env_set GITLAB_URL "$GITLAB_URL"
+    env_set GITLAB_TOKEN "$GITLAB_TOKEN"
+    env_set GITLAB_PROJECT_PATH "$GITLAB_PROJECT_PATH"
+    env_set GITLAB_DEFAULT_BRANCH "$GITLAB_DEFAULT_BRANCH"
+    env_set GITLAB_ISSUE_LABEL "$GITLAB_ISSUE_LABEL"
+    GITLAB_HOST=$("${PYTHON[@]}" -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname, end="")' "$GITLAB_URL")
+    GITLAB_REPO_HTTPS="$GITLAB_URL/$GITLAB_PROJECT_PATH.git"
+    GITLAB_REPO_SSH="git@$GITLAB_HOST:$GITLAB_PROJECT_PATH.git"
+    env_set GITLAB_REPO_HTTPS "$GITLAB_REPO_HTTPS"
+    env_set GITLAB_REPO_SSH "$GITLAB_REPO_SSH"
+fi
 env_set NESTI_PROJECT_PATH "$NESTI_PROJECT_PATH"
 env_set NESTI_CONSUMER_PRIORITY "$NESTI_CONSUMER_PRIORITY"
-GITLAB_HOST=$("${PYTHON[@]}" -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname, end="")' "$GITLAB_URL")
-GITLAB_REPO_HTTPS="$GITLAB_URL/$GITLAB_PROJECT_PATH.git"
-GITLAB_REPO_SSH="git@$GITLAB_HOST:$GITLAB_PROJECT_PATH.git"
-env_set GITLAB_REPO_HTTPS "$GITLAB_REPO_HTTPS"
-env_set GITLAB_REPO_SSH "$GITLAB_REPO_SSH"
 
 for api in OPENROUTER ANTHROPIC DEEPSEEK; do
     enabled=$(default_for "${api}_API_ENABLED")
@@ -281,11 +319,68 @@ env_set TELEGRAM_BOT_TOKEN "$REPLY_VALUE"
 ask TELEGRAM_CHAT_ID "Telegram chat id (optional)"
 env_set TELEGRAM_CHAT_ID "$REPLY_VALUE"
 
-# --- 4. GitLab check -----------------------------------------------------------
-STEP="GitLab check"
-NESTI_GL_TOKEN=$GITLAB_TOKEN NESTI_GL_URL=$GITLAB_URL NESTI_GL_PROJECT=$GITLAB_PROJECT_PATH \
-NESTI_GL_LABEL=$GITLAB_ISSUE_LABEL NESTI_GL_VERIFY=$(default_for GITLAB_SSL_VERIFY) \
-"${PYTHON[@]}" - <<'PY' || die "GitLab check failed."
+# --- 4. Forge check ------------------------------------------------------------
+# github_check probe|labels: probe verifies push permission and issues, prints the token owner's login;
+# labels creates the three intake labels when missing.
+github_check() {
+    NESTI_GH_TOKEN=$NESTI_GITHUB_TOKEN NESTI_GH_API=$NESTI_GITHUB_API_URL NESTI_GH_REPO=$NESTI_GITHUB_REPOSITORY \
+    NESTI_GH_LABEL=$NESTI_GITHUB_ISSUE_LABEL "${PYTHON[@]}" - "$1" <<'PY'
+import json, os, sys, urllib.error, urllib.parse, urllib.request
+
+base = os.environ["NESTI_GH_API"]
+repo = os.environ["NESTI_GH_REPO"]
+label = os.environ["NESTI_GH_LABEL"]
+
+def call(method, path, body=None, missing_ok=False):
+    data = json.dumps(body).encode() if body is not None else None
+    request = urllib.request.Request(base + path, data=data, method=method, headers={
+        "Authorization": "Bearer " + os.environ["NESTI_GH_TOKEN"], "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        if missing_ok and exc.code == 404:
+            return None
+        sys.exit(f"  {method} {path}: HTTP {exc.code} {exc.read().decode(errors='replace')[:300]}")
+    except (urllib.error.URLError, OSError) as exc:
+        sys.exit(f"  {method} {path}: {exc}")
+
+if sys.argv[1] == "probe":
+    info = call("GET", f"/repos/{repo}")
+    if not (info.get("permissions") or {}).get("push"):
+        sys.exit(f"  no push permission on {info['full_name']}; the token needs Contents read and write")
+    if not info.get("has_issues"):
+        sys.exit("  issues are disabled on this repository")
+    login = call("GET", "/user")["login"]
+    print(f"GitHub: {info['html_url']} (push permission, token owner '{login}')", file=sys.stderr)
+    print(login, end="")
+else:
+    for name in (label, f"{label}::in-progress", f"{label}::pause"):
+        if call("GET", f"/repos/{repo}/labels/{urllib.parse.quote(name, safe='')}", missing_ok=True):
+            print(f"  Label '{name}' exists.")
+        else:
+            call("POST", f"/repos/{repo}/labels", {"name": name, "color": "1f75cb"})
+            print(f"  Label '{name}' created.")
+PY
+}
+
+if [ "$NESTI_FORGE" = github ]; then
+    STEP="GitHub check"
+    GH_LOGIN=$(github_check probe) || die "GitHub check failed."
+    # A personal token makes the maintainer's own replies look like Nesti's notes (domain answers never resolve).
+    if [ "$INTERACTIVE" -eq 1 ]; then
+        yes_no "Is '$GH_LOGIN' a dedicated bot account for Nesti?" n \
+            || die "use a dedicated bot account's token: with a personal token your own replies count as Nesti's notes."
+    else
+        echo "Warning: '$GH_LOGIN' must be a dedicated bot account; with a personal token your own replies count as Nesti's notes." >&2
+    fi
+    github_check labels || die "GitHub check failed."
+else
+    STEP="GitLab check"
+    NESTI_GL_TOKEN=$GITLAB_TOKEN NESTI_GL_URL=$GITLAB_URL NESTI_GL_PROJECT=$GITLAB_PROJECT_PATH \
+    NESTI_GL_LABEL=$GITLAB_ISSUE_LABEL NESTI_GL_VERIFY=$(default_for GITLAB_SSL_VERIFY) \
+    "${PYTHON[@]}" - <<'PY' || die "GitLab check failed."
 import json, os, ssl, sys, urllib.error, urllib.parse, urllib.request
 
 base = os.environ["NESTI_GL_URL"] + "/api/v4"
@@ -322,20 +417,31 @@ else:
     call("POST", f"/projects/{project}/labels", {"name": label, "color": "#1f75cb"})
     print(f"  Label '{label}' created.")
 PY
+fi
 
 # --- 5. Project checkout ---------------------------------------------------------
 STEP="project checkout"
+# The token header reaches git through its environment, scoped to the forge URL: never argv (ps) or .git/config.
+clone_https() {  # <forge url> <user:token> <repository url>
+    local major minor
+    IFS=. read -r major minor _ <<<"$(git --version | awk '{print $3}')"
+    (( major > 2 || (major == 2 && minor >= 31) )) \
+        || die "git >= 2.31 is required for token-less HTTPS clone (found $(git --version)); use SSH or upgrade git"
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$1/.extraHeader" \
+        GIT_CONFIG_VALUE_0="Authorization: Basic $(printf '%s' "$2" | base64 -w0)" \
+        git clone "$3" "$PROJECT_CHECKOUT"
+}
 if [ -e "$PROJECT_CHECKOUT" ]; then
     [ -d "$PROJECT_CHECKOUT" ] && [ ! -L "$PROJECT_CHECKOUT" ] \
         || die "$PROJECT_CHECKOUT must be a directory, not a symlink."
     echo "Project checkout: $PROJECT_CHECKOUT (existing)"
 else
-    if [ "$(default_for GITLAB_USE_SSH)" = true ]; then
+    if [ "$NESTI_FORGE" = github ]; then
+        clone_https "$NESTI_GITHUB_URL" "x-access-token:$NESTI_GITHUB_TOKEN" "$NESTI_GITHUB_URL/$NESTI_GITHUB_REPOSITORY.git"
+    elif [ "$(default_for GITLAB_USE_SSH)" = true ]; then
         git clone "$GITLAB_REPO_SSH" "$PROJECT_CHECKOUT"
     else
-        # The token goes in a one-off header, so it is never written to .git/config.
-        git -c http.extraHeader="Authorization: Basic $(printf 'oauth2:%s' "$GITLAB_TOKEN" | base64 -w0)" \
-            clone "$GITLAB_REPO_HTTPS" "$PROJECT_CHECKOUT"
+        clone_https "$GITLAB_URL" "oauth2:$GITLAB_TOKEN" "$GITLAB_REPO_HTTPS"
     fi
     echo "Project checkout: $PROJECT_CHECKOUT (cloned)"
 fi
@@ -415,7 +521,7 @@ esac
 
 # --- 10. Preflight -------------------------------------------------------------
 STEP="preflight"
-if [ "$YES" -eq 0 ] && yes_no "Run the preflight check? It creates and closes a probe issue on GitLab." n; then
+if [ "$YES" -eq 0 ] && yes_no "Run the preflight check? It creates and closes a probe issue on $FORGE_NAME." n; then
     docker exec nesti-orchestrator python scripts/preflight.py
 fi
 
@@ -424,14 +530,14 @@ STEP="summary"
 cat <<EOF
 
 Nesti is installed.
-  Project:   $GITLAB_URL/$GITLAB_PROJECT_PATH
+  Project:   $PROJECT_URL
   Checkout:  $PROJECT_CHECKOUT
   Mount:     $NESTI_PROJECT_PATH
-  Label:     $GITLAB_ISSUE_LABEL
+  Label:     $ISSUE_LABEL
   Providers: ${AUTHED:-none authenticated}
 
 Next steps:
-  - open an issue on the project with the '$GITLAB_ISSUE_LABEL' label
+  - open an issue on the project with the '$ISSUE_LABEL' label
   - follow the run: ${COMPOSE[*]} logs -f nesti-orchestrator
   - usage statistics: nesti /stats
   - architecture view: nesti /arch

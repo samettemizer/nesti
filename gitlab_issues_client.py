@@ -38,17 +38,14 @@ workflow rule dropped the change; a lock or unlock that did not apply must be
 loud.
 """
 
-import hashlib
-import json
 import logging
 import os
-import re
 from urllib.parse import quote
 from collections.abc import Iterator
 
 import requests
 
-import gitlab_project
+import forge
 
 logger = logging.getLogger(__name__)
 
@@ -60,17 +57,10 @@ _POLL_HEARTBEAT_VARIABLE = "NESTI_POLL_HEARTBEAT"
 _PER_PAGE = 100
 _MAX_PAGES = 1000
 _ISSUE_STATES = ("opened", "closed", "all")
-_FAILED_RUN_RE = re.compile(r"^<!-- NESTI_FAILED_RUN_V1 [0-9a-f]{64} -->$", re.M)
 
 
 def _normalise_text(text: str | None) -> str:
     return (text or "").replace("\r\n", "\n").strip()
-
-
-def failed_run_marker(subject: str, description: str, head_sha: str) -> str:
-    """The hidden note line fingerprinting a failed run's title, description and target HEAD."""
-    digest = hashlib.sha256(json.dumps([subject, description, head_sha]).encode()).hexdigest()
-    return f"<!-- NESTI_FAILED_RUN_V1 {digest} -->"
 
 
 class GitLabIssuesClient:
@@ -79,7 +69,7 @@ class GitLabIssuesClient:
     def __init__(self) -> None:
         self.base_url = os.environ["GITLAB_URL"].rstrip("/")
         self.token = os.environ["GITLAB_TOKEN"]
-        self.project_path = gitlab_project.path()
+        self.project_path = forge.path()
         self.issue_label = (
             os.environ.get("GITLAB_ISSUE_LABEL", _DEFAULT_ISSUE_LABEL).strip()
             or _DEFAULT_ISSUE_LABEL
@@ -209,7 +199,7 @@ class GitLabIssuesClient:
 
     def _target_head(self) -> str | None:
         """The target branch's HEAD sha, or None when the branch does not exist (404)."""
-        branch = quote(gitlab_project.default_branch(), safe="")
+        branch = quote(forge.default_branch(), safe="")
         response = self.session.get(
             f"{self._project_api}/repository/branches/{branch}", timeout=_REQUEST_TIMEOUT
         )
@@ -224,7 +214,7 @@ class GitLabIssuesClient:
         latest: tuple[int, str] | None = None
         for note in self._paginate(f"{self._project_api}/issues/{iid}/notes"):
             if (not note.get("system") and (note.get("author") or {}).get("id") == user_id
-                    and (match := _FAILED_RUN_RE.search(note.get("body") or ""))
+                    and (match := forge.FAILED_RUN_RE.search(note.get("body") or ""))
                     and (latest is None or note.get("id", 0) > latest[0])):
                 latest = (note.get("id", 0), match.group(0))
         return latest[1] if latest else None
@@ -236,6 +226,12 @@ class GitLabIssuesClient:
     def get_issue(self, iid: int) -> dict:
         """Fetch one issue by its project-scoped iid, in intake shape."""
         return self._normalise(self._get_raw(iid))
+
+    def project_info(self) -> dict:
+        """The GitLab project record (``GET /projects/:id``); raises on a non-2xx answer."""
+        response = self.session.get(self._project_api, timeout=_REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return response.json()
 
     def list_issues(
         self, *, state: str = "opened", labels: list[str] | None = None
@@ -261,7 +257,7 @@ class GitLabIssuesClient:
         or paused issues never starves eligible work. A metadata error excludes
         only that issue; a failed issue-list or target-HEAD call raises. An
         issue whose last failed run saw the same title, description and target
-        HEAD is skipped (see ``failed_run_marker``) and does not count toward
+        HEAD is skipped (see ``forge.failed_run_marker``) and does not count toward
         *limit*.
         """
         url = f"{self._project_api}/issues"
@@ -293,7 +289,7 @@ class GitLabIssuesClient:
                 if marker:
                     if not head_read:
                         head, head_read = self._target_head(), True
-                    if head is not None and marker == failed_run_marker(
+                    if head is not None and marker == forge.failed_run_marker(
                             normalised["subject"], normalised["description"], head):
                         logger.info(
                             "Issue #%s is not pending: its last failed run saw the same "
@@ -406,7 +402,7 @@ class GitLabIssuesClient:
         return [
             {"id": n.get("id"), "author": (n.get("author") or {}).get("username"),
              "author_id": (n.get("author") or {}).get("id"),
-             "created_at": n.get("created_at"), "body": n.get("body")}
+             "created_at": n.get("created_at"), "body": n.get("body"), "trusted": True}
             for n in self._paginate(f"{self._project_api}/issues/{iid}/notes",
                                     {"sort": "asc", "order_by": "created_at"})
             if not n.get("system")

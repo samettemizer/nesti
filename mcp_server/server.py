@@ -1,7 +1,7 @@
 """
 mcp_server/server.py – Nesti MCP Server.
 
-Exposes GitLab Issues, GitLab, Docker, skill, quota, vector-memory and usage
+Exposes GitLab or GitHub issue and repository, Docker, skill, quota, vector-memory and usage
 statistics tools via the Model Context Protocol.
 Compatible with Claude Code CLI, VS Code Claude extension, and Cursor.
 
@@ -34,7 +34,7 @@ load_dotenv()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402  (after load_dotenv)
 
-import gitlab_project  # noqa: E402
+import forge  # noqa: E402
 
 app = FastMCP("nesti")
 
@@ -45,7 +45,7 @@ from mcp_server.tools import issues, gitlab, docker, skills, oauth, memory, proj
 
 async def main() -> None:
     """Serve the MCP app over stdio until the client disconnects."""
-    gitlab_project.bind_client(os.environ.get("NESTI_CLIENT_REMOTE", ""))
+    forge.bind_client(os.environ.get("NESTI_CLIENT_REMOTE", ""))
     await app.run_stdio_async()
 
 

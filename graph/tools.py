@@ -20,7 +20,7 @@ Return shape convention (all tools follow this):
 
 Notes
 ─────
-• GitLabClient.create_branch / commit_and_push operate on a ``git.Repo``
+• The repository client's create_branch / commit_and_push operate on a ``git.Repo``
   object.  Because MCP tools may only accept plain arguments, these wrappers
   re-open the repository from ``repo_path`` internally.
 
@@ -32,7 +32,7 @@ Notes
 • tool_laravel_bootstrap and tool_starter_kit are the only tools that *write*
   into the repository besides DockerRunner.write_files.  They apply the
   templates shipped in ``templates/laravel/`` and ``templates/starter/``: a
-  greenfield GitLab repository becomes a Laravel 13 API in ``webservice/``, and
+  greenfield repository becomes a Laravel 13 API in ``webservice/``, and
   a SPA-less Laravel API gains a Sakai PrimeVue SPA, inside a single run.
 """
 
@@ -50,9 +50,7 @@ import git
 
 from docker_runner import _PG_IDENTIFIER, APP_FACTS_MARK, DockerRunner, _pgsql_settings
 from frontend_runner import FrontendRunner
-from gitlab_client import GitLabClient
-from gitlab_issues_client import GitLabIssuesClient
-import gitlab_project
+import forge
 from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
 import issue_domain
@@ -97,7 +95,7 @@ _API_TOUCH_RE = re.compile(
 )
 
 # Written by the openapi recipe; storage/app is git-ignored by Laravel, so the
-# route dump never lands in the Merge Request.
+# route dump never lands in the MR/PR.
 _ROUTE_DUMP_REL = "storage/app/nesti-routes.json"
 
 # HTTP verbs Laravel registers implicitly; they never appear in OpenAPI.
@@ -144,14 +142,14 @@ _PACKAGE_DEV_DEPENDENCIES = {
 _PACKAGE_SCRIPTS = {"test": "vitest run"}
 
 # The Laravel 13 skeleton does not ignore the sqlite file the sandbox creates,
-# so without this the database would land in the Merge Request.  openapi.json
+# so without this the database would land in the MR/PR.  openapi.json
 # is deliberately absent: it is a committed deliverable.
 _GITIGNORE_LINES = ("/database/*.sqlite*", "/.phpunit.cache")
 
 _VALID_STACKS = ("php", "vue", "fullstack")
 
-# Intake lifecycle vocabulary. GitLab has no "in progress" or "paused" issue
-# state, so GitLabIssuesClient expresses these words as labels plus
+# Intake lifecycle vocabulary. Neither forge has an "in progress" or "paused"
+# issue state, so the issue clients express these words as labels plus
 # open/closed — the strings stay stable so every node and MCP client is
 # unaffected.
 _VALID_STATUSES = ("in_progress", "closed", "new", "paused")
@@ -170,7 +168,7 @@ def _err(message) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Issue intake tools (GitLab Issues)
+# Issue intake tools (the forge's issues)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tool_issue_get(issue_id: int) -> dict:
@@ -180,7 +178,7 @@ def tool_issue_get(issue_id: int) -> dict:
              "web_url", "author", "global_id"}.
     """
     try:
-        return _ok(GitLabIssuesClient().get_issue(issue_id))
+        return _ok(forge.issue_client().get_issue(issue_id))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_get(%s) failed: %s", issue_id, exc)
         return _err(exc)
@@ -195,7 +193,7 @@ def tool_issue_list_pending() -> dict:
     neither the ``<label>::in-progress`` lock nor the ``<label>::pause`` hold.
     """
     try:
-        return _ok(GitLabIssuesClient().list_pending(limit=_ISSUE_LIST_LIMIT))
+        return _ok(forge.issue_client().list_pending(limit=_ISSUE_LIST_LIMIT))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_list_pending() failed: %s", exc)
         return _err(exc)
@@ -208,7 +206,7 @@ def tool_issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
     result: {"issue_id": int, "status": str}
 
     The vocabulary is deliberately the words the pipeline has always used;
-    GitLab expresses them as labels plus open/closed state:
+    the forges express them as labels plus open/closed state:
       in_progress → add    <label>::in-progress (only while the issue is pending)
       closed      → remove <label>::in-progress, close, comment
       new         → remove <label>::in-progress, reopen, comment (back to the
@@ -220,7 +218,7 @@ def tool_issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
     if status not in _VALID_STATUSES:
         return _err(f"Invalid status {status!r} – expected one of {_VALID_STATUSES}.")
     try:
-        client = GitLabIssuesClient()
+        client = forge.issue_client()
         if status == "in_progress":
             updated = client.lock_issue(issue_id)
         elif status == "closed":
@@ -230,7 +228,7 @@ def tool_issue_set_status(issue_id: int, status: str, note: str = "") -> dict:
         else:  # "new"
             updated = client.reopen_issue(issue_id, note=note)
         if not updated:
-            return _err(f"GitLab rejected the status update for issue #{issue_id}.")
+            return _err(f"{forge.term('forge')} rejected the status update for issue #{issue_id}.")
         return _ok({"issue_id": issue_id, "status": status})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_set_status(%s, %s) failed: %s", issue_id, status, exc)
@@ -243,7 +241,7 @@ def tool_project_layout() -> dict:
         record = project_layout.load_layout()
         if record is None:
             return _err("layout.json not found: run nesti /arch on the orchestrator")
-        identity = gitlab_project.identity()
+        identity = forge.identity()
         if record.get("gitlab_project") != identity:
             return _err(
                 f"layout.json describes {record.get('gitlab_project') or 'an unrecorded project'}, "
@@ -264,7 +262,7 @@ def tool_issue_create(title: str, description: str) -> dict:
     if not title.strip() or not description.strip():
         return _err("title and description must be non-blank.")
     try:
-        issue = GitLabIssuesClient().create_issue(title, description)
+        issue = forge.issue_client().create_issue(title, description)
         return _ok({"id": issue["id"], "web_url": issue["web_url"], "labels": issue["labels"]})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_create() failed: %s", exc)
@@ -281,7 +279,7 @@ def tool_issue_resolve(issue_id: int, model: str) -> dict:
     if not model or "\n" in model or len(model) > 200:
         return _err("model must be one non-blank line of at most 200 characters.")
     try:
-        client = GitLabIssuesClient()
+        client = forge.issue_client()
         issue = client.get_issue(issue_id)
         if issue["state"] != "opened":
             return _err(f"Issue #{issue_id} is not open.")
@@ -289,7 +287,7 @@ def tool_issue_resolve(issue_id: int, model: str) -> dict:
             return _err(f"Issue #{issue_id} was handed to Nesti.")
         comment = f"omp-developer / model: {model}"
         if not client.close_issue(issue_id, note=comment, require_note=True):
-            return _err(f"GitLab rejected closing issue #{issue_id}.")
+            return _err(f"{forge.term('forge')} rejected closing issue #{issue_id}.")
         return _ok({"issue_id": issue_id, "status": "closed", "comment": comment})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_resolve(%s) failed: %s", issue_id, exc)
@@ -304,11 +302,11 @@ def tool_issue_handoff(issue_id: int, report: str) -> dict:
     if not report.strip():
         return _err("report must be non-blank.")
     try:
-        client = GitLabIssuesClient()
+        client = forge.issue_client()
         if not client.handoff_issue(
                 issue_id,
                 "## Third attempt (OMP team, advised) — rejected\n\n" + report.strip()):
-            return _err(f"GitLab rejected the hand-off of issue #{issue_id}.")
+            return _err(f"{forge.term('forge')} rejected the hand-off of issue #{issue_id}.")
         return _ok({"issue_id": issue_id, "label": client.issue_label})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_handoff(%s) failed: %s", issue_id, exc)
@@ -316,9 +314,9 @@ def tool_issue_handoff(issue_id: int, report: str) -> dict:
 
 
 def tool_issue_notes(issue_id: int) -> dict:
-    """Non-system notes of an issue, oldest first: [{"id","author","author_id","created_at","body"}]."""
+    """Non-system notes of an issue, oldest first: [{"id","author","author_id","created_at","body","trusted"}]."""
     try:
-        return _ok(GitLabIssuesClient().list_notes(issue_id))
+        return _ok(forge.issue_client().list_notes(issue_id))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_notes(%s) failed: %s", issue_id, exc)
         return _err(exc)
@@ -330,7 +328,7 @@ def tool_issue_domain_answer(issue_id: int, options: list[str]) -> dict:
     *issue_id*.  Graph-internal.  result: list[str], [] = no answer.
     """
     try:
-        client = GitLabIssuesClient()
+        client = forge.issue_client()
         return _ok(issue_domain.answer(client.list_notes(issue_id), client.current_user_id(), options))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_domain_answer(%s) failed: %s", issue_id, exc)
@@ -343,7 +341,7 @@ def tool_issue_ask_domain(issue_id: int, options: list[str]) -> dict:
     Graph-internal.  result: {"issue_id": int, "options": list[str]}.
     """
     try:
-        issue_domain.ask(GitLabIssuesClient(), issue_id, options)
+        issue_domain.ask(forge.issue_client(), issue_id, options)
         return _ok({"issue_id": issue_id, "options": options})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_ask_domain(%s) failed: %s", issue_id, exc)
@@ -358,7 +356,7 @@ def tool_issue_reconcile_domain_questions() -> dict:
     success=False only when the issues or the token user could not be read.
     """
     try:
-        return _ok(issue_domain.reconcile(GitLabIssuesClient()))
+        return _ok(issue_domain.reconcile(forge.issue_client()))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_reconcile_domain_questions() failed: %s", exc)
         return _err(exc)
@@ -371,7 +369,7 @@ def tool_issue_swap_poll_heartbeat(value: str) -> dict:
     result: {"previous": str | None}
     """
     try:
-        return _ok({"previous": GitLabIssuesClient().swap_poll_heartbeat(value)})
+        return _ok({"previous": forge.issue_client().swap_poll_heartbeat(value)})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_issue_swap_poll_heartbeat() failed: %s", exc)
         return _err(exc)
@@ -384,7 +382,7 @@ def tool_issue_swap_poll_heartbeat(value: str) -> dict:
 def tool_gitlab_clone(target_path: str) -> dict:
     """Clone the configured repository into target_path.  result: {"repo_path": str, "head_sha": str}."""
     try:
-        repo = GitLabClient().clone(target_path)
+        repo = forge.repo_client().clone(target_path)
         return _ok({"repo_path": target_path, "head_sha": repo.head.commit.hexsha})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_gitlab_clone(%s) failed: %s", target_path, exc)
@@ -395,7 +393,7 @@ def tool_gitlab_create_branch(repo_path: str, issue_id: int, subject: str) -> di
     """Create and checkout a feature branch.  result: {"branch_name": str}."""
     try:
         repo = git.Repo(repo_path)
-        branch_name = GitLabClient().create_branch(repo, issue_id, subject)
+        branch_name = forge.repo_client().create_branch(repo, issue_id, subject)
         return _ok({"branch_name": branch_name})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_gitlab_create_branch(%s) failed: %s", repo_path, exc)
@@ -411,24 +409,28 @@ def tool_gitlab_commit_and_push(repo_path: str, branch_name: str, message: str) 
     """
     try:
         repo = git.Repo(repo_path)
-        pushed = GitLabClient().commit_and_push(repo, branch_name, message)
+        pushed = forge.repo_client().commit_and_push(repo, branch_name, message)
         return _ok({"pushed": pushed})
+    except forge.OpenMergeRequestError as exc:
+        logger.warning("tool_gitlab_commit_and_push(%s) stopped: %s", branch_name, exc)
+        return {**_err(exc), "mr_url": exc.url}
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_gitlab_commit_and_push(%s) failed: %s", branch_name, exc)
         return _err(exc)
 
 
 def tool_gitlab_open_mr(branch_name: str, issue_id: int, subject: str, description: str) -> dict:
-    """Open a GitLab Merge Request.  result: {"mr_url": str, "mr": dict}."""
+    """Open a Merge Request (GitLab) or Pull Request (GitHub).  result: {"mr_url": str, "mr": dict}."""
     try:
-        mr = GitLabClient().open_merge_request(
+        mr = forge.repo_client().open_merge_request(
             branch_name=branch_name,
             issue_id=issue_id,
             subject=subject,
             description=description,
         )
         if mr is None:
-            return _err(f"GitLab refused to open a Merge Request for branch {branch_name!r}.")
+            return _err(f"{forge.term('forge')} refused to open a {forge.term('merge_request')} "
+                        f"for branch {branch_name!r}.")
         return _ok({"mr_url": mr.get("web_url", ""), "mr": mr})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_gitlab_open_mr(%s) failed: %s", branch_name, exc)
@@ -668,7 +670,7 @@ def _merge_package_json(repo_path: str) -> list[str]:
             data = json.loads(raw) or {}
         except Exception as exc:  # pylint: disable=broad-except
             raise ValueError(f"package.json is not valid JSON: {exc}") from exc
-        # Keep a foreign repository's indentation so the MR diff stays minimal.
+        # Keep a foreign repository's indentation so the MR/PR diff stays minimal.
         if match := re.search(r"\n( +)\"", raw):
             indent = len(match.group(1))
 
@@ -1518,7 +1520,7 @@ def tool_memory_find_similar(text: str, limit: int = 2) -> dict:
              ...] most similar first, above NESTI_SOLUTION_MIN_SCORE.
     """
     try:
-        project = gitlab_project.identity()
+        project = forge.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok([])
@@ -1536,7 +1538,7 @@ def tool_memory_remember_solution(
     result: {"stored": bool} (plus "reason" when not stored).
     """
     try:
-        project = gitlab_project.identity()
+        project = forge.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok(dict(_MEMORY_UNAVAILABLE))
@@ -1559,7 +1561,7 @@ def tool_memory_remember_failure(
     if not _RUN_ID.fullmatch(run_id or ""):
         return _err(_RUN_ID_ERROR)
     try:
-        project = gitlab_project.identity()
+        project = forge.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok(dict(_MEMORY_UNAVAILABLE))
@@ -1582,7 +1584,7 @@ def tool_memory_recall_failures(
     if not _RUN_ID.fullmatch(run_id or ""):
         return _err(_RUN_ID_ERROR)
     try:
-        project = gitlab_project.identity()
+        project = forge.identity()
         memory = get_semantic_memory()
         if not memory.available:
             return _ok([])
@@ -1601,7 +1603,7 @@ def tool_memory_forget_episodes(issue_id: int, run_id: str) -> dict:
     if not _RUN_ID.fullmatch(run_id or ""):
         return _err(_RUN_ID_ERROR)
     try:
-        project = gitlab_project.identity()
+        project = forge.identity()
         return _ok({"deleted": get_semantic_memory().forget_episodes(project, issue_id, run_id)})
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_memory_forget_episodes(issue #%s) failed: %s", issue_id, exc)
