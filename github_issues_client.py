@@ -56,7 +56,7 @@ def _normalise_text(text: str | None) -> str:
     return (text or "").replace("\r\n", "\n").strip()
 
 
-def _raise_for_status(response: requests.Response) -> None:
+def raise_for_status(response: requests.Response) -> None:
     """``raise_for_status``, with GitHub's retry hints in the error on 403/429."""
     if response.status_code in (403, 429):
         hints = ", ".join(
@@ -72,11 +72,29 @@ def _raise_for_status(response: requests.Response) -> None:
     response.raise_for_status()
 
 
+def api_url() -> str:
+    """The GitHub REST API base URL (``NESTI_GITHUB_API_URL``, empty or unset → ``https://api.github.com``)."""
+    return (os.environ.get("NESTI_GITHUB_API_URL") or _DEFAULT_API_URL).rstrip("/")
+
+
+def api_session() -> requests.Session:
+    """A session sending the ``NESTI_GITHUB_TOKEN`` bearer, GitHub's media type and the pinned API version."""
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"Bearer {os.environ['NESTI_GITHUB_TOKEN']}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": _API_VERSION,
+    })
+    return session
+
+
 def fit_body(body: str) -> str:
     """*body* within GitHub's 65,536-character limit: cut in the middle, a trailing marker line kept."""
     if len(body) <= BODY_LIMIT:
         return body
     text = body.rstrip()
+    if len(text) <= BODY_LIMIT:
+        return text
     rest, _, last = text.rpartition("\n")
     keep = ""
     if forge.FAILED_RUN_RE.fullmatch(last):
@@ -89,7 +107,7 @@ class GitHubIssuesClient:
     """Issue intake and lifecycle against the GitHub REST API."""
 
     def __init__(self) -> None:
-        self.base_url = os.environ.get("NESTI_GITHUB_API_URL", _DEFAULT_API_URL).rstrip("/")
+        self.base_url = api_url()
         self.project_path = forge.path()
         self.issue_label = (
             os.environ.get("NESTI_GITHUB_ISSUE_LABEL", _DEFAULT_ISSUE_LABEL).strip()
@@ -99,12 +117,7 @@ class GitHubIssuesClient:
         self.pause_label = f"{self.issue_label}{_PAUSE_SUFFIX}"
         self._user_id: int | None = None
 
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {os.environ['NESTI_GITHUB_TOKEN']}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": _API_VERSION,
-        })
+        self.session = api_session()
 
     # ------------------------------------------------------------------
     # Internals
@@ -139,7 +152,7 @@ class GitHubIssuesClient:
 
     def _get_raw(self, number: int) -> dict:
         response = self.session.get(f"{self._repo_api}/issues/{number}", timeout=_REQUEST_TIMEOUT)
-        _raise_for_status(response)
+        raise_for_status(response)
         return response.json()
 
     def _pages(self, url: str, params: dict | None = None) -> Iterator[list[dict]]:
@@ -148,7 +161,7 @@ class GitHubIssuesClient:
         next_url: str | None = url
         for _ in range(_MAX_PAGES):
             response = self.session.get(next_url, params=query, timeout=_REQUEST_TIMEOUT)
-            _raise_for_status(response)
+            raise_for_status(response)
             body = response.json()
             if not isinstance(body, list):
                 raise RuntimeError(f"GitHub returned a non-list page for {url}")
@@ -164,7 +177,7 @@ class GitHubIssuesClient:
             f"{self._repo_api}/issues/{number}/labels", json={"labels": [label]},
             timeout=_REQUEST_TIMEOUT,
         )
-        _raise_for_status(response)
+        raise_for_status(response)
 
     def _remove_label(self, number: int, label: str) -> None:
         """Drop *label*; 404 means it is already absent and the read-back decides."""
@@ -173,14 +186,14 @@ class GitHubIssuesClient:
             timeout=_REQUEST_TIMEOUT,
         )
         if response.status_code != 404:
-            _raise_for_status(response)
+            raise_for_status(response)
 
     def _patch(self, number: int, payload: dict) -> None:
         """PATCH issue fields; never ``labels`` (that would replace the label set)."""
         response = self.session.patch(
             f"{self._repo_api}/issues/{number}", json=payload, timeout=_REQUEST_TIMEOUT
         )
-        _raise_for_status(response)
+        raise_for_status(response)
 
     def _comment(self, number: int, body: str) -> bool:
         """Post a comment. A failed comment must never fail the transition itself."""
@@ -231,7 +244,7 @@ class GitHubIssuesClient:
         )
         if response.status_code == 404:
             return None
-        _raise_for_status(response)
+        raise_for_status(response)
         return response.json()["commit"]["sha"]
 
     def _failed_run(self, number: int) -> str | None:
@@ -256,7 +269,7 @@ class GitHubIssuesClient:
     def project_info(self) -> dict:
         """The repository record plus ``path_with_namespace`` and ``issues_enabled``; raises on non-2xx."""
         response = self.session.get(self._repo_api, timeout=_REQUEST_TIMEOUT)
-        _raise_for_status(response)
+        raise_for_status(response)
         repo = response.json()
         return {**repo, "path_with_namespace": repo.get("full_name"),
                 "issues_enabled": bool(repo.get("has_issues"))}
@@ -431,7 +444,7 @@ class GitHubIssuesClient:
         if not isinstance(note_id, int) or isinstance(note_id, bool) or note_id <= 0:
             raise RuntimeError(f"Note on issue #{iid} returned no id")
         check = self.session.get(f"{self._repo_api}/issues/comments/{note_id}", timeout=_REQUEST_TIMEOUT)
-        _raise_for_status(check)
+        raise_for_status(check)
         if check.json().get("body") != body:
             raise RuntimeError(f"Note {note_id} on issue #{iid} did not read back")
         return note_id
@@ -533,7 +546,7 @@ class GitHubIssuesClient:
         """The numeric id of the token's user (``GET /user``), cached per client."""
         if self._user_id is None:
             response = self.session.get(f"{self.base_url}/user", timeout=_REQUEST_TIMEOUT)
-            _raise_for_status(response)
+            raise_for_status(response)
             user_id = response.json().get("id")
             if not isinstance(user_id, int) or isinstance(user_id, bool):
                 raise RuntimeError("GitHub /user returned no numeric id")
@@ -578,14 +591,14 @@ class GitHubIssuesClient:
         url = f"{self._repo_api}/actions/variables/{_POLL_HEARTBEAT_VARIABLE}"
         current = self.session.get(url, timeout=_REQUEST_TIMEOUT)
         if current.status_code == 404:
-            _raise_for_status(self.session.post(
+            raise_for_status(self.session.post(
                 f"{self._repo_api}/actions/variables",
                 json={"name": _POLL_HEARTBEAT_VARIABLE, "value": value}, timeout=_REQUEST_TIMEOUT,
             ))
             return None
-        _raise_for_status(current)
+        raise_for_status(current)
         previous = current.json().get("value")
-        _raise_for_status(self.session.patch(
+        raise_for_status(self.session.patch(
             url, json={"name": _POLL_HEARTBEAT_VARIABLE, "value": value}, timeout=_REQUEST_TIMEOUT
         ))
         return previous

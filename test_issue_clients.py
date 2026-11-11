@@ -34,6 +34,7 @@ import github_issues_client as ghc  # noqa: E402
 import gitlab_issues_client as glc  # noqa: E402
 import graph.tools as tools  # noqa: E402
 import issue_domain  # noqa: E402
+from github_client import GitHubClient  # noqa: E402
 
 NESTI_USER = 15
 _failures = 0
@@ -446,12 +447,10 @@ def github_only() -> None:
               "NESTI_FORGE=github selects the GitHub words")
         check(forge.identity() == "github.com/acme/shop" and forge.default_branch() == "main",
               "identity is github.com/owner/repo in lower case; default branch main")
+        os.environ["NESTI_GITHUB_URL"] = ""
+        check(forge.identity() == "github.com/acme/shop", "an empty NESTI_GITHUB_URL counts as unset")
     check(isinstance(forge.issue_client(), ghc.GitHubIssuesClient), "issue_client builds GitHubIssuesClient")
-    try:
-        forge.repo_client()
-        check(False, "repo_client names the missing GitHub repository client")
-    except ValueError as exc:
-        check("github_client.py" in str(exc), "repo_client names the missing GitHub repository client")
+    check(isinstance(forge.repo_client(), GitHubClient), "repo_client builds GitHubClient")
     gh = forge.issue_client().session.headers
     check(gh["Authorization"] == "Bearer t" and gh["Accept"] == "application/vnd.github+json"
           and gh["X-GitHub-Api-Version"], "Bearer token, GitHub media type and pinned API version")
@@ -504,6 +503,9 @@ def github_only() -> None:
     body = s.notes[34][-1]["body"]
     check(len(body) <= ghc.BODY_LIMIT and body.endswith(marker), "transition notes are fitted the same way")
     check(ghc.fit_body("short\n" + marker) == "short\n" + marker, "a body within the limit is untouched")
+    padded = "y" * (ghc.BODY_LIMIT - 10) + " " * 100
+    check(ghc.fit_body(padded) == "y" * (ghc.BODY_LIMIT - 10),
+          "a body over the limit only by trailing whitespace is just stripped, never duplicated")
 
     print("── github: trust ──")
     s = Store()

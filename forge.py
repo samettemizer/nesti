@@ -63,7 +63,7 @@ class IssueClient(Protocol):
 
 
 class RepoClient(Protocol):
-    """Repository and merge-request surface the pipeline uses (``GitLabClient``)."""
+    """Repository and merge-request surface the pipeline uses (``GitLabClient``, ``GitHubClient``)."""
 
     default_branch: str
 
@@ -116,9 +116,9 @@ def issue_client() -> IssueClient:
 def repo_client() -> RepoClient:
     """A fresh repository client for the configured forge."""
     if kind() == "github":
-        raise ValueError(
-            "NESTI_FORGE=github: the GitHub repository client (github_client.py, package G2) does not exist yet"
-        )
+        from github_client import GitHubClient  # clients import this module
+
+        return GitHubClient()
     from gitlab_client import GitLabClient  # clients import this module
 
     return GitLabClient()
@@ -202,7 +202,7 @@ def default_branch() -> str:
 def identity() -> str:
     """``host/namespace/project`` in lower case, e.g. ``gitlab.com/acme/shop``; scopes Redis records."""
     if _bound is None and kind() == "github":
-        url = os.environ.get("NESTI_GITHUB_URL", "https://github.com")
+        url = os.environ.get("NESTI_GITHUB_URL") or "https://github.com"
     else:
         url = os.environ["GITLAB_URL"]
     return f"{urlsplit(url).hostname}/{path()}".lower()
