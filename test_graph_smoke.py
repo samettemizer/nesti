@@ -2115,7 +2115,7 @@ rerun.issues[32]["description"] = None
 def _mark_failed(iid, author=15, head="h1"):
     issue = rerun.issues[iid]
     rerun.add_note(iid, "AI Developer failed to produce passing tests (PHPUnit).\n\n"
-                   + gic.failed_run_marker(issue["title"], issue["description"] or "", head),
+                   + nodes.failed_run_marker(issue["title"], issue["description"] or "", head),
                    author=author)
 
 

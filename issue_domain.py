@@ -15,9 +15,10 @@ Question protocol: when nothing decides, Nesti posts one note
 ``reconcile`` resumes it once a human reply names one or more options, and asks
 again once per unmatched reply.
 
-Trust rule: only notes authored by Nesti's own GitLab user count as questions,
-and only notes by anyone else, newer than the latest question, count as
-answers.  A pause without a Nesti question is never lifted here.
+Trust rule: only notes authored by Nesti's own forge user count as questions,
+and only notes the forge client marks ``trusted``, by anyone else and newer
+than the latest question, count as answers.  A pause without a Nesti question
+is never lifted here.
 """
 
 import json
@@ -310,7 +311,8 @@ def answer(notes: list[dict], user_id: int, options: list[str]) -> list[str]:
     if not questions:
         return []
     question_id = max(n["id"] for n in questions)
-    replies = sorted((n for n in notes if n.get("author_id") != user_id and n["id"] > question_id),
+    replies = sorted((n for n in notes
+                      if n.get("trusted") is True and n.get("author_id") != user_id and n["id"] > question_id),
                      key=lambda n: n["id"], reverse=True)
     for note in replies:
         chosen = parse_answer(note.get("body") or "", options)
@@ -342,7 +344,8 @@ def reconcile(client) -> dict:
             options = question_options(latest.get("body") or "") if latest else None
             if latest is None or options is None:
                 continue
-            if not any(n.get("author_id") != user_id and n["id"] > latest["id"] for n in notes):
+            if not any(n.get("trusted") is True and n.get("author_id") != user_id and n["id"] > latest["id"]
+                       for n in notes):
                 summary["waiting"].append(iid)
             elif answer(notes, user_id, options):
                 # shortcut: a manual pause added between this resume and the claim is lifted again while the question is still Nesti's latest note; mark the question answered if that ever matters.

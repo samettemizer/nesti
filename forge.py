@@ -1,17 +1,19 @@
 """
-The forge (GitLab) this process acts on: client contracts, client factory,
-display words and the acted-on project.
+The forge (GitLab or GitHub) this process acts on: client contracts, client
+factory, display words, the failed-run marker and the acted-on project.
 
 Forge-specific code lives only here and in ``*_client.py``; everything else
 builds its clients through ``issue_client()`` / ``repo_client()`` and names the
 forge through ``term()``. ``NESTI_FORGE`` selects the forge (default ``gitlab``).
 
-The orchestrator acts on ``GITLAB_PROJECT_PATH`` from ``.env``. An MCP server
+The orchestrator acts on ``GITLAB_PROJECT_PATH`` (GitHub: ``NESTI_GITHUB_REPOSITORY``) from ``.env``. An MCP server
 process serves one client connection and acts on that client's project, read
 from the client checkout's git remote (``bind_client``); without a resolvable
 remote it refuses project tools instead of falling back to ``.env``.
 """
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -23,14 +25,18 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-_TERMS = {"gitlab": {"forge": "GitLab", "mr": "MR", "merge_request": "Merge Request"}}
+_TERMS = {
+    "gitlab": {"forge": "GitLab", "mr": "MR", "merge_request": "Merge Request"},
+    "github": {"forge": "GitHub", "mr": "PR", "merge_request": "Pull Request"},
+}
+FAILED_RUN_RE = re.compile(r"^<!-- NESTI_FAILED_RUN_V1 [0-9a-f]{64} -->$", re.M)
 
 # None in the orchestrator; in an MCP process {"path": ..., "default_branch"?: ...} or {"error": ...}.
 _bound: dict | None = None
 
 
 class IssueClient(Protocol):
-    """Issue intake and lifecycle surface the pipeline uses (``GitLabIssuesClient``)."""
+    """Issue intake and lifecycle surface the pipeline uses (``GitLabIssuesClient``, ``GitHubIssuesClient``)."""
 
     issue_label: str
     in_progress_label: str
@@ -38,6 +44,8 @@ class IssueClient(Protocol):
     project_path: str
 
     def get_issue(self, iid: int) -> dict: ...
+    def project_info(self) -> dict:
+        """The forge's project record; carries at least ``path_with_namespace``, ``default_branch``, ``issues_enabled``."""
     def list_issues(self, *, state: str = "opened", labels: list[str] | None = None) -> list[dict]: ...
     def list_pending(self, limit: int = 25) -> list[dict]: ...
     def get_next_issue(self) -> dict | None: ...
@@ -88,9 +96,18 @@ def term(key: str) -> str:
     return _TERMS[kind()][key]
 
 
+def failed_run_marker(subject: str, description: str, head_sha: str) -> str:
+    """The hidden note line fingerprinting a failed run's title, description and target HEAD."""
+    digest = hashlib.sha256(json.dumps([subject, description, head_sha]).encode()).hexdigest()
+    return f"<!-- NESTI_FAILED_RUN_V1 {digest} -->"
+
+
 def issue_client() -> IssueClient:
     """A fresh issue client for the configured forge."""
-    kind()
+    if kind() == "github":
+        from github_issues_client import GitHubIssuesClient  # clients import this module
+
+        return GitHubIssuesClient()
     from gitlab_issues_client import GitLabIssuesClient  # clients import this module
 
     return GitLabIssuesClient()
@@ -98,7 +115,10 @@ def issue_client() -> IssueClient:
 
 def repo_client() -> RepoClient:
     """A fresh repository client for the configured forge."""
-    kind()
+    if kind() == "github":
+        raise ValueError(
+            "NESTI_FORGE=github: the GitHub repository client (github_client.py, package G2) does not exist yet"
+        )
     from gitlab_client import GitLabClient  # clients import this module
 
     return GitLabClient()
@@ -154,7 +174,7 @@ def client_bound() -> bool:
 def path() -> str:
     """The acted-on project's ``namespace/project`` path; raises ``ValueError`` for an unresolved client."""
     if _bound is None:
-        return os.environ["GITLAB_PROJECT_PATH"]
+        return os.environ["NESTI_GITHUB_REPOSITORY" if kind() == "github" else "GITLAB_PROJECT_PATH"]
     if "error" in _bound:
         raise ValueError(_bound["error"])
     return _bound["path"]
@@ -163,6 +183,8 @@ def path() -> str:
 def default_branch() -> str:
     """The acted-on project's target branch: ``.env`` for the orchestrator, GitLab's default for a client."""
     if _bound is None:
+        if kind() == "github":
+            return os.environ.get("NESTI_GITHUB_DEFAULT_BRANCH", "main")
         return os.environ.get("GITLAB_DEFAULT_BRANCH", "main")
     project = path()
     if "default_branch" not in _bound:
@@ -179,4 +201,8 @@ def default_branch() -> str:
 
 def identity() -> str:
     """``host/namespace/project`` in lower case, e.g. ``gitlab.com/acme/shop``; scopes Redis records."""
-    return f"{urlsplit(os.environ['GITLAB_URL']).hostname}/{path()}".lower()
+    if _bound is None and kind() == "github":
+        url = os.environ.get("NESTI_GITHUB_URL", "https://github.com")
+    else:
+        url = os.environ["GITLAB_URL"]
+    return f"{urlsplit(url).hostname}/{path()}".lower()

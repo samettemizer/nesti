@@ -80,7 +80,7 @@ from graph.tools import (
     _STACK_SCAN_PRUNE,
 )
 import forge
-from gitlab_issues_client import failed_run_marker
+from forge import failed_run_marker
 from issue_domain import classify as classify_domain, detect as detect_domain, domain_catalog, selection
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
