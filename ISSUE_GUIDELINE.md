@@ -57,7 +57,10 @@ discussion and never touched.
 4. **Success.** Nesti removes the lock label, posts a comment containing the
    Merge Request URL, and closes the issue. The MR body starts with the GitLab
    closing keyword `Closes #<iid>`, so the issue and MR are cross-linked
-   automatically.
+   automatically. On GitHub Nesti opens a Pull Request instead; its
+   `Closes #<number>` links and auto-closes the issue only when the PR targets
+   the repository's default branch, and Nesti closes the issue itself when the
+   PR opens either way.
 5. **Failure.** After all retries are exhausted (or after an unexpected crash),
    Nesti removes the lock label and posts a failure comment with the last test
    output. The issue returns to the pending pool. After failed coding
@@ -88,8 +91,8 @@ separate issues.
   `COLLABORATOR` of the repository are picked up; an opted-in issue from
   anyone else is skipped. To run an outside request, a maintainer re-opens it
   as a new issue under their own name. Organization members with private
-  membership can appear to the bot as `CONTRIBUTOR`: make the membership
-  public or add them as collaborators.
+  membership can appear to the bot as `CONTRIBUTOR` or `NONE`: make the
+  membership public or add them as collaborators.
 - **No scoped labels.** `nesti::in-progress` and `nesti::pause` are plain
   labels, not mutually exclusive. An issue carrying both is treated as
   paused.

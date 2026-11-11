@@ -421,20 +421,27 @@ fi
 
 # --- 5. Project checkout ---------------------------------------------------------
 STEP="project checkout"
+# The token header reaches git through its environment, scoped to the forge URL: never argv (ps) or .git/config.
+clone_https() {  # <forge url> <user:token> <repository url>
+    local major minor
+    IFS=. read -r major minor _ <<<"$(git --version | awk '{print $3}')"
+    (( major > 2 || (major == 2 && minor >= 31) )) \
+        || die "git >= 2.31 is required for token-less HTTPS clone (found $(git --version)); use SSH or upgrade git"
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$1/.extraHeader" \
+        GIT_CONFIG_VALUE_0="Authorization: Basic $(printf '%s' "$2" | base64 -w0)" \
+        git clone "$3" "$PROJECT_CHECKOUT"
+}
 if [ -e "$PROJECT_CHECKOUT" ]; then
     [ -d "$PROJECT_CHECKOUT" ] && [ ! -L "$PROJECT_CHECKOUT" ] \
         || die "$PROJECT_CHECKOUT must be a directory, not a symlink."
     echo "Project checkout: $PROJECT_CHECKOUT (existing)"
 else
     if [ "$NESTI_FORGE" = github ]; then
-        git -c http.extraHeader="Authorization: Basic $(printf 'x-access-token:%s' "$NESTI_GITHUB_TOKEN" | base64 -w0)" \
-            clone "$NESTI_GITHUB_URL/$NESTI_GITHUB_REPOSITORY.git" "$PROJECT_CHECKOUT"
+        clone_https "$NESTI_GITHUB_URL" "x-access-token:$NESTI_GITHUB_TOKEN" "$NESTI_GITHUB_URL/$NESTI_GITHUB_REPOSITORY.git"
     elif [ "$(default_for GITLAB_USE_SSH)" = true ]; then
         git clone "$GITLAB_REPO_SSH" "$PROJECT_CHECKOUT"
     else
-        # The token goes in a one-off header, so it is never written to .git/config.
-        git -c http.extraHeader="Authorization: Basic $(printf 'oauth2:%s' "$GITLAB_TOKEN" | base64 -w0)" \
-            clone "$GITLAB_REPO_HTTPS" "$PROJECT_CHECKOUT"
+        clone_https "$GITLAB_URL" "oauth2:$GITLAB_TOKEN" "$GITLAB_REPO_HTTPS"
     fi
     echo "Project checkout: $PROJECT_CHECKOUT (cloned)"
 fi

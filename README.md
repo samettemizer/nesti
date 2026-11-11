@@ -215,8 +215,8 @@ Set `NESTI_FORGE=github` (install.sh asks) and configure the
   install.sh shows the token owner and asks for confirmation.
 - Token: a fine-grained PAT restricted to the one repository with Contents
   RW, Issues RW, Pull requests RW and Metadata R. Variables RW is optional and
-  enables the poll heartbeat that detects a second poller; without it Nesti
-  warns once.
+  enables the poll heartbeat that detects a second poller; without it that
+  check is skipped and a warning is logged on every poll.
 - Adding the opt-in label needs triage permission. install.sh creates
   `<label>`, `<label>::in-progress` and `<label>::pause` when missing.
 - Only issues authored by repository owners, members or collaborators are
