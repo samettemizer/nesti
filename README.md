@@ -53,13 +53,15 @@ change; otherwise Nesti leaves it untouched.
 
 ---
 
-<p align="center">
+<p>
   <a href="https://www.youtube.com/watch?v=ua7AfRvcorw">
-    <img src="./assets/remotion-video-challenge.png" alt="Nesti Remotion video challenge — watch on YouTube" width="760" />
+    <img src="./assets/remotion-video-challenge.png" alt="Nesti Remotion video challenge — watch on YouTube" width="512" />
   </a>
 </p>
 
 Use Nesti on its own, or pair it with the [nestiworks](https://github.com/samettemizer/nestiworks/tree/main/laravel) plugin to take on escalated tasks.
+
+---
 
 ## Issue Intake (GitLab or GitHub Issues)
 
@@ -189,7 +191,7 @@ a logged 404.
 | Sandboxes | `docker_runner.py`, `frontend_runner.py` |
 | Context and memory | `skill_catalog.py`, `skill_loader.py`, `conversation_store.py`, `vector_store.py`, `semantic_cache.py` |
 | Interactive tools | `mcp_server/` (FastMCP), `scripts/oauth.py` (`nesti` CLI) |
-| Usage statistics | `stats/` (`nesti /stats` → live page `http://127.0.0.1:8790/`, served by `nesti-stats`) |
+| Usage statistics | `stats/` (`nesti /stats` → live page `http://127.0.0.1:8790`) |
 
 [`docker-compose.yml`](docker-compose.yml) runs the orchestrator, MCP server,
 the `nesti-stats` page server, Redis and Qdrant; sandbox containers are created per test run and removed
@@ -273,12 +275,12 @@ each connection acts on the GitLab project or GitHub repository of that checkout
 ---
 
 ## Platform Gateway APIs
-Run the CLI inside the orchestrator:
+Run the CLI inside the nesti-orchestrator container:
 
 ```bash
-docker exec -it nesti-orchestrator nesti /provider
-docker exec -it nesti-orchestrator nesti /provider login claude
-docker exec -it nesti-orchestrator nesti /usage
+nesti /provider
+nesti /provider login claude
+nesti /usage
 ```
 
 Available commands (prefix each with `nesti` inside the container):
