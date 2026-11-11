@@ -10,7 +10,8 @@
 
 
 
-Nesti turns opted-in GitLab issues into Laravel 13 + PrimeVue 5 Merge Requests.
+Nesti turns opted-in GitLab or GitHub issues into Laravel 13 + PrimeVue 5
+Merge Requests or Pull Requests.
 It plans and generates code through an LLM cascade, then runs the applicable
 PHPUnit, OpenAPI, Vitest and Playwright gates in ephemeral Docker sandboxes.
 
@@ -23,7 +24,7 @@ flowchart LR
     A[Claim issue] --> B[Bootstrap, skills and plan]
     B --> C[Generate code]
     C --> D[Test gates]
-    D -->|Pass| E[Commit, push and open MR]
+    D -->|Pass| E[Commit, push and open MR/PR]
     D -->|Retry| C
 ```
 
@@ -52,9 +53,10 @@ change; otherwise Nesti leaves it untouched.
 
 ---
 
-## Issue Intake (GitLab Issues)
+## Issue Intake (GitLab or GitHub Issues)
 
-Write the issue in English and add `GITLAB_ISSUE_LABEL` (default `nesti`).
+Write the issue in English and add the opt-in label (`GITLAB_ISSUE_LABEL`, or
+`NESTI_GITHUB_ISSUE_LABEL` on GitHub; default `nesti`).
 See [ISSUE_GUIDELINE.md](ISSUE_GUIDELINE.md) for short examples and detailed
 request guidance. Issue numbers are project-scoped IIDs, such as `#7`.
 
@@ -66,7 +68,7 @@ request guidance. Issue numbers are project-scoped IIDs, such as `#7`.
 | Done | Closed |
 
 Nesti verifies label changes by reading the issue back; a rejected claim
-stops before cloning. Success removes the lock and posts the MR URL
+stops before cloning. Success removes the lock and posts the MR/PR URL
 (`Closes #<iid>`); exhausted retries remove the lock and post the failure.
 Human closures, opt-outs and manual pauses are not reversed.
 
@@ -175,7 +177,7 @@ a logged 404.
 |------|--------------|
 | Orchestration | `main.py`, `task_engine.py`, `graph/` (LangGraph) |
 | Providers and prompts | `llm_client.py`, `prompt_builder.py`, `issue_scope.py` |
-| GitLab | `gitlab_issues_client.py`, `gitlab_client.py` |
+| Forge | `forge.py`, `gitlab_issues_client.py`, `gitlab_client.py`, `github_issues_client.py`, `github_client.py`, `git_auth.py` |
 | Sandboxes | `docker_runner.py`, `frontend_runner.py` |
 | Context and memory | `skill_catalog.py`, `skill_loader.py`, `conversation_store.py`, `vector_store.py`, `semantic_cache.py` |
 | Interactive tools | `mcp_server/` (FastMCP), `scripts/oauth.py` (`nesti` CLI) |
@@ -193,8 +195,9 @@ afterwards. Dependencies and image versions live in
 ### install.sh
 
 The setup wizard checks the prerequisites (docker, git, curl, Python 3, Docker
-Compose), writes `.env` from prompts, verifies GitLab access, creates the
-opt-in label if missing, clones the project checkout when absent, builds and starts the
+Compose), asks for the forge (`NESTI_FORGE`: `gitlab`, the default, or
+`github`), writes `.env` from prompts, verifies forge access, creates the
+opt-in labels if missing, clones the project checkout when absent, builds and starts the
 containers, waits for readiness, offers consumer provider logins, installs the
 `nesti` launcher to `~/.local/bin` and optionally runs the preflight:
 ```bash
@@ -202,12 +205,31 @@ containers, waits for readiness, offers consumer provider logins, installs the
 ```
 `--help` lists the options.
 
+### GitHub
+
+Set `NESTI_FORGE=github` (install.sh asks) and configure the
+`NESTI_GITHUB_*` block of `.env.example`:
+
+- Run Nesti as a **dedicated bot account**, never a maintainer's personal
+  account: with a personal token your own replies count as Nesti's notes.
+  install.sh shows the token owner and asks for confirmation.
+- Token: a fine-grained PAT restricted to the one repository with Contents
+  RW, Issues RW, Pull requests RW and Metadata R. Variables RW is optional and
+  enables the poll heartbeat that detects a second poller; without it Nesti
+  warns once.
+- Adding the opt-in label needs triage permission. install.sh creates
+  `<label>`, `<label>::in-progress` and `<label>::pause` when missing.
+- Only issues authored by repository owners, members or collaborators are
+  picked up ([ISSUE_GUIDELINE.md](ISSUE_GUIDELINE.md#on-github)). The issue
+  closes when the Pull Request opens.
+- Rollback: set `NESTI_FORGE=gitlab` and recreate the containers.
+
 ### Manual Installation
 
 Configure `.env`, then start:
 ```bash
 cp .env.example .env
-# Set GitLab access and an API key or consumer subscription.
+# Set forge access (GitLab, or NESTI_FORGE=github) and an API key or consumer subscription.
 docker-compose up -d --build
 ```
 Sandbox images are built and skills indexed automatically before polling.
@@ -218,7 +240,7 @@ docker exec nesti-orchestrator python scripts/fetch_skills.py
 ```
 A rebuild uses the repository's corpus, not the container-local refresh.
 
-Optional preflight (creates and closes a GitLab probe issue):
+Optional preflight (creates and closes a probe issue on the forge):
 ```bash
 docker exec nesti-orchestrator python scripts/preflight.py
 ```
@@ -227,7 +249,7 @@ docker exec nesti-orchestrator python scripts/preflight.py
 
 ## MCP Server
 
-`nesti-mcp` exposes the shared issue, GitLab, sandbox, skill, memory, quota and usage statistics
+`nesti-mcp` exposes the shared issue, forge, sandbox, skill, memory, quota and usage statistics
 tools over stdio. It runs alongside the orchestrator and makes no LLM calls.
 
 Connect Claude Code:
@@ -238,7 +260,7 @@ claude mcp add nesti -- nesti mcp
 
 For VS Code, use [`.vscode/mcp.json.example`](.vscode/mcp.json.example).
 Other MCP clients run `nesti mcp` from the project's git checkout, or `nesti mcp <checkout>`:
-each connection acts on the GitLab project of that checkout's `origin` remote.
+each connection acts on the GitLab project or GitHub repository of that checkout's `origin` remote.
 
 ---
 
@@ -320,8 +342,9 @@ when configured.
 
 Use [`.env.example`](.env.example) as the configuration reference:
 
-- Required: `GITLAB_URL`, `GITLAB_TOKEN`, `GITLAB_PROJECT_PATH` and at least
-  one usable LLM provider.
+- Required: `GITLAB_URL`, `GITLAB_TOKEN`, `GITLAB_PROJECT_PATH` (with
+  `NESTI_FORGE=github`: `NESTI_GITHUB_REPOSITORY`, `NESTI_GITHUB_TOKEN`) and
+  at least one usable LLM provider.
 - `NESTI_CONSUMER_PRIORITY` orders subscriptions.
 - Paid APIs require both their `*_API_ENABLED=true` flag and API key.
   A disabled flag prevents billing even when a key is present; Anthropic's
