@@ -22,8 +22,19 @@ services:
       - ./state:/orchestrator/state
       # Plugin skill sources and event signing keys (nesti /plugin), read-only; never the config dir.
       # state/plugins/runtime/active.json arrives through ./state above.
-      - ./.private/plugins/packages:/orchestrator/plugins/packages:ro
-      - ./.private/plugins/secrets:/orchestrator/plugins/secrets:ro
+      # install.sh creates both dirs; Docker must not, or root would own them and `nesti /plugin` could not write keys.
+      - type: bind
+        source: ./.private/plugins/packages
+        target: /orchestrator/plugins/packages
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.private/plugins/secrets
+        target: /orchestrator/plugins/secrets
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       # nesti /provider login antigravity runs a short-lived local HTTP
       # listener (scripts/oauth.py AntigravityProvider) to capture Google's

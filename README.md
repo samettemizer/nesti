@@ -240,8 +240,9 @@ Configure `.env`, then start:
 ```bash
 cp .env.example .env
 # Set forge access (GitLab, or NESTI_FORGE=github) and an API key or consumer subscription.
-# The orchestrator joins the plugin event network; install.sh creates it.
+# The orchestrator joins the plugin event network and mounts the plugin dirs; install.sh creates them.
 docker network create --internal nesti-plugins
+mkdir -p .private/plugins/packages .private/plugins/secrets && chmod 700 .private/plugins/secrets
 docker-compose up -d --build
 ```
 Sandbox images are built and skills indexed automatically before polling.

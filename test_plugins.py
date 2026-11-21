@@ -94,9 +94,14 @@ class FakeDocker:
             return 1, "cannot connect to the Docker daemon"
         if argv[:2] == ["docker", "compose"]:
             if "config" in argv:
+                compose_dir = os.path.dirname(argv[argv.index("-f") + 1])  # Compose's project dir, like the real one
                 return 0, json.dumps({
                     "services": {"receiver": {"image": "hookbox:test", "networks": {"default": None, "nesti-plugins": None},
-                                              "volumes": [{"type": "volume", "source": "data", "target": "/data"}]}},
+                                              "volumes": [{"type": "volume", "source": "data", "target": "/data"},
+                                                          {"type": "bind", "source": os.path.join(compose_dir, "${STAGE:?unset}") + "/omp",
+                                                           "target": "/stage", "read_only": True},
+                                                          {"type": "bind", "source": os.path.join(compose_dir, "$LONG2") + "/y",
+                                                           "target": "/y"}]}},
                     "volumes": {"data": {}}, "networks": {"nesti-plugins": {"external": True}}})
             if "up" in argv:
                 if "up" in self.fail or cwd in self.fail_up_dirs:
@@ -335,8 +340,17 @@ code, out, err = run("install", str(HOOK), "--ref", "v1")
 check(code == 1 and "--trust" in err and not FAKE.argvs("sh") and not Path(PATHS.package("hookbox")).exists(),
       "noninteractive install without --trust is refused before any prepare")
 check("repository: %s" % HOOK in out and hook1 in out and "prepare:    sh prepare.sh" in out
-      and "service receiver: hookbox:test" in out and "mount: volume data -> /data" in out and "network nesti-plugins (external)" in out,
-      "trust summary shows repository, SHA, prepare, services, volumes/mounts, networks")
+      and "service receiver: hookbox:test" in out and "mount: volume data -> /data" in out and "network nesti-plugins (external)" in out
+      and "mount: bind ${STAGE:?unset}/omp -> /stage (read-only)" in out and "mount: bind $LONG2/y -> /y" in out,
+      "trust summary shows repository, SHA, prepare, services, volumes/mounts (variable sources as written), networks")
+sub = os.path.join(os.sep + "pkg", "deploy")
+lines = np._describe_compose({"services": {"s": {"image": "i", "volumes": [
+    {"type": "bind", "source": os.path.join(sub, "${X}") + "/a", "target": "/a"},
+    {"type": "bind", "source": os.path.join(sub + "x", "${Z}"), "target": "/z"},
+    {"type": "bind", "source": os.path.join(sub, "data"), "target": "/d"}]}}}, sub)
+check("    mount: bind ${X}/a -> /a" in lines and "    mount: bind %s -> /z" % os.path.join(sub + "x", "${Z}") in lines
+      and "    mount: bind %s -> /d" % os.path.join(sub, "data") in lines,
+      "a compose file in a package subdir: only its own dir is stripped, at a separator boundary, only before $")
 code, out, err = run("install", str(HOOK), "--ref", "v1", "--trust")
 prep = FAKE.argvs("sh")
 check(code == 0 and len(prep) == 1 and prep[0]["argv"] == ["sh", "prepare.sh"] and prep[0]["cwd"] == PATHS.package("hookbox", hook1),
@@ -484,6 +498,9 @@ ignored = subprocess.run(["git", "check-ignore", "--", *ignore_paths], cwd=REPO,
 ignored = 0 if ignored.stdout.split() == ignore_paths else 1
 dockerignore = (REPO / ".dockerignore").read_text().split()
 check(ignored == 0 and ".private" in dockerignore and "state/" in dockerignore, ".private and state/plugins stay out of Git and images")
+compose = (REPO / "docker-compose.yml").read_text()
+check(compose.count("create_host_path: false") == 2 and ":/orchestrator/plugins/" not in compose,
+      "the plugin mounts never let Docker create (root-owned) host dirs")
 
 # ---------------------------------------------------------------------------
 print("\n[11] Service configure step: settings, runtime context, controlled restart")

@@ -870,7 +870,7 @@ def _settings(paths: Paths, name: str, manifest: Dict[str, Any]) -> Dict[str, st
     return values
 
 
-def _describe_compose(config: Dict[str, Any]) -> List[str]:
+def _describe_compose(config: Dict[str, Any], compose_dir: str) -> List[str]:
     lines = []
     services = config.get("services") or {}
     for sname in sorted(services):
@@ -883,7 +883,11 @@ def _describe_compose(config: Dict[str, Any]) -> List[str]:
         lines.append("  service %s: %s" % (sname, what or "no image"))
         for volume in svc.get("volumes") or []:
             if isinstance(volume, dict):
-                desc = "%s %s -> %s%s" % (volume.get("type", "volume"), volume.get("source", "(anonymous)"),
+                source = str(volume.get("source", "(anonymous)"))
+                prefix = compose_dir.rstrip("/\\") + os.sep
+                if source.startswith(prefix) and source[len(prefix):].startswith("$"):
+                    source = source[len(prefix):]  # Compose prefixes a $VAR source with the compose file's dir
+                desc = "%s %s -> %s%s" % (volume.get("type", "volume"), source,
                                           volume.get("target"), " (read-only)" if volume.get("read_only") else "")
             else:
                 desc = str(volume)
@@ -913,7 +917,8 @@ def _trust_and_prepare(paths: Paths, docker: Docker, info: Dict[str, Any], sourc
     """Show what the revision will run, require approval, then run its fixed-argv prepare step."""
     name, manifest = info["name"], info["manifest"]
     source_dir = paths.package(name, sha)
-    config = docker.config(source_dir, _package_path(source_dir, manifest["compose"], "compose"))
+    compose_file = _package_path(source_dir, manifest["compose"], "compose")
+    config = docker.config(source_dir, compose_file)
     services = config.get("services") or {}
     for event in manifest.get("events", []):
         if event["service"] not in services:
@@ -926,7 +931,7 @@ def _trust_and_prepare(paths: Paths, docker: Docker, info: Dict[str, Any], sourc
     if manifest.get("configure"):
         print("  configure:  %s (runs at every enable, with the package settings and Nesti's runtime context)"
               % " ".join(shlex.quote(a) for a in manifest["configure"]))
-    for line in _describe_compose(config):
+    for line in _describe_compose(config, os.path.dirname(compose_file)):
         print(line)
     print("Package code (prepare, Compose builds and services) runs with this host's Docker privileges; "
           "trusting it is not a sandbox.")
