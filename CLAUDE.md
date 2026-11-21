@@ -36,11 +36,12 @@ frontend_runner.py           Vitest + Playwright sandboxes
 gitlab_issues_client.py      issue intake + label lock; gitlab_client.py: repo + MR
 github_issues_client.py      GitHub counterpart (NESTI_FORGE=github): labels only via POST/DELETE …/labels,
                              trusted = OWNER/MEMBER/COLLABORATOR authors, 65,536-char note fit keeping the marker;
-                             github_client.py: repo + PR (422 "already exists" → the open PR, body fitted)
+                             github_client.py: repo + PR (422 "already exists" → the open PR, body fitted),
+                             pull_request_event + deliver_event: signed GitHub pull_request webhook for plugins
 forge.py                     forge client Protocols + factory (NESTI_FORGE, default gitlab), display words
                              (term), failed_run_marker, acted-on project: .env (orchestrator) or the MCP
                              client's git remote, whose host picks GitHub or GitLab; identity() scopes
-                             every per-issue Redis key
+                             every per-issue Redis key; pr_ready_event(): the forge's plugin PR event ("" on GitLab)
 git_auth.py                  forge-neutral git auth: per-call http.extraHeader env (never in the remote
                              URL / .git/config) + credential redaction of git error text; GitRepoClient:
                              the clone/branch/verified-push flow both repo clients share
@@ -273,6 +274,7 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `graph/nodes.py` | `docker_runner.py` | `run_tests()` → `(bool, str)` |
 | `graph/nodes.py` | `graph/tools.py` | `tool_app_facts(backend_path)` → `{"success", "result": {"facts": str, "tables": int, "reason": str}}`; empty facts when skipped |
 | `graph/nodes.py` | `graph/tools.py` | `tool_plugin_skills()` → `{"success", "result": [{package, skill, revision, ref, arguments, phases, text}]}` in runtime order; `[]` without `active.json` or bindings; a malformed runtime or unusable enabled binding → `success=False`, which `node_plan` turns into a failed issue; called once per run, `node_code` reuses `plugin_skills` |
+| `graph/nodes.py` | `graph/tools.py` → `github_client.py` | `tool_plugin_pr_ready(pr_number)` → `{"success", "result": [{package, revision, url, reply \| error}]}`, one per enabled subscription to `forge.pr_ready_event()`, read from `active.json` at call time; `[]` (nothing called) on GitLab or without a subscription; the PR is read once from the API (missing identity field → error), each POST is plain `requests`, HMAC-signed with its own `secret_file`, no redirects, no GitHub token, 10 s timeout; `node_commit` calls it after the close attempt and only logs/alerts (html-escaped) per failure — never changes `mr_url`, the issue or cleanup; no retry |
 | `graph/tools.py` | `docker_runner.py` | `run_app_facts()` → `(bool, str)` |
 | `graph/tools.py` | `docker_runner.py` | `run_openapi_export()` / `run_bootstrap()` / `run_scramble_install()` → `(bool, str)` |
 | `graph/tools.py` | `frontend_runner.py` | `run_vitest()` / `run_playwright()` → `(bool, str)` |

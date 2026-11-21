@@ -55,6 +55,7 @@ one ``SCOPE:`` line.  The scope narrows the prompts, the reference docs and the
 retrieved chunks; it never gates a test layer.
 """
 
+import html
 import logging
 import json
 import math
@@ -77,7 +78,7 @@ from graph.tools import (
     tool_memory_search_docs, tool_memory_find_similar, tool_memory_remember_solution,
     tool_memory_remember_failure, tool_memory_recall_failures,
     tool_memory_forget_episodes,
-    tool_issue_domain_answer, tool_issue_ask_domain, tool_app_facts, tool_plugin_skills,
+    tool_issue_domain_answer, tool_issue_ask_domain, tool_app_facts, tool_plugin_skills, tool_plugin_pr_ready,
     _STACK_SCAN_PRUNE,
 )
 import forge
@@ -1764,8 +1765,26 @@ def node_on_layer_failure(state: IssueState) -> dict:
     }
 
 
+def _notify_plugins(issue_id: int, subject: str, mr: dict) -> None:
+    """Deliver the PR-ready plugin event to the enabled subscriptions; logs and alerts only, never raises."""
+    result = tool_plugin_pr_ready(mr.get("iid"))
+    failures = [("plugins", result["error"])] if not result["success"] else []
+    for delivery in result.get("result") or []:
+        if "error" in delivery:
+            failures.append((delivery["package"], delivery["error"]))
+        else:  # a 202 "queued" is acceptance, not completed work
+            logger.info("Plugin %s accepted the %s event of issue #%s: %s",
+                        delivery["package"], forge.term("mr"), issue_id, delivery["reply"])
+    for package, error in failures:
+        logger.error("Plugin event delivery to %s failed for issue #%s: %s", package, issue_id, error)
+        telegram_notify(
+            f"⚠️ Plugin event delivery to <b>{html.escape(package)}</b> failed for issue <b>#{issue_id}</b> – "
+            f"<i>{html.escape(subject)}</i>\n<code>{html.escape(str(error))}</code>"
+        )
+
+
 def node_commit(state: IssueState) -> dict:
-    """Commit, push, open MR, close the issue, drop the history."""
+    """Commit, push, open MR, close the issue, notify plugin subscribers, drop the history."""
     logger.debug("→ node_commit")
     issue_id = state["issue_id"]
     subject = state.get("subject", f"issue-{issue_id}")
@@ -1814,6 +1833,14 @@ def node_commit(state: IssueState) -> dict:
         f"{state.get('coder_billing', 'unknown')} "
         f"(model `{state.get('coder_model', 'unknown')}`)"
     )
+    # Provenance from the run's own snapshot, so a receiver can match the exact standard.
+    skills = "; ".join(
+        f"{s['package']}/{s['skill']}@{s['revision']}"
+        + (f" ({', '.join(f'{k}={v}' for k, v in sorted(s['arguments'].items()))})" if s["arguments"] else "")
+        for s in state.get("plugin_skills") or []
+    )
+    if skills:
+        provider_line += f" · plugin skills: {skills}"
     mr = tool_gitlab_open_mr(
         branch_name=state["branch_name"],
         issue_id=issue_id,
@@ -1841,6 +1868,7 @@ def node_commit(state: IssueState) -> dict:
     tool_issue_set_status(
         issue_id, "closed", note=f"AI Developer opened {forge.term('mr')}: {mr_url}"
     )
+    _notify_plugins(issue_id, subject, mr["result"].get("mr") or {})
     # self-updating loop: the plan that produced this MR becomes the
     # next similar issue's "past experience".  Episodes die with the run —
     # a reopened issue reusing this iid must not recall them as its own.

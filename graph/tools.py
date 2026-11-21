@@ -1476,18 +1476,39 @@ def tool_skill_catalog_status() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plugin skill bindings
+# Plugin skill bindings and event subscriptions
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# The host CLI (scripts/nesti_plugins.py) publishes the enabled bindings in
-# state/plugins/runtime/active.json; the sources are mounted read-only at
-# CONTAINER_PACKAGES_DIR.  No runtime file or no binding means plugin-free
+# The host CLI (scripts/nesti_plugins.py) publishes the enabled bindings and
+# subscriptions in state/plugins/runtime/active.json; the sources are mounted
+# read-only at CONTAINER_PACKAGES_DIR, the event signing keys at
+# CONTAINER_SECRETS_DIR.  No runtime file or no binding means plugin-free
 # prompts.  A binding that is enabled but cannot be used is an error: an issue
 # must never be planned with a silently missing skill.
 
 _PLUGIN_RUNTIME = project_layout.STATE_DIR / "plugins" / "runtime" / "active.json"
 _PLUGIN_PACKAGES = Path(nesti_plugins.CONTAINER_PACKAGES_DIR)
+_PLUGIN_SECRETS = Path(nesti_plugins.CONTAINER_SECRETS_DIR)
 _REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _plugin_runtime(key: str) -> list | None:
+    """The runtime file's *key* list (``skills`` / ``subscriptions``); None without a file, ValueError when malformed."""
+    try:
+        raw = _PLUGIN_RUNTIME.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"plugin runtime {_PLUGIN_RUNTIME} is unreadable: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(f"plugin runtime {_PLUGIN_RUNTIME} is not valid JSON: {exc}") from exc
+    if (not isinstance(data, dict) or data.get("version") != nesti_plugins.RUNTIME_VERSION
+            or not isinstance(data.get(key), list)):
+        raise ValueError(f"plugin runtime {_PLUGIN_RUNTIME} is not a version "
+                         f"{nesti_plugins.RUNTIME_VERSION} runtime file")
+    return data[key]
 
 
 def _plugin_binding(entry: object, packages: Path) -> dict:
@@ -1539,21 +1560,7 @@ def tool_plugin_skills() -> dict:
     is an error (never truncated, never skipped).
     """
     try:
-        try:
-            raw = _PLUGIN_RUNTIME.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return _ok([])
-        except (OSError, UnicodeDecodeError) as exc:
-            return _err(f"plugin runtime {_PLUGIN_RUNTIME} is unreadable: {exc}")
-        try:
-            data = json.loads(raw)
-        except ValueError as exc:
-            return _err(f"plugin runtime {_PLUGIN_RUNTIME} is not valid JSON: {exc}")
-        if (not isinstance(data, dict) or data.get("version") != nesti_plugins.RUNTIME_VERSION
-                or not isinstance(data.get("skills"), list)):
-            return _err(f"plugin runtime {_PLUGIN_RUNTIME} is not a version "
-                        f"{nesti_plugins.RUNTIME_VERSION} runtime file")
-        skills = [_plugin_binding(entry, _PLUGIN_PACKAGES) for entry in data["skills"]]
+        skills = [_plugin_binding(entry, _PLUGIN_PACKAGES) for entry in _plugin_runtime("skills") or []]
         for phase in nesti_plugins.PHASES:
             total = sum(len(skill["text"]) for skill in skills if phase in skill["phases"])
             if total > nesti_plugins.PHASE_BINDING_CHAR_LIMIT:
@@ -1562,6 +1569,70 @@ def tool_plugin_skills() -> dict:
         return _ok(skills)
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_plugin_skills failed: %s", exc)
+        return _err(exc)
+
+
+def _plugin_subscriptions(event: str) -> list[dict]:
+    """The enabled subscriptions to *event*; every runtime entry is validated, a malformed one raises ValueError."""
+    matching = []
+    for entry in _plugin_runtime("subscriptions") or []:
+        if not isinstance(entry, dict):
+            raise ValueError("a plugin subscription is not an object")
+        package, revision, name, url, secret_file = (
+            entry.get(key) for key in ("package", "revision", "event", "url", "secret_file")
+        )
+        if not (isinstance(package, str) and nesti_plugins.NAME_RE.match(package)):
+            raise ValueError(f"invalid plugin subscription package {package!r}")
+        where = f"plugin {package} subscription"
+        if not isinstance(revision, str) or not _REVISION_RE.match(revision):
+            raise ValueError(f"{where}: revision {revision!r} is not a full commit SHA")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{where}: the event is missing")
+        parts = urlsplit(url) if isinstance(url, str) else None
+        if not parts or parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError(f"{where}: url {url!r} is not an http(s) URL")
+        if not isinstance(secret_file, str) or not Path(secret_file).resolve().is_relative_to(
+                _PLUGIN_SECRETS.resolve()):
+            raise ValueError(f"{where}: signing key {secret_file!r} is outside {_PLUGIN_SECRETS}")
+        if name == event:
+            matching.append(entry)
+    return matching
+
+
+def tool_plugin_pr_ready(pr_number: int | None) -> dict:
+    """
+    Deliver this forge's PR-ready plugin event for PR *pr_number* to every
+    enabled subscription, read from the runtime file now.
+    result: [{"package", "revision", "url", "reply"} | {"package", "revision", "url", "error"}],
+    one per subscription; [] when the forge emits no such event or nothing
+    subscribes (then nothing is called).
+
+    A malformed runtime, a missing PR number or an unreadable PR is an error;
+    a failed receiver or signing key fails only its own entry.  No retry.
+    """
+    try:
+        event = forge.pr_ready_event()
+        subscriptions = _plugin_subscriptions(event) if event else []
+        if not subscriptions:
+            return _ok([])
+        if not pr_number:
+            return _err(f"the {forge.term('mr')} carries no number")
+        client = forge.repo_client()
+        body, headers = client.pull_request_event(pr_number)
+        deliveries = []
+        for sub in subscriptions:
+            delivery = {"package": sub["package"], "revision": sub["revision"], "url": sub["url"]}
+            try:
+                secret = Path(sub["secret_file"]).read_bytes()
+                if not secret:
+                    raise ValueError(f"signing key {sub['secret_file']} is empty")
+                delivery["reply"] = client.deliver_event(sub["url"], body, headers, secret)
+            except Exception as exc:  # pylint: disable=broad-except
+                delivery["error"] = str(exc)
+            deliveries.append(delivery)
+        return _ok(deliveries)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_plugin_pr_ready(%s) failed: %s", pr_number, exc)
         return _err(exc)
 
 

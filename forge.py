@@ -108,6 +108,11 @@ def failed_run_marker(subject: str, description: str, head_sha: str) -> str:
     return f"<!-- NESTI_FAILED_RUN_V1 {digest} -->"
 
 
+def pr_ready_event() -> str:
+    """The plugin event a ready PR emits on this forge (``github.pull_request.ready``); ``""`` on GitLab (none)."""
+    return "github.pull_request.ready" if kind() == "github" else ""
+
+
 def issue_client() -> IssueClient:
     """A fresh issue client for the configured forge."""
     if kind() == "github":

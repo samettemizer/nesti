@@ -240,6 +240,8 @@ Configure `.env`, then start:
 ```bash
 cp .env.example .env
 # Set forge access (GitLab, or NESTI_FORGE=github) and an API key or consumer subscription.
+# The orchestrator joins the plugin event network; install.sh creates it.
+docker network create --internal nesti-plugins
 docker-compose up -d --build
 ```
 Sandbox images are built and skills indexed automatically before polling.
@@ -389,10 +391,18 @@ nesti /plugin remove <name>
   commands and status lines do not apply. Without plugins the prompts carry no
   skill. An enabled skill that cannot be read fails the issue with the reason in
   its note.
-- Service receivers join the external `nesti-plugins` network, which
-  `install.sh` creates with `--internal`. It is not a one-way firewall:
-  receivers can reach orchestrator ports on it. Receivers need their own
-  network for outbound access.
+- Service receivers and the orchestrator join the external `nesti-plugins`
+  network, which `install.sh` creates with `--internal`. It is not a one-way
+  firewall: receivers can reach orchestrator ports on it. Receivers need their
+  own network for outbound access.
+- After Nesti opens a GitHub pull request and tries to close the issue, every enabled
+  subscription to `github.pull_request.ready` receives a GitHub `pull_request`
+  webhook (`action=opened`). The webhook carries the PR's actual state, draft flag,
+  author and head SHA. It is signed with `X-Hub-Signature-256`, and its delivery ID
+  is fixed per PR and head SHA. A failed delivery is logged and sent as a Telegram alert. It never changes
+  the PR or the issue, and it is not retried. A `202` reply means accepted, not
+  done. GitLab runs send nothing. With plugin skills, the PR's **AI provider**
+  line names each `package/skill@revision` and its arguments.
 
 Example, [Ponytail](https://github.com/DietrichGebert/ponytail) (fresh
 installs do not include it, and it uses its own default level until you set one):

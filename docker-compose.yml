@@ -36,6 +36,10 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-60}
     command: ["--loop"]
+    networks:
+      # `default` must stay listed: a service with `networks:` leaves it otherwise.
+      - default
+      - nesti-plugins
     depends_on:
       nesti-redis:
         condition: service_healthy
@@ -152,3 +156,11 @@ volumes:
   # Same lifecycle: survives `down`, removed only by `docker-compose down -v`.
   nesti_qdrant_data:
     driver: local
+
+networks:
+  # Plugin event delivery (node_commit → enabled subscriptions). Created by install.sh /
+  # `nesti /plugin`, never by Compose, so `down` cannot remove it under active plugins.
+  # Only the orchestrator joins; Redis, Qdrant, MCP and stats stay off it.
+  nesti-plugins:
+    name: nesti-plugins
+    external: true
