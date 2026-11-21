@@ -63,7 +63,9 @@ scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetc
                              evaluate_reranker.py + reranker_evaluation.py (offline quality gate)
                              nesti_plugins.py: host-only `nesti /plugin` (Python 3.6+ stdlib, no Nesti imports) →
                              state/plugins/registry.json + runtime/active.json; sources in .private/plugins/
-                             (mounted read-only into the orchestrator); graph/tools.py reuses its constants
+                             (mounted read-only into the orchestrator); graph/tools.py reuses its constants;
+                             a service's optional `configure` step runs at enable with its .env, NESTI_PROJECT_PATH
+                             and NESTI_PLUGIN_CONTEXT (other packages' skills); enable recreates, list flags stale
 skills/, templates/          vendored doc corpus (primevue/laravel/practices),
                              bootstrap templates (laravel/, spa/), boost/ SPA discovery skill
 test_graph_smoke.py          offline regression net (.venv/bin/python test_graph_smoke.py)

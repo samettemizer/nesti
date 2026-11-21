@@ -85,10 +85,13 @@ class FakeDocker:
         self.fail = set()
         self.fail_up_dirs = set()
         self.interrupt = False
+        self.contexts = []
 
     def __call__(self, argv, cwd=None, env=None, timeout=None, stream=False):
         argv = list(argv)
         self.calls.append({"argv": argv, "cwd": cwd, "env": dict(env or {})})
+        if argv[:2] == ["docker", "ps"] and "ps" in self.fail:
+            return 1, "cannot connect to the Docker daemon"
         if argv[:2] == ["docker", "compose"]:
             if "config" in argv:
                 return 0, json.dumps({
@@ -127,8 +130,12 @@ class FakeDocker:
             if self.interrupt:
                 raise KeyboardInterrupt
             return (0 if self.probe_ok else 1), ""
-        if argv[0] == "sh":
-            return (1 if "prepare" in self.fail else 0), ""
+        if argv[0] == "sh":  # prepare.sh / configure.sh: fails when its step name is in self.fail
+            if "NESTI_PLUGIN_CONTEXT" in (env or {}):
+                self.contexts.append(json.loads(Path(env["NESTI_PLUGIN_CONTEXT"]).read_text()))
+            if argv[1] == "configure.sh" and "configure-oserror" in self.fail:
+                raise OSError("disk full")
+            return (1 if argv[1].split(".")[0] in self.fail else 0), ""
         raise AssertionError("unexpected argv %r" % argv)
 
     def argvs(self, word):
@@ -477,6 +484,107 @@ ignored = subprocess.run(["git", "check-ignore", "--", *ignore_paths], cwd=REPO,
 ignored = 0 if ignored.stdout.split() == ignore_paths else 1
 dockerignore = (REPO / ".dockerignore").read_text().split()
 check(ignored == 0 and ".private" in dockerignore and "state/" in dockerignore, ".private and state/plugins stay out of Git and images")
+
+# ---------------------------------------------------------------------------
+print("\n[11] Service configure step: settings, runtime context, controlled restart")
+for label, extra in (("configure as a string", {"compose": "compose.yml", "configure": "sh configure.sh"}),
+                     ("configure without compose", {"skills": [], "configure": ["sh", "configure.sh"]}),
+                     ("configure entry point outside", {"compose": "compose.yml", "configure": ["../configure.sh"]})):
+    repo = BASE / ("bad-" + label.replace(" ", "-"))
+    commit(repo, {"nesti-plugin.json": json.dumps(dict({"schema_version": 1, "name": "bad", "nesti_plugin_api": 1}, **extra)),
+                  "compose.yml": "services: {}\n"}, tag="v1")
+    code, _, err = run("install", str(repo), "--ref", "v1", "--trust")
+    check(code == 1 and not Path(PATHS.package("bad")).exists(), "%s rejected: %s" % (label, err.strip()[-90:]))
+CONF = BASE / "confbox"
+conf_manifest = dict(manifest, name="confbox", configure=["sh", "configure.sh"])
+conf1 = commit(CONF, {"nesti-plugin.json": json.dumps(conf_manifest), "compose.yml": "services: {}\n",
+                      "prepare.sh": "true\n", "configure.sh": "true\n", ".env.example": "API_TOKEN=\nHOOK_SECRET=\n"}, tag="v1")
+code, out, err = run("install", str(CONF), "--ref", "v1", "--trust")
+check(code == 0 and "configure:  sh configure.sh (runs at every enable" in out and not FAKE.argvs("configure.sh"),
+      "trust summary shows the configure step; install never runs it: %s" % err.strip())
+FAKE.fail.add("ps")
+code, _, err = run("enable", "confbox")
+FAKE.fail.discard("ps")
+check(code == 1 and "missing settings" in err and "service state unknown: docker ps failed" in err
+      and "still running" not in err, "docker ps failing on a first enable: state unknown, never 'still running'")
+(ROOT / ".env").write_text("NESTI_PROJECT_PATH=/srv/managed\n")
+Path(PATHS.config("confbox"), ".env").write_text("API_TOKEN=tok-456\nHOOK_SECRET=%s\n" % SECRET)
+ups_before = len(FAKE.argvs("up"))
+FAKE.fail.add("configure")
+code, _, err = run("enable", "confbox")
+FAKE.fail.discard("configure")
+check(code == 1 and "configure step failed" in err and len(FAKE.argvs("up")) == ups_before
+      and registry()["packages"]["confbox"]["enabled"] is False
+      and not [s for s in runtime()["subscriptions"] if s["package"] == "confbox"], "failed configure: nothing started, inactive")
+FAKE.contexts = []
+code, out, err = run("enable", "confbox")
+calls = [c["argv"] for c in FAKE.calls]
+conf_call = FAKE.argvs("configure.sh")[-1]
+up = FAKE.argvs("up")[-1]["argv"]
+check(code == 0 and calls.index(conf_call["argv"]) < calls.index(up), "configure runs before compose up: %s" % err.strip())
+check(conf_call["cwd"] == PATHS.package("confbox", conf1) and conf_call["env"]["API_TOKEN"] == "tok-456"
+      and conf_call["env"]["NESTI_PROJECT_PATH"] == "/srv/managed"
+      and conf_call["env"]["NESTI_PLUGIN_WORK_DIR"] == PATHS.work("confbox", conf1),
+      "configure gets the package settings, Nesti's project path and its work dir")
+check(FAKE.contexts == [{"version": 1, "project_path": "/srv/managed", "skills": [
+    {"package": "misc-skills", "skill": "alpha", "revision": misc_sha, "ref": misc_sha[:10], "arguments": {"level": "ultra"},
+     "phases": ["code"], "text": "Alpha.\n"}]}], "runtime context: project path and other packages' enabled skills with text")
+check(not os.path.exists(conf_call["env"]["NESTI_PLUGIN_CONTEXT"]), "the context file is removed after configure")
+check("--force-recreate" in up and FAKE.argvs("up")[-1]["env"]["NESTI_PROJECT_PATH"] == "/srv/managed",
+      "compose up recreates services and interpolates the project path")
+code, out, _ = run("list")
+check(registry()["packages"]["confbox"]["context_digest"] and "stale" not in out, "fresh enable: context digest recorded, not stale")
+stops_before = len(FAKE.argvs("stop"))
+FAKE.fail.add("configure")
+code, _, err = run("enable", "confbox")
+FAKE.fail.discard("configure")
+rec = registry()["packages"]["confbox"]
+check(code == 1 and "configure step failed" in err and len(FAKE.argvs("stop")) == stops_before + 1
+      and FAKE.containers["nesti-plugin-confbox"][0][1] == "exited" and rec["enabled"] is False
+      and "enable failed: configure step failed" in rec["error"] and not Path(PATHS.secrets("confbox")).exists()
+      and not [s for s in runtime()["subscriptions"] if s["package"] == "confbox"],
+      "failed configure on re-enable: running service stopped, disabled with the error, subscriptions off")
+code, _, err = run("enable", "confbox")
+check(code == 0 and FAKE.containers["nesti-plugin-confbox"][0][1] == "running", "enable again after the failure: %s" % err.strip())
+FAKE.interrupt = True
+code, _, _ = run("enable", "confbox")
+FAKE.interrupt = False
+rec = registry()["packages"]["confbox"]
+check(code == 130 and rec["enabled"] is False and rec["error"] == "enable interrupted; service state unknown"
+      and FAKE.containers["nesti-plugin-confbox"][0][1] == "exited" and not Path(PATHS.secrets("confbox")).exists()
+      and not [s for s in runtime()["subscriptions"] if s["package"] == "confbox"],
+      "interrupt during readiness: best-effort stop, disabled with 'state unknown', subscriptions off")
+run("enable", "confbox")
+FAKE.fail.add("configure-oserror")
+code, _, err = run("enable", "confbox")
+FAKE.fail.discard("configure-oserror")
+rec = registry()["packages"]["confbox"]
+check(code == 1 and "disk full" in err and rec["enabled"] is False and rec["error"] == "enable failed: disk full"
+      and FAKE.containers["nesti-plugin-confbox"][0][1] == "exited"
+      and not [s for s in runtime()["subscriptions"] if s["package"] == "confbox"],
+      "OSError during configure: stopped, disabled with the error recorded, subscriptions off")
+code, _, err = run("enable", "confbox")
+check(code == 0 and FAKE.containers["nesti-plugin-confbox"][0][1] == "running", "enable after the OSError: %s" % err.strip())
+bindings_path("misc-skills").write_text(json.dumps({"skills": {"alpha": {"phases": ["code"], "arguments": {"level": "lite"}}}}))
+code, out, _ = run("enable", "misc-skills")
+check(code == 0 and "Stale: confbox:" in out and "nesti /plugin enable confbox" in out, "a skill argument change reports the service as stale")
+code, out, _ = run("list")
+check("stale:    author skills" in out.split("confbox", 1)[1], "list shows the stale service")
+FAKE.probe_ok = False
+code, _, err = run("enable", "confbox")
+rec = registry()["packages"]["confbox"]
+check(code == 1 and rec["enabled"] is False and "enable failed" in rec["error"]
+      and not [s for s in runtime()["subscriptions"] if s["package"] == "confbox"],
+      "re-enable unpublishes first; a failed restart leaves it inactive with the error")
+FAKE.probe_ok = True
+code, out, err = run("enable", "confbox")
+code_list, list_out, _ = run("list")
+check(code == 0 and [s["package"] for s in runtime()["subscriptions"]] == ["confbox"] and "stale" not in out + list_out
+      and FAKE.contexts[-1]["skills"][0]["arguments"] == {"level": "lite"},
+      "re-enable regenerates with the new context and republishes after readiness: %s" % err.strip())
+run("disable", "misc-skills")
+code, out, _ = run("remove", "confbox")
+check(code == 0 and "Stale" not in out and Path(PATHS.config("confbox"), ".env").exists(), "remove keeps settings")
 
 print("\n%s" % ("All checks passed." if not _failures else "%d check(s) FAILED." % _failures))
 _TMP.cleanup()

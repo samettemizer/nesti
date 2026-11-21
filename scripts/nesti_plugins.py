@@ -21,10 +21,20 @@ NESTI_PLUGIN_WORK_DIR. ``active.json`` (atomic replace) is what the container re
                "phases" (subset of plan/code), "arguments" ({str: str})}],
    "subscriptions": [{"package", "revision", "event", "url" (on the nesti-plugins network),
                       "secret_file" (under CONTAINER_SECRETS_DIR)}]}
+
+A service's optional ``configure`` step runs at every enable, before Compose starts, with the
+package's .env values, the NESTI_PLUGIN_* paths, NESTI_PROJECT_PATH (Nesti's .env) and
+NESTI_PLUGIN_CONTEXT: a temporary JSON file, removed afterwards, holding the runtime context
+  {"version": 1, "project_path", "skills": [{"package", "skill", "revision", "ref", "arguments",
+                                            "phases", "text"}]}
+with the enabled skill bindings of every other package in runtime order. Enable recreates the
+services, so they always run on the configuration just generated; when that context changes
+later, ``list`` and every mutating command report the service as stale until it is re-enabled.
 """
 
 import argparse
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -53,6 +63,7 @@ SCHEMA_VERSION = 1
 PLUGIN_API = 1
 REGISTRY_VERSION = 1
 RUNTIME_VERSION = 1
+CONTEXT_VERSION = 1
 NETWORK = "nesti-plugins"
 PROBE_IMAGE = "nesti-orchestrator:latest"
 CONTAINER_PACKAGES_DIR = "/orchestrator/plugins/packages"
@@ -73,7 +84,8 @@ HEX_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 ARG_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 URL_PATH_RE = re.compile(r"^/[A-Za-z0-9._~/%-]*$")
-_MANIFEST_KEYS = {"schema_version", "name", "nesti_plugin_api", "compose", "prepare", "config", "skills", "events"}
+_MANIFEST_KEYS = {"schema_version", "name", "nesti_plugin_api", "compose", "prepare", "configure", "config",
+                  "skills", "events"}
 _EVENT_KEYS = {"name", "service", "port", "path", "readiness_path", "secret_key"}
 _PROBE_CODE = (
     "import sys, urllib.request\n"
@@ -427,6 +439,23 @@ def _check_arguments(value: Any, where: str) -> Dict[str, str]:
     return dict(value)
 
 
+def _check_argv(root: str, argv: Any, step: str) -> None:
+    """A step is a fixed argv: 1 to MAX_PREPARE_ARGS strings, a path entry point inside the package."""
+    if not isinstance(argv, list) or not 1 <= len(argv) <= MAX_PREPARE_ARGS \
+            or any(not isinstance(a, str) or not a or "\0" in a for a in argv):
+        raise PluginError("%s must be a fixed argv list of 1 to %d strings" % (step, MAX_PREPARE_ARGS))
+    if "/" in argv[0]:
+        _package_path(root, argv[0], "%s entry point" % step)
+
+
+def _step_argv(source_dir: str, argv: List[str], step: str) -> List[str]:
+    """A validated step argv with a path entry point made absolute."""
+    argv = list(argv)
+    if "/" in argv[0]:
+        argv[0] = _package_path(source_dir, argv[0], "%s entry point" % step)
+    return argv
+
+
 def _load_manifest(root: str) -> Dict[str, Any]:
     path = _package_path(root, MANIFEST, "manifest")
     try:
@@ -447,15 +476,11 @@ def _load_manifest(root: str) -> Dict[str, Any]:
     compose = data.get("compose")
     if compose is not None:
         _package_path(root, compose, "compose")
-    prepare = data.get("prepare")
-    if prepare is not None:
-        if compose is None:
-            raise PluginError("prepare needs a compose file")
-        if not isinstance(prepare, list) or not 1 <= len(prepare) <= MAX_PREPARE_ARGS \
-                or any(not isinstance(a, str) or not a or "\0" in a for a in prepare):
-            raise PluginError("prepare must be a fixed argv list of 1 to %d strings" % MAX_PREPARE_ARGS)
-        if "/" in prepare[0]:
-            _package_path(root, prepare[0], "prepare entry point")
+    for step in ("prepare", "configure"):
+        if data.get(step) is not None:
+            if compose is None:
+                raise PluginError("%s needs a compose file" % step)
+            _check_argv(root, data[step], step)
     config = data.get("config", {})
     if not isinstance(config, dict) or set(config) - {"env_example", "required"}:
         raise PluginError("config may hold only env_example and required")
@@ -677,11 +702,12 @@ class Docker(object):
         return data
 
     def up(self, project: str, compose_file: str, env_file: str, source_dir: str, env: Dict[str, str]) -> None:
-        """Start prepared images; never builds."""
+        """Start prepared images, recreating running containers so they load the current configuration; never builds."""
         argv = self.compose() + ["-p", project, "-f", compose_file]
         if os.path.isfile(env_file):
             argv += ["--env-file", env_file]
-        self._check(argv + ["up", "-d", "--no-build", "--remove-orphans"], "docker compose up", cwd=source_dir, env=env)
+        self._check(argv + ["up", "-d", "--no-build", "--force-recreate", "--remove-orphans"], "docker compose up",
+                    cwd=source_dir, env=env)
 
     def containers(self, project: str) -> List[Tuple[str, str, str]]:
         """(name, state, compose service) of every container of a Compose project."""
@@ -729,10 +755,87 @@ def _project(name: str) -> str:
     return "nesti-plugin-%s" % name
 
 
+def _project_path(paths: Paths) -> str:
+    """NESTI_PROJECT_PATH from Nesti's own .env: the managed project Nesti mounts; '' when unset."""
+    return _read_env(os.path.join(paths.root, ".env")).get("NESTI_PROJECT_PATH", "")
+
+
 def _plugin_env(paths: Paths, name: str, sha: str) -> Dict[str, str]:
-    return {"NESTI_PLUGIN_NAME": name, "NESTI_PLUGIN_SHA": sha, "NESTI_PLUGIN_DIR": paths.package(name, sha),
-            "NESTI_PLUGIN_CONFIG_DIR": paths.config(name), "NESTI_PLUGIN_WORK_DIR": paths.work(name, sha),
-            "NESTI_PLUGIN_NETWORK": NETWORK}
+    env = {"NESTI_PLUGIN_NAME": name, "NESTI_PLUGIN_SHA": sha, "NESTI_PLUGIN_DIR": paths.package(name, sha),
+           "NESTI_PLUGIN_CONFIG_DIR": paths.config(name), "NESTI_PLUGIN_WORK_DIR": paths.work(name, sha),
+           "NESTI_PLUGIN_NETWORK": NETWORK}
+    project_path = _project_path(paths)
+    if project_path:
+        env["NESTI_PROJECT_PATH"] = project_path
+    return env
+
+
+def plugin_context(paths: Paths, registry: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """The runtime context a service's configure step sees: project path and other packages' enabled skills."""
+    skills = []
+    for other in sorted(registry["packages"]):
+        record = registry["packages"][other]
+        if other == name or not record.get("enabled"):
+            continue
+        source_dir = paths.package(other, record["sha"])
+        for binding in record.get("bindings", []):
+            where = "skill %s/%s" % (other, binding["skill"])
+            skills.append({
+                "package": other, "skill": binding["skill"], "revision": record["sha"], "ref": record["ref"],
+                "arguments": dict(binding["arguments"]), "phases": list(binding["phases"]),
+                "text": _read_text(_package_path(source_dir, binding["path"], where), where),
+            })
+    return {"version": CONTEXT_VERSION, "project_path": _project_path(paths), "skills": skills}
+
+
+def _digest(context: Dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(context, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _configure(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str, sha: str,
+               argv: List[str], values: Dict[str, str]) -> str:
+    """Run the package's configure step with settings and runtime context; returns the context digest."""
+    context = plugin_context(paths, registry, name)
+    os.makedirs(paths.tmp, exist_ok=True)
+    fd, context_file = tempfile.mkstemp(prefix="context-", suffix=".json", dir=paths.tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(context, handle, indent=2, sort_keys=True)
+        env = dict(values)
+        env.update(_plugin_env(paths, name, sha))
+        env["NESTI_PLUGIN_CONTEXT"] = context_file
+        os.makedirs(paths.work(name, sha), exist_ok=True)
+        source_dir = paths.package(name, sha)
+        code, _ = docker.runner(_step_argv(source_dir, argv, "configure"), cwd=source_dir, env=env, stream=True)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(context_file)
+    if code:
+        raise PluginError("configure step failed (exit %d)" % code)
+    return _digest(context)
+
+
+def stale_note(paths: Paths, registry: Dict[str, Any], name: str) -> str:
+    """Why an enabled, configured service runs on an outdated runtime context; '' when current."""
+    record = registry["packages"][name]
+    if not record.get("enabled") or not record.get("context_digest"):
+        return ""
+    try:
+        current = _digest(plugin_context(paths, registry, name))
+    except PluginError as exc:
+        return "cannot read its runtime context: %s" % exc
+    if current == record["context_digest"]:
+        return ""
+    return ("author skills or the project path changed since it was enabled; "
+            "run 'nesti /plugin enable %s' to regenerate its configuration and restart it" % name)
+
+
+def _print_stale(paths: Paths) -> None:
+    registry = load_registry(paths)
+    for name in sorted(registry["packages"]):
+        note = stale_note(paths, registry, name)
+        if note:
+            print("Stale: %s: %s." % (name, note))
 
 
 def _read_env(path: str) -> Dict[str, str]:
@@ -820,6 +923,9 @@ def _trust_and_prepare(paths: Paths, docker: Docker, info: Dict[str, Any], sourc
     print("  repository: %s" % source)
     print("  revision:   %s (ref %s)" % (sha, ref))
     print("  prepare:    %s" % (" ".join(shlex.quote(a) for a in prepare) if prepare else "none"))
+    if manifest.get("configure"):
+        print("  configure:  %s (runs at every enable, with the package settings and Nesti's runtime context)"
+              % " ".join(shlex.quote(a) for a in manifest["configure"]))
     for line in _describe_compose(config):
         print(line)
     print("Package code (prepare, Compose builds and services) runs with this host's Docker privileges; "
@@ -833,10 +939,8 @@ def _trust_and_prepare(paths: Paths, docker: Docker, info: Dict[str, Any], sourc
         raise PluginError("not trusted; nothing was run")
     if prepare:
         os.makedirs(paths.work(name, sha), exist_ok=True)
-        argv = list(prepare)
-        if "/" in argv[0]:
-            argv[0] = _package_path(source_dir, argv[0], "prepare entry point")
-        code, _ = docker.runner(argv, cwd=source_dir, env=_plugin_env(paths, name, sha), stream=True)
+        code, _ = docker.runner(_step_argv(source_dir, prepare, "prepare"), cwd=source_dir,
+                                env=_plugin_env(paths, name, sha), stream=True)
         if code:
             raise PluginError("prepare step failed (exit %d)" % code)
 
@@ -859,26 +963,38 @@ def _write_secret(paths: Paths, name: str, event: str, value: str) -> None:
 
 
 def _stop_project(docker: Docker, project: str) -> str:
-    """Stop the project's live containers; returns '' or a 'service still running' note."""
+    """Stop the project's live containers; returns '' or a 'state unknown' / 'still running' note."""
     try:
-        docker.stop([n for n, state, _ in docker.containers(project) if state in ("running", "restarting", "paused")])
+        containers = docker.containers(project)
+    except PluginError as exc:
+        return "; service state unknown: %s" % exc
+    try:
+        docker.stop([n for n, state, _ in containers if state in ("running", "restarting", "paused")])
     except PluginError as exc:
         return "; service still running: %s" % exc
     return ""
 
 
-def _activate(paths: Paths, docker: Docker, name: str, sha: str, info: Dict[str, Any]) -> List[Dict[str, str]]:
-    """Validate settings, start Compose, verify readiness, write signing keys; returns subscriptions."""
+def _activate(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str, sha: str,
+              info: Dict[str, Any]) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    """Validate settings, configure, start Compose, verify readiness, write signing keys.
+
+    Returns the subscriptions and the digest of the runtime context configure saw (None without configure).
+    Any failure stops the project's containers, so a re-enable never leaves the old ones running unpublished.
+    """
     manifest = info["manifest"]
     events = manifest.get("events", [])
-    values = _settings(paths, name, manifest)
     source_dir = paths.package(name, sha)
-    compose_file = _package_path(source_dir, manifest["compose"], "compose")
-    docker.ensure_network()
-    if events:
-        docker.ensure_probe_image()
     project = _project(name)
     try:
+        values = _settings(paths, name, manifest)
+        compose_file = _package_path(source_dir, manifest["compose"], "compose")
+        digest = None
+        if manifest.get("configure"):
+            digest = _configure(paths, docker, registry, name, sha, manifest["configure"], values)
+        docker.ensure_network()
+        if events:
+            docker.ensure_probe_image()
         docker.up(project, compose_file, os.path.join(paths.config(name), ".env"), source_dir,
                   _plugin_env(paths, name, sha))
         containers = docker.containers(project)
@@ -896,9 +1012,13 @@ def _activate(paths: Paths, docker: Docker, name: str, sha: str, info: Dict[str,
             raise PluginError("services did not come up: %s" % (", ".join("%s %s" % c[:2] for c in containers) or "no containers"))
         for event in events:
             _write_secret(paths, name, event["name"], values[event["secret_key"]])
-        return subscriptions
-    except PluginError as exc:
+        return subscriptions, digest
+    except (PluginError, OSError) as exc:
         raise PluginError("%s%s" % (exc, _stop_project(docker, project))) from exc
+    except BaseException:  # e.g. Ctrl-C during configure or readiness: stop what may run, then re-raise
+        with contextlib.suppress(Exception):
+            _stop_project(docker, project)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -997,19 +1117,29 @@ def cmd_enable(paths: Paths, docker: Docker, name: str) -> None:
         source_dir = paths.package(name, record["sha"])
         info = inspect_package(source_dir, record["source"])
         bindings = _compile_bindings(paths, registry, name, info, source_dir)
-        subscriptions = []
+        subscriptions, digest = [], None
         if record["kind"] == "service":
             if record.get("trusted_sha") != record["sha"]:
                 raise PluginError("revision %s is not trusted; reinstall or update with trust" % record["sha"])
+            was_enabled = record["enabled"]
+            if was_enabled:  # re-enable: unpublish until the recreated services are ready again
+                record.update(enabled=False, bindings=[], subscriptions=[], context_digest=None)
+                _save(paths, registry)
+                _rmtree(paths.secrets(name))
             try:
-                subscriptions = _activate(paths, docker, name, record["sha"], info)
+                subscriptions, digest = _activate(paths, docker, registry, name, record["sha"], info)
             except PluginError as exc:
-                if record["enabled"]:
-                    record.update(enabled=False, bindings=[], subscriptions=[], error="enable failed: %s" % exc)
+                if was_enabled:
+                    record["error"] = "enable failed: %s" % exc
                     _save(paths, registry)
-                    _rmtree(paths.secrets(name))
                 raise
-        record.update(enabled=True, bindings=bindings, subscriptions=subscriptions, error=None)
+            except BaseException:
+                record.update(enabled=False, bindings=[], subscriptions=[], context_digest=None,
+                              error="enable interrupted; service state unknown")
+                _save(paths, registry)
+                _rmtree(paths.secrets(name))
+                raise
+        record.update(enabled=True, bindings=bindings, subscriptions=subscriptions, context_digest=digest, error=None)
         _save(paths, registry, enabling=True)
     print("Enabled %s at %s (ref %s)." % (name, record["sha"], record["ref"]))
     for binding in bindings:
@@ -1021,7 +1151,7 @@ def cmd_enable(paths: Paths, docker: Docker, name: str) -> None:
 def _deactivate(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str) -> None:
     """Unpublish first, then stop services; a failed stop stays recorded as an error."""
     record = registry["packages"][name]
-    record.update(enabled=False, bindings=[], subscriptions=[], error=None)
+    record.update(enabled=False, bindings=[], subscriptions=[], context_digest=None, error=None)
     _save(paths, registry)
     _rmtree(paths.secrets(name))
     if record["kind"] == "service":
@@ -1091,14 +1221,14 @@ def cmd_update(paths: Paths, docker: Docker, name: str, ref: str, trust: bool) -
             _rmtree(new_dir)
             _rmtree(paths.work(name, sha))
             raise
-        subscriptions = []
+        subscriptions, digest = [], None
         if record["enabled"] and record["kind"] == "service":
-            record.update(enabled=False, bindings=[], subscriptions=[])
+            record.update(enabled=False, bindings=[], subscriptions=[], context_digest=None)
             _save(paths, registry)
             _rmtree(paths.secrets(name))
             try:
                 try:
-                    subscriptions = _activate(paths, docker, name, sha, info)
+                    subscriptions, digest = _activate(paths, docker, registry, name, sha, info)
                 except PluginError as exc:
                     _restore(paths, docker, registry, name, old_sha, sha, str(exc))
             except PluginError:
@@ -1112,7 +1242,7 @@ def cmd_update(paths: Paths, docker: Docker, name: str, ref: str, trust: bool) -
                 raise
             record["enabled"] = True
         record.update(ref=ref, sha=sha, skills=info["skills"], bindings=bindings, subscriptions=subscriptions,
-                      error=None, updated_at=_now(),
+                      context_digest=digest, error=None, updated_at=_now(),
                       trusted_sha=sha if record["kind"] == "service" else None)
         _save(paths, registry, enabling=record["enabled"])
         _rmtree(paths.package(name, old_sha))
@@ -1129,7 +1259,7 @@ def _restore(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str, 
         old_dir = paths.package(name, old_sha)
         old_info = inspect_package(old_dir, record["source"])
         old_bindings = _compile_bindings(paths, registry, name, old_info, old_dir)
-        old_subscriptions = _activate(paths, docker, name, old_sha, old_info)
+        old_subscriptions, old_digest = _activate(paths, docker, registry, name, old_sha, old_info)
     except PluginError as exc:
         record["error"] = "update to %s failed: %s; restoring %s failed: %s" % (sha, failure, old_sha, exc)
         _save(paths, registry)
@@ -1137,7 +1267,8 @@ def _restore(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str, 
     finally:
         _rmtree(paths.package(name, sha))
         _rmtree(paths.work(name, sha))
-    record.update(enabled=True, bindings=old_bindings, subscriptions=old_subscriptions, error=None)
+    record.update(enabled=True, bindings=old_bindings, subscriptions=old_subscriptions, context_digest=old_digest,
+                  error=None)
     _save(paths, registry, enabling=True)
     raise PluginError("update to %s failed: %s; restored %s" % (sha, failure, old_sha))
 
@@ -1175,6 +1306,9 @@ def cmd_list(paths: Paths, docker: Docker) -> None:
         print("  config:   %s" % paths.config(name))
         if record.get("error"):
             print("  error:    %s" % record["error"])
+        note = stale_note(paths, registry, name)
+        if note:
+            print("  stale:    %s" % note)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1217,6 +1351,8 @@ def main(argv: Optional[List[str]] = None, root: Optional[str] = None, runner: O
             cmd_list(paths, docker)
         else:
             {"enable": cmd_enable, "disable": cmd_disable, "remove": cmd_remove}[args.command](paths, docker, args.name)
+        if args.command != "list":
+            _print_stale(paths)
     except PluginError as exc:
         print("nesti /plugin: error: %s" % exc, file=sys.stderr)
         return 1

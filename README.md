@@ -377,6 +377,20 @@ nesti /plugin remove <name>
   package code runs with your Docker privileges. Its settings go in
   `.private/plugins/config/<name>/.env`. `install` only prepares images;
   `enable` starts the service. `remove` keeps settings and volumes.
+- A service may declare a `configure` step (fixed argv, like `prepare`). It
+  runs at every `enable`, before Compose starts, with the package's `.env`
+  values, `NESTI_PLUGIN_DIR`, `NESTI_PLUGIN_WORK_DIR`,
+  `NESTI_PLUGIN_CONFIG_DIR`, `NESTI_PROJECT_PATH` (from Nesti's `.env`) and
+  `NESTI_PLUGIN_CONTEXT`. That is a temporary JSON file holding the project
+  path and every other package's enabled skills (package, skill, revision,
+  ref, arguments, phases, text). If configure fails, nothing starts and the
+  plugin stays off. `enable` recreates the service's containers, so they
+  always run on the configuration just generated. Compose also sees
+  `NESTI_PROJECT_PATH` and the `NESTI_PLUGIN_*` paths. When skills, their
+  arguments or the project path change later, `list` and every other
+  `/plugin` command mark the service `stale`. Run `nesti /plugin enable
+  <name>` again to regenerate and restart it; Nesti never restarts it on its
+  own.
 - Sources live in `.private/plugins/packages/<name>/<sha>/` and are read-only
   by contract (build artifacts go to `.private/plugins/work/`). Records are in
   `state/plugins/registry.json` and enabled bindings and subscriptions in
