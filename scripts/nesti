@@ -1,5 +1,6 @@
 #!/bin/sh
 # Host-side `nesti`: forwards to the container CLI; /arch (static file) and /stats (live nesti-stats page) then open in a new host browser window.
+# /plugin runs on the host (scripts/nesti_plugins.py): it needs host Git credentials and Docker, not the container.
 set -e
 if [ "${1-}" = mcp ]; then
     # MCP acts on the GitLab project or GitHub repository of the client's checkout: the cwd, or the directory given.
@@ -8,6 +9,21 @@ if [ "${1-}" = mcp ]; then
     exec docker exec -i -e NESTI_CLIENT_REMOTE nesti-mcp python -m mcp_server.server
 fi
 here=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)
+if [ "${1-}" = /plugin ]; then
+    shift
+    # Same host Python order as install.sh: active venv, ./.venv, python3, python, py -3; 3.6 or newer.
+    for py in "${VIRTUAL_ENV:+$VIRTUAL_ENV/Scripts/python.exe}" "${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}" \
+        "$here/.venv/Scripts/python.exe" "$here/.venv/bin/python" python3 python; do
+        if [ -n "$py" ] && "$py" -c 'import sys; sys.exit(sys.version_info < (3, 6))' </dev/null >/dev/null 2>&1; then
+            exec "$py" "$here/scripts/nesti_plugins.py" "$@"
+        fi
+    done
+    if py -3 -c 'import sys; sys.exit(sys.version_info < (3, 6))' </dev/null >/dev/null 2>&1; then
+        exec py -3 "$here/scripts/nesti_plugins.py" "$@"
+    fi
+    echo "nesti: /plugin needs Python 3.6 or newer on the host (tried \$VIRTUAL_ENV, .venv, python3, python, py -3)." >&2
+    exit 1
+fi
 if [ -t 0 ]; then tty=-it; else tty=-i; fi
 docker exec $tty nesti-orchestrator nesti "$@"
 case "${1-} ${2-}" in

@@ -59,6 +59,8 @@ scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetc
                              preflight.py, seed_live_issues.py,
                              prepare_reranker.py (build-time model artifact),
                              evaluate_reranker.py + reranker_evaluation.py (offline quality gate)
+                             nesti_plugins.py: host-only `nesti /plugin` (Python 3.6+ stdlib, no Nesti imports) →
+                             state/plugins/registry.json + runtime/active.json; sources in .private/plugins/
 skills/, templates/          vendored doc corpus (primevue/laravel/practices),
                              bootstrap templates (laravel/, spa/), boost/ SPA discovery skill
 test_graph_smoke.py          offline regression net (.venv/bin/python test_graph_smoke.py)

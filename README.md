@@ -348,6 +348,44 @@ when configured.
 
 ---
 
+## Plugins
+
+`nesti /plugin` runs on the host (`scripts/nesti_plugins.py`, Python 3.6+,
+standard library only). It uses your own Git credentials and Docker and needs
+neither Redis nor the orchestrator:
+
+```text
+nesti /plugin install <repo-url> --ref <tag-or-commit> [--trust]
+nesti /plugin enable <name>
+nesti /plugin list
+nesti /plugin disable <name>
+nesti /plugin update <name> --ref <tag-or-commit> [--trust]
+nesti /plugin remove <name>
+```
+
+- The ref is recorded as both what you requested and the full commit SHA.
+  Nothing updates automatically. URLs that carry tokens are rejected.
+- A plain `skills/*/SKILL.md` repository is read as data only; its npm or
+  JavaScript hooks never run. The skill named like the package is bound to the
+  plan and code phases. Change phases and arguments in
+  `.private/plugins/config/<name>/bindings.json`.
+- A service package (`nesti-plugin.json`) shows its repository, SHA, prepare
+  command, services, mounts and networks before any of its code runs. You must
+  approve it, or pass `--trust`, for every new SHA. Trusting is not a sandbox:
+  package code runs with your Docker privileges. Its settings go in
+  `.private/plugins/config/<name>/.env`. `install` only prepares images;
+  `enable` starts the service. `remove` keeps settings and volumes.
+- Sources live in `.private/plugins/packages/<name>/<sha>/` and are read-only
+  by contract (build artifacts go to `.private/plugins/work/`). Records are in
+  `state/plugins/registry.json` and enabled bindings and subscriptions in
+  `state/plugins/runtime/active.json`.
+- Service receivers join the external `nesti-plugins` network, which
+  `install.sh` creates with `--internal`. It is not a one-way firewall:
+  receivers can reach orchestrator ports on it. Receivers need their own
+  network for outbound access.
+
+---
+
 ## Configuration
 
 Use [`.env.example`](.env.example) as the configuration reference:
@@ -370,6 +408,7 @@ Use [`.env.example`](.env.example) as the configuration reference:
 **Offline smoke tests** (no Docker, no network):
 ```bash
 python test_graph_smoke.py
+python test_plugins.py        # host plugin CLI with local Git repos and a stubbed Docker runner
 ```
 
 **Live integration tests** (needs Docker + network):
