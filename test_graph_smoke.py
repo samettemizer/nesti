@@ -55,6 +55,14 @@ from graph.edges import (                        # noqa: E402
 from graph.tools import tool_detect_stack        # noqa: E402
 import skill_catalog                             # noqa: E402
 import project_layout                            # noqa: E402
+import graph.tools as graph_tools                # noqa: E402
+from pathlib import Path                         # noqa: E402
+
+# Plugin skills come from a private temporary runtime, never the checkout's state/:
+# absent (plugin-free prompts) until the plugin scenarios write one.
+PLUGIN_ROOT = Path(tempfile.mkdtemp(prefix="nesti-plugin-runtime-"))
+graph_tools._PLUGIN_RUNTIME = PLUGIN_ROOT / "runtime" / "active.json"
+graph_tools._PLUGIN_PACKAGES = PLUGIN_ROOT / "packages"
 
 API_ONLY = {"backend": ".", "frontend": None}
 ROOT_SPA = {"backend": ".", "frontend": ".frontend"}
@@ -403,8 +411,8 @@ f = run(103, docker_outcomes=[True], code_responses=[GOOD_CODE],
 check(f["plan"] == "" and "Planning failed" in f["failure_reason"], "routed plan → failure")
 check(f["attempt"] == 0 and calls["docker"] == 0, "no code/test attempts made")
 reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
-check(len(reopen) == 1 and "planning providers failed" in reopen[0][1],
-      "reopened with planning note")
+check(len(reopen) == 1 and "All planning providers exhausted." in reopen[0][1],
+      "reopened with a planning note naming the actual error")
 check("NESTI_FAILED_RUN_V1" not in reopen[0][1], "planning failure leaves no failed-run marker")
 check("All planning providers exhausted." in f["error"], "error field populated")
 check(not os.path.exists(calls["workspaces"][0]), "cleanup ran after plan failure")
@@ -3983,21 +3991,109 @@ token_config = subprocess.run(
 check(json.loads(token_config.stdout) == 16000,
       "configured output tokens are a JSON number, not a rejected API string")
 
-print("\n── Ponytail level ──")
-_ponytail_probe = ("import prompt_builder as p; print(all(f'Use {p._PONYTAIL_LEVEL.upper()} for both'"
-                   " in f('fullstack', '', {'backend': '.', 'frontend': None})"
-                   " for f in (p._planning_system_prompt, p._coding_system_prompt)), p._PONYTAIL_LEVEL)")
-for _value, _level in ((None, "ultra"), ("", "ultra"), ("lite", "lite"), (" FULL ", "full"), ("ultra", "ultra")):
-    _env = {k: v for k, v in os.environ.items() if k != "NESTI_PONYTAIL_LEVEL"}
-    if _value is not None:
-        _env["NESTI_PONYTAIL_LEVEL"] = _value
-    _run = subprocess.run([sys.executable, "-c", _ponytail_probe], env=_env,
-                          capture_output=True, text=True)
-    check(_run.stdout.split() == ["True", _level],
-          f"NESTI_PONYTAIL_LEVEL={_value!r} puts {_level.upper()} into the plan and code prompts")
-_run = subprocess.run([sys.executable, "-c", "import prompt_builder"],
-                      env={**os.environ, "NESTI_PONYTAIL_LEVEL": "bogus"}, capture_output=True, text=True)
-check(_run.returncode != 0 and "Invalid NESTI_PONYTAIL_LEVEL" in _run.stderr,
-      "invalid NESTI_PONYTAIL_LEVEL fails the prompt_builder import")
+print("\n── Plugin skill snapshot ──")
+from graph.tools import tool_plugin_skills  # noqa: E402
+
+_SHA_A, _SHA_B = "a" * 40, "b" * 40
+_RUNTIME = graph_tools._PLUGIN_RUNTIME
+
+
+def plugin_source(package: str, sha: str, rel: str, text: str) -> str:
+    """Write one installed skill file below the temporary packages dir; return its path."""
+    path = PLUGIN_ROOT / "packages" / package / sha / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def plugin_runtime(skills, raw: str = "") -> None:
+    _RUNTIME.parent.mkdir(parents=True, exist_ok=True)
+    _RUNTIME.write_text(raw or json.dumps({"version": 1, "skills": skills, "subscriptions": []}), encoding="utf-8")
+
+
+def binding(package="lazy", skill="lazy", sha=_SHA_A, ref="v1", phases=("plan", "code"),
+            arguments=None, text="Lazy {rules}.\n  Keep it small.\n", path=None) -> dict:
+    return {"package": package, "revision": sha, "ref": ref, "skill": skill,
+            "path": path or plugin_source(package, sha, f"skills/{skill}/SKILL.md", text),
+            "phases": list(phases), "arguments": dict(arguments or {})}
+
+
+check(tool_plugin_skills() == {"success": True, "result": []}, "no runtime file: no plugin skills")
+plugin_runtime([])
+check(tool_plugin_skills() == {"success": True, "result": []}, "a runtime without bindings: no plugin skills")
+plugin_runtime([binding(arguments={"level": "ultra"}),
+                binding("planner", "planner", phases=("plan",), text="Plan rules.\n")])
+_snap = tool_plugin_skills()
+check(_snap == {"success": True, "result": [
+    {"package": "lazy", "skill": "lazy", "revision": _SHA_A, "ref": "v1", "arguments": {"level": "ultra"},
+     "phases": ["plan", "code"], "text": "Lazy {rules}.\n  Keep it small.\n"},
+    {"package": "planner", "skill": "planner", "revision": _SHA_A, "ref": "v1", "arguments": {},
+     "phases": ["plan"], "text": "Plan rules.\n"}]},
+    "bindings are snapshotted in runtime order with their text, revision, ref, arguments and phases")
+
+_outside = PLUGIN_ROOT / "outside.md"
+_outside.write_text("not a package file\n", encoding="utf-8")
+_link = PLUGIN_ROOT / "packages" / "lazy" / _SHA_A / "escape.md"
+_link.symlink_to(_outside)
+_lazy = PLUGIN_ROOT / "packages" / "lazy" / _SHA_A
+for _make, _raw, _cause in (  # bindings are built per case: each one rewrites the skill file
+    (None, "{not json", "not valid JSON"),
+    (None, json.dumps({"version": 2, "skills": []}), "version 1"),
+    (lambda: binding(path=str(_lazy / "missing.md")), "", "cannot read"),
+    (lambda: binding(text=" \n"), "", "is empty"),
+    (lambda: binding(path=str(_lazy / ".." / ".." / ".." / "outside.md")), "", "outside its package sources"),
+    (lambda: binding(path=str(_link)), "", "outside its package sources"),
+    (lambda: binding(text="x" * 8001), "", "limit"),
+    (lambda: binding(phases=("review",)), "", "phases"),
+    (lambda: binding(sha="v1"), "", "full commit SHA"),
+):
+    plugin_runtime([_make()] if _make else None, _raw)
+    _result = tool_plugin_skills()
+    check(not _result["success"] and _cause in _result["error"],
+          f"an unusable runtime or binding is an error, never skipped ({_cause})")
+
+# A run snapshots at planning; attempts keep that text after update/removal mid-run.
+plugin_runtime([binding(arguments={"level": "lite"}, text="Original standard {v1}.\n")])
+reset_calls(950)
+patch_tools(docker_outcomes=[False, False, True], code_responses=[GOOD_CODE])
+_fake_code = nodes._llm.generate_code
+
+
+def _code_then_update(system_prompt, user_prompt, messages=None):
+    if len(calls["code_systems"]) == 0:
+        shutil.rmtree(PLUGIN_ROOT / "packages" / "lazy" / _SHA_A)
+        plugin_runtime([binding(sha=_SHA_B, ref="v2", text="Updated standard.\n")])
+    return _fake_code(system_prompt, user_prompt, messages)
+
+
+nodes._llm.generate_code = _code_then_update
+f = compiled.invoke(initial(950), config={"recursion_limit": 60})
+check(f["mr_url"] and f["attempt"] == 3, "the plugin-bound run still passes through all three attempts")
+check("Original standard {v1}.\n" in calls["plan_systems"][0] and _SHA_A in calls["plan_systems"][0]
+      and "level=lite" in calls["plan_systems"][0], "the plan prompt carries the bound text, revision and arguments")
+check(len(calls["code_systems"]) == 3
+      and all("Original standard {v1}.\n" in s and "Updated standard" not in s for s in calls["code_systems"]),
+      "every code attempt keeps the plan-time snapshot after the package was updated and removed")
+check([s["text"] for s in f["plugin_skills"]] == ["Original standard {v1}.\n"]
+      and f["plugin_skills"][0]["revision"] == _SHA_A, "the run state holds the snapshot text, not a path")
+f = run(951, docker_outcomes=[True], code_responses=[GOOD_CODE])
+check("Updated standard.\n" in calls["plan_systems"][0] and "Original standard" not in calls["plan_systems"][0]
+      and "Updated standard.\n" in calls["code_systems"][0], "the next issue reads the current runtime")
+
+plugin_runtime([binding(path=str(PLUGIN_ROOT / "packages" / "lazy" / _SHA_B / "gone.md"))])
+f = run(952, docker_outcomes=[True], code_responses=[GOOD_CODE])
+reopen = [n for _, s, n in calls["issues"] if s == "new"]
+check(f["plan"] == "" and "Plugin skills unusable" in f["failure_reason"] and not f["mr_url"],
+      "an unreadable enabled binding fails the issue")
+check(not calls["plan_prompts"] and not calls["code_prompts"] and calls["docker"] == 0
+      and not calls["memory_similar"], "it fails before memory, any LLM call or sandbox")
+check(len(reopen) == 1 and "gone.md" in reopen[0], "the reopen note names the unreadable skill")
+check(not os.path.exists(calls["workspaces"][0]), "cleanup ran after the plugin failure")
+
+_RUNTIME.unlink()
+f = run(953, docker_outcomes=[True], code_responses=[GOOD_CODE])
+check(f["mr_url"] and f["plugin_skills"] == [] and "PLUGIN SKILLS" not in calls["plan_systems"][0]
+      and "PLUGIN SKILLS" not in calls["code_systems"][0], "without a runtime the prompts are plugin-free")
+shutil.rmtree(PLUGIN_ROOT, ignore_errors=True)
 
 print(f"\nALL {passed_checks} CHECKS PASSED ✅")

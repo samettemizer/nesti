@@ -18,8 +18,9 @@ Error strategy per node
                     straight to cleanup (nothing cloned, no LLM call); raises
                     on unrecoverable git errors (after removing its own
                     tempdir); TaskEngine's try/except reopens the issue.
-• node_plan       – catches RuntimeError ("all planners failed"), leaves
-                    ``plan`` empty; route_after_plan then routes to failure.
+• node_plan       – an unusable enabled plugin skill, or RuntimeError ("all
+                    planners failed"), leaves ``plan`` empty with ``error``
+                    set; route_after_plan then routes to failure.
 • node_code       – catches RuntimeError ("all coders exhausted") and jumps
                     ``attempt`` to ``max_attempts`` so route_after_code routes
                     straight to failure. Unapplied code never starts a test layer.
@@ -76,7 +77,7 @@ from graph.tools import (
     tool_memory_search_docs, tool_memory_find_similar, tool_memory_remember_solution,
     tool_memory_remember_failure, tool_memory_recall_failures,
     tool_memory_forget_episodes,
-    tool_issue_domain_answer, tool_issue_ask_domain, tool_app_facts,
+    tool_issue_domain_answer, tool_issue_ask_domain, tool_app_facts, tool_plugin_skills,
     _STACK_SCAN_PRUNE,
 )
 import forge
@@ -1194,6 +1195,10 @@ def node_plan(state: IssueState) -> dict:
     application the issue changes.  The planner confirms or corrects that
     scope on line 1 of its plan; the result is the scope the coder works in,
     logged as the run's one ``SCOPE:`` line.
+
+    The enabled plugin skill bindings are snapshotted here, once per run, into
+    ``plugin_skills``; node_code reuses that snapshot on every attempt.  An
+    unusable enabled binding fails the run before any sandbox or LLM call.
     """
     logger.debug("→ node_plan")
     issue_id = state["issue_id"]
@@ -1203,6 +1208,20 @@ def node_plan(state: IssueState) -> dict:
     description = state["issue"].get("description", "") or ""
     issue_text = f"{subject}\n{description}"
     decision = classify_issue(subject, description)
+    plugins = tool_plugin_skills()
+    if not plugins["success"]:
+        error = f"Plugin skills unusable: {plugins['error']}"
+        logger.error("Issue #%s: %s", issue_id, error)
+        _log_scope(issue_id, decision.scope, decision, "not run")
+        logger.info(f"APP FACTS: skipped · {forge.term('forge')} issue #%s · plugin skills unusable", issue_id)
+        logger.debug("← node_plan (plugin skills unusable)")
+        return {"plan": "", "scope": decision.scope, "error": error, "plugin_skills": []}
+    plugin_skills = plugins["result"]
+    logger.info(
+        "Plugin skills · issue #%s · %s", issue_id,
+        ", ".join(f"{s['package']}/{s['skill']}@{s['revision'][:12]} ({', '.join(s['phases'])})"
+                  for s in plugin_skills) or "none",
+    )
     components, topics = _PLAN_CATALOG_LIMITS[decision.scope]
     catalog_skills = _select_catalog_skills(
         issue_text,
@@ -1249,6 +1268,7 @@ def node_plan(state: IssueState) -> dict:
         layout=_prompt_layout(state),
         domain=state.get("domain"),
         app_facts=app_facts,
+        plugin_skills=plugin_skills,
         scope_evidence=decision.evidence(),
         metrics=metrics,
     )
@@ -1264,7 +1284,7 @@ def node_plan(state: IssueState) -> dict:
         _log_scope(issue_id, decision.scope, decision, "failed")
         logger.debug("← node_plan (failed)")
         return {
-            "plan": "", "scope": decision.scope, "error": str(exc),
+            "plan": "", "scope": decision.scope, "error": str(exc), "plugin_skills": plugin_skills,
             "messages": messages, "app_facts": app_facts, **memory_counts,
         }
 
@@ -1274,7 +1294,10 @@ def node_plan(state: IssueState) -> dict:
     _log_scope(issue_id, scope, decision, declared or "no declaration")
     messages = _store.append(issue_id, "assistant", plan)
     logger.debug("← node_plan")
-    return {"plan": plan, "scope": scope, "messages": messages, "app_facts": app_facts, **memory_counts}
+    return {
+        "plan": plan, "scope": scope, "messages": messages, "app_facts": app_facts,
+        "plugin_skills": plugin_skills, **memory_counts,
+    }
 
 
 def node_code(state: IssueState) -> dict:
@@ -1374,6 +1397,7 @@ def node_code(state: IssueState) -> dict:
         layout=_prompt_layout(state),
         domain=state.get("domain"),
         app_facts=state.get("app_facts", ""),
+        plugin_skills=state.get("plugin_skills") or [],
         metrics=metrics,
     )
     base_user_chars = len(user_prompt)
@@ -1852,14 +1876,13 @@ def node_failure(state: IssueState) -> dict:
     attempts = state.get("attempt", 0)
 
     if not state.get("plan", "").strip():
-        reason = "Planning failed – all planning providers exhausted."
-        note = (
-            "AI Developer: all planning providers failed.\n"
-            f"{state.get('error', '')}"
-        )
+        # node_plan's error: unusable plugin skills or every planning provider exhausted.
+        error = state.get("error", "") or "no plan was produced."
+        reason = f"Planning failed – {error.splitlines()[0]}"
+        note = f"AI Developer: planning failed.\n{error}"
         telegram_notify(
             f"❌ Planning failed for issue <b>#{issue_id}</b> – <i>{subject}</i>\n"
-            f"<code>{state.get('error', '')}</code>\n"
+            f"<code>{error}</code>\n"
             f"Reopening issue."
         )
     else:

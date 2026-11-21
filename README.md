@@ -379,10 +379,33 @@ nesti /plugin remove <name>
   by contract (build artifacts go to `.private/plugins/work/`). Records are in
   `state/plugins/registry.json` and enabled bindings and subscriptions in
   `state/plugins/runtime/active.json`.
+- An issue reads the enabled skill bindings once, when planning starts, and
+  keeps that text, revision, ref and arguments for every coding attempt:
+  `enable`, `disable`, `update` or `remove` affect the next issue only. Each
+  bound skill enters the plan and/or code system prompt unmodified, below a
+  short header naming its package, revision, ref and arguments. Nesti's plan
+  format, FILE/DELETE output, database rules, test gates and task scope still
+  take precedence. Only the skill text is used: other harnesses' hooks, slash
+  commands and status lines do not apply. Without plugins the prompts carry no
+  skill. An enabled skill that cannot be read fails the issue with the reason in
+  its note.
 - Service receivers join the external `nesti-plugins` network, which
   `install.sh` creates with `--internal`. It is not a one-way firewall:
   receivers can reach orchestrator ports on it. Receivers need their own
   network for outbound access.
+
+Example, [Ponytail](https://github.com/DietrichGebert/ponytail) (fresh
+installs do not include it, and it uses its own default level until you set one):
+
+```text
+nesti /plugin install https://github.com/DietrichGebert/ponytail.git --ref 96608e078b2d5ea607c5c3b8b5a54d1c1fba6846
+nesti /plugin enable ponytail
+```
+
+To pick `lite`, `full` or `ultra`, set `arguments.level` in
+`.private/plugins/config/ponytail/bindings.json`, e.g.
+`{"skills": {"ponytail": {"phases": ["plan", "code"], "arguments": {"level": "ultra"}}}}`,
+then run `nesti /plugin enable ponytail` again.
 
 ---
 

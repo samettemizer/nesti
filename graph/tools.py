@@ -51,6 +51,7 @@ import git
 from docker_runner import _PG_IDENTIFIER, APP_FACTS_MARK, DockerRunner, _pgsql_settings
 from frontend_runner import FrontendRunner
 import forge
+from scripts import nesti_plugins
 from scripts.oauth import TokenStore, fetch_usage
 from semantic_cache import get_semantic_memory
 import issue_domain
@@ -1471,6 +1472,96 @@ def tool_skill_catalog_status() -> dict:
         return _ok(catalog_status())
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("tool_skill_catalog_status failed: %s", exc)
+        return _err(exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plugin skill bindings
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The host CLI (scripts/nesti_plugins.py) publishes the enabled bindings in
+# state/plugins/runtime/active.json; the sources are mounted read-only at
+# CONTAINER_PACKAGES_DIR.  No runtime file or no binding means plugin-free
+# prompts.  A binding that is enabled but cannot be used is an error: an issue
+# must never be planned with a silently missing skill.
+
+_PLUGIN_RUNTIME = project_layout.STATE_DIR / "plugins" / "runtime" / "active.json"
+_PLUGIN_PACKAGES = Path(nesti_plugins.CONTAINER_PACKAGES_DIR)
+_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _plugin_binding(entry: object, packages: Path) -> dict:
+    """One validated runtime binding with its skill text read from the package sources."""
+    if not isinstance(entry, dict):
+        raise ValueError("a plugin skill binding is not an object")
+    package, skill = entry.get("package"), entry.get("skill")
+    if not (isinstance(package, str) and nesti_plugins.NAME_RE.match(package)
+            and isinstance(skill, str) and nesti_plugins.SKILL_RE.match(skill)):
+        raise ValueError(f"invalid plugin skill name {package!r}/{skill!r}")
+    where = f"enabled plugin skill {package}/{skill}"
+    revision, ref, phases, arguments, path = (
+        entry.get(key) for key in ("revision", "ref", "phases", "arguments", "path")
+    )
+    if not isinstance(revision, str) or not _REVISION_RE.match(revision):
+        raise ValueError(f"{where}: revision {revision!r} is not a full commit SHA")
+    if not isinstance(ref, str) or not ref:
+        raise ValueError(f"{where}: the ref is missing")
+    if (not isinstance(phases, list) or not phases or len(set(phases)) != len(phases)
+            or not set(phases) <= set(nesti_plugins.PHASES)):
+        raise ValueError(f"{where}: phases {phases!r} are not drawn from {', '.join(nesti_plugins.PHASES)}")
+    if not isinstance(arguments, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in arguments.items()):
+        raise ValueError(f"{where}: arguments must map names to strings")
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"{where}: the skill path is missing")
+    root = (packages / package / revision).resolve()
+    source = Path(path).resolve()
+    if not source.is_relative_to(root):
+        raise ValueError(f"{where}: {path} is outside its package sources {root}")
+    try:
+        text = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{where}: cannot read {path}: {exc}") from exc
+    if not text.strip():
+        raise ValueError(f"{where}: {path} is empty")
+    return {"package": package, "skill": skill, "revision": revision, "ref": ref,
+            "arguments": dict(arguments), "phases": list(phases), "text": text}
+
+
+def tool_plugin_skills() -> dict:
+    """
+    Snapshot of the enabled plugin skill bindings, with each skill's text.
+    result: [{"package", "skill", "revision", "ref", "arguments", "phases", "text"}]
+    in runtime order; [] without a runtime file or without bindings.
+
+    A malformed runtime file, or an enabled binding whose text is missing,
+    unreadable, empty, outside its package sources or over the per-phase limit,
+    is an error (never truncated, never skipped).
+    """
+    try:
+        try:
+            raw = _PLUGIN_RUNTIME.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return _ok([])
+        except (OSError, UnicodeDecodeError) as exc:
+            return _err(f"plugin runtime {_PLUGIN_RUNTIME} is unreadable: {exc}")
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            return _err(f"plugin runtime {_PLUGIN_RUNTIME} is not valid JSON: {exc}")
+        if (not isinstance(data, dict) or data.get("version") != nesti_plugins.RUNTIME_VERSION
+                or not isinstance(data.get("skills"), list)):
+            return _err(f"plugin runtime {_PLUGIN_RUNTIME} is not a version "
+                        f"{nesti_plugins.RUNTIME_VERSION} runtime file")
+        skills = [_plugin_binding(entry, _PLUGIN_PACKAGES) for entry in data["skills"]]
+        for phase in nesti_plugins.PHASES:
+            total = sum(len(skill["text"]) for skill in skills if phase in skill["phases"])
+            if total > nesti_plugins.PHASE_BINDING_CHAR_LIMIT:
+                return _err(f"enabled {phase}-phase plugin skills total {total} characters, above the "
+                            f"{nesti_plugins.PHASE_BINDING_CHAR_LIMIT} limit (nothing is truncated)")
+        return _ok(skills)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("tool_plugin_skills failed: %s", exc)
         return _err(exc)
 
 
