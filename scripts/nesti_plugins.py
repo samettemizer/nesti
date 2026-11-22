@@ -656,7 +656,10 @@ def _compile_bindings(paths: Paths, registry: Dict[str, Any], name: str, info: D
             for binding in record.get("bindings", []):
                 for phase in binding["phases"]:
                     totals[phase] += binding["chars"]
+    setting = _declared_setting(source_dir, info) if not info["manifest"] else None
     for binding in bound:
+        if setting and setting.get("default") and binding["skill"] == setting["skill"] and not binding["arguments"]:
+            binding["arguments"] = {"args": setting["default"]}
         text = _read_text(_package_path(source_dir, binding["path"], "skill %s" % binding["skill"]), "skill")
         if not text.strip():
             raise PluginError("skill %s is empty" % binding["skill"])
@@ -1182,7 +1185,7 @@ def cmd_enable(paths: Paths, docker: Docker, name: str) -> None:
 
 
 def _declared_setting(source_dir: str, info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The package's setting {"name", "choices", "skill"}: its manifest entry or its main skill's argument-hint."""
+    """Manifest setting or main skill hint; only a unique ``<choice> (default)`` in its description is inferred."""
     # shortcut: one setting per plugin, widen when the interactive nesti CLI lands
     if info["manifest"]:
         declared = info["manifest"].get("settings", [])
@@ -1191,23 +1194,41 @@ def _declared_setting(source_dir: str, info: Dict[str, Any]) -> Optional[Dict[st
     if main is None:
         return None
     text = _read_text(_package_path(source_dir, main["path"], "skill %s" % main["name"]), "skill")
-    hint = parse_frontmatter(text).get("argument-hint", "").strip().strip("[]").strip()
+    meta = parse_frontmatter(text)
+    hint = meta.get("argument-hint", "").strip().strip("[]").strip()
     if not hint:
         return None
     choices = [c.strip() for c in hint.split("|") if c.strip()] if "|" in hint else []
-    return {"name": "args", "choices": choices or None, "skill": main["name"]}
+    description = meta.get("description", "")
+    defaults = re.findall(r"(\S+)\s+\(default\)", description)
+    default = defaults[0] if description.count("(default)") == 1 and len(defaults) == 1 \
+        and defaults[0] in choices and SETTING_VALUE_RE.fullmatch(defaults[0]) \
+        and len(defaults[0]) <= MAX_ARGUMENT_CHARS else None
+    return {"name": "args", "choices": choices or None, "skill": main["name"], "default": default}
 
 
 def _setting_text(paths: Paths, name: str, info: Dict[str, Any], setting: Dict[str, Any]) -> str:
     """'<name> = <value> (choices: ...)'; reads only the declared key, never another .env value."""
+    label = setting["name"]
+    default_note = ""
     if setting["skill"]:
         effective_bindings(paths, name, info)  # validates the entries read below
         entry = _load_bindings(paths, name).get("skills", {}).get(setting["skill"], {})
-        value = entry.get("arguments", {}).get("args", "")
+        arguments = entry.get("arguments", {})
+        default = setting.get("default")
+        if arguments:
+            if set(arguments) == {"args"}:
+                value = arguments["args"] or '""'
+            else:
+                label, value = "arguments", json.dumps(arguments, sort_keys=True)
+            if default:
+                default_note = " (plugin default: %s)" % default
+        else:
+            value = "%s (plugin default)" % default if default else "not set (plugin default unknown)"
     else:
-        value = _read_env(os.path.join(paths.config(name), ".env")).get(setting["name"], "")
+        value = _read_env(os.path.join(paths.config(name), ".env")).get(setting["name"], "") or "not set (plugin default)"
     choices = " (choices: %s)" % ", ".join(setting["choices"]) if setting["choices"] else ""
-    return "%s = %s%s" % (setting["name"], value or "not set (plugin default)", choices)
+    return "%s = %s%s%s" % (label, value, default_note, choices)
 
 
 def _print_setting(paths: Paths, name: str, info: Dict[str, Any], source_dir: str) -> None:
@@ -1331,14 +1352,17 @@ def cmd_remove(paths: Paths, docker: Docker, name: str) -> None:
     print("Removed %s. Kept settings in %s and any Docker volumes." % (name, paths.config(name)))
 
 
-def cmd_update(paths: Paths, docker: Docker, name: str, ref: str, trust: bool) -> None:
-    """Prepare ``ref`` in its own checkout, then switch; failures keep or restore the running revision."""
-    check_ref(ref)
+def cmd_update(paths: Paths, docker: Docker, name: str, ref: Optional[str], trust: bool) -> None:
+    """Prepare a tag/commit or default HEAD, then switch; failures keep or restore the running revision."""
+    if ref is not None:
+        check_ref(ref)
     with _locked(paths):
         registry = load_registry(paths)
         record = _record(registry, name)
         old_sha = record["sha"]
         scratch, checkout, sha = _fetch(paths, record["url"], ref)
+        if ref is None:
+            ref = sha
         try:
             if sha == old_sha:
                 if ref != record["ref"]:
@@ -1462,10 +1486,9 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="command")
     for command in ("install", "update"):
         cmd = sub.add_parser(command, help="install a package snapshot" if command == "install"
-                             else "update a package to a tag or commit")
+                             else "update a package snapshot")
         cmd.add_argument("repo_url" if command == "install" else "name")
-        cmd.add_argument("--ref", required=command == "update",
-                         help="tag or commit; install defaults to the default branch HEAD, pinned to its full SHA")
+        cmd.add_argument("--ref", help="tag or commit; defaults to the default branch HEAD, pinned to its full SHA")
         cmd.add_argument("--trust", action="store_true", help="approve running a service revision's code")
     for command, text in (("enable", "activate"), ("disable", "deactivate"), ("remove", "uninstall (keeps settings)")):
         sub.add_parser(command, help=text).add_argument("name")

@@ -232,11 +232,11 @@ for url in ("https://user:tok@github.com/a/b.git", "https://ghp_abc@github.com/a
     code, _, err = run("install", "--", url)
     check(code == 1, "URL refused: %s" % url)
 check(not os.listdir(PATHS.tmp), "refused/failed installs leave no scratch directories")
-code, _, _ = run("update", "ponytail")
-check(code == 2, "update still requires --ref (usage error)")
 for ref in ("", "--upload-pack=evil", "v1..v2", "HEAD~1"):
     code, _, err = run("install", str(PONY), "--ref=" + ref)
     check(code == 1 and "invalid --ref" in err, "invalid explicit ref %r is rejected" % ref)
+    code, _, err = run("update", "ponytail", "--ref=" + ref)
+    check(code == 1 and "invalid --ref" in err, "update rejects invalid explicit ref %r" % ref)
 OTHER = BASE / "Misc Skills"
 misc_sha = commit(OTHER, {"skills/alpha/SKILL.md": "Alpha.\n", "skills/beta/SKILL.md": "Beta.\n"})
 code, _, err = run("install", str(OTHER), "--ref", "main")
@@ -310,7 +310,21 @@ try:
     code, _, err = run("update", "snapshot", "--ref", "old")
     check(code == 0 and registry()["packages"]["snapshot"]["ref"] == "old"
           and registry()["packages"]["snapshot"]["sha"] == old_snapshot,
-          "default snapshot still updates only to an explicit tag/commit")
+          "default snapshot can still switch to an explicit tag")
+    code, _, err = run("update", "snapshot", "--ref", snapshot[:10])
+    check(code == 0 and registry()["packages"]["snapshot"]["ref"] == snapshot[:10]
+          and registry()["packages"]["snapshot"]["sha"] == snapshot,
+          "update accepts an abbreviated explicit commit")
+    run("enable", "snapshot")
+    code, _, err = run("update", "snapshot")
+    rec = registry()["packages"]["snapshot"]
+    check(code == 0 and rec["sha"] == rec["ref"] == newer_snapshot and rec["enabled"]
+          and [s["revision"] for s in runtime()["skills"] if s["package"] == "snapshot"] == [newer_snapshot],
+          "reference-free update switches an enabled package to default HEAD and pins its full SHA")
+    before, saved_runtime = registry(), runtime()
+    code, out, err = run("update", "snapshot")
+    check(code == 0 and "nothing to update" in out and registry() == before and runtime() == saved_runtime
+          and not os.listdir(PATHS.tmp), "same-HEAD update is a no-op and removes its scratch checkout")
     run("remove", "snapshot")
 finally:
     os.chdir(cwd)
@@ -320,10 +334,10 @@ EMPTY.mkdir()
 git(EMPTY, "init", "-q", "-b", "empty")
 code, _, err = run("install", str(EMPTY))
 check(code == 1 and not os.listdir(PATHS.tmp), "an unborn default HEAD fails cleanly and removes scratch checkout")
-for command, ref_usage in (("install", "[--ref REF]"), ("update", "--ref REF")):
+for command in ("install", "update"):
     code, out, err = run(command, "--help")
-    check(code == 0 and ref_usage in out and ("[--ref REF]" in out) == (command == "install"),
-          "%s --help exposes the correct ref requirement" % command)
+    check(code == 0 and "[--ref REF]" in out,
+          "%s --help exposes the optional ref" % command)
 
 # ---------------------------------------------------------------------------
 print("\n[3] Path and identity safety")
@@ -470,9 +484,9 @@ FAKE.containers["nesti-plugin-hookbox"][0][1] = "running"
 # ---------------------------------------------------------------------------
 print("\n[7] Service update: trust, failed prepare, restore")
 before = runtime()
-code, _, err = run("update", "hookbox", "--ref", "v2")
+code, _, err = run("update", "hookbox")
 check(code == 1 and "--trust" in err and registry()["packages"]["hookbox"]["sha"] == hook1 and runtime() == before
-      and not Path(PATHS.package("hookbox", hook2)).exists(), "new SHA needs renewed trust; old revision untouched")
+      and not Path(PATHS.package("hookbox", hook2)).exists(), "reference-free service update still needs renewed trust")
 FAKE.fail.add("prepare")
 code, _, err = run("update", "hookbox", "--ref", "v2", "--trust")
 FAKE.fail.discard("prepare")
@@ -682,15 +696,51 @@ check(code == 0 and "Stale" not in out and Path(PATHS.config("confbox"), ".env")
 # ---------------------------------------------------------------------------
 print("\n[12] Plugin settings: a plain skill's argument-hint, a manifest setting")
 LEVELS = BASE / "levels"
-commit(LEVELS, {"skills/levels/SKILL.md": '---\nname: levels\nargument-hint: "[lite|full|ultra|off]"\n---\nLevels.\n',
-                "skills/levels-extra/SKILL.md": "---\nname: levels-extra\n---\nExtra.\n"}, tag="v1")
+level_skill = '---\nname: levels\ndescription: >\n  Levels: lite, full (default), ultra.\nargument-hint: "[lite|full|ultra|off]"\n---\nLevels.\n'
+level1 = commit(LEVELS, {"skills/levels/SKILL.md": level_skill,
+                         "skills/levels-extra/SKILL.md": "---\nname: levels-extra\n---\nExtra.\n"}, tag="v1")
 code, out, err = run("install", str(LEVELS), "--ref", "v1")
-check(code == 0 and "setting:  args = not set (plugin default) (choices: lite, full, ultra, off); change with: nesti /levels <value>"
-      in out, "install prints the setting derived from the main skill's argument-hint: %s" % err.strip())
+check(code == 0 and "setting:  args = full (plugin default) (choices: lite, full, ultra, off); change with: nesti /levels <value>"
+      in out, "install prints the declared default, not the first argument-hint choice: %s" % err.strip())
 code, out, _ = run("settings", "levels")
-check(code == 0 and out == "levels settings:\n  args = not set (plugin default) (choices: lite, full, ultra, off)\n"
-      "Change with: nesti /levels <value>\n", "settings shows args, its value and its choices")
+check(code == 0 and out == "levels settings:\n  args = full (plugin default) (choices: lite, full, ultra, off)\n"
+      "Change with: nesti /levels <value>\n", "settings shows the upstream default and choices")
+saved = bindings_path("levels").read_text()
+check(json.loads(saved)["skills"]["levels"]["arguments"] == {}, "inferred default is not frozen in the bindings template")
+code, _, err = run("enable", "levels")
+check(code == 0 and [(s["phases"], s["arguments"]) for s in runtime()["skills"] if s["package"] == "levels"]
+      == [(["plan", "code"], {"args": "full"})], "default reaches both effective runtime phases")
+level2 = commit(LEVELS, {"skills/levels/SKILL.md": level_skill.replace("full (default), ultra", "full, ultra (default)")})
+code, out, err = run("update", "levels")
+check(code == 0 and registry()["packages"]["levels"]["sha"] == registry()["packages"]["levels"]["ref"] == level2
+      and [s["arguments"] for s in runtime()["skills"] if s["package"] == "levels"] == [{"args": "ultra"}]
+      and "args = ultra (plugin default)" in out and bindings_path("levels").read_text() == saved,
+      "update picks the revised upstream default without rewriting the empty operator configuration")
+for description in ("Levels: lite, full, ultra.", "Levels: lite (default), full (default), ultra.",
+                    "Levels: max (default).", "The default is full."):
+    commit(LEVELS, {"skills/levels/SKILL.md": level_skill.replace("Levels: lite, full (default), ultra.", description)})
+    code, _, err = run("update", "levels")
+    check(code == 0 and [s["arguments"] for s in runtime()["skills"] if s["package"] == "levels"] == [{}],
+          "unknown or ambiguous declaration supplies no inferred arguments: %s" % description)
+    code, out, _ = run("settings", "levels")
+    check(code == 0 and "not set (plugin default unknown)" in out, "settings honestly reports an unknown default")
+run("disable", "levels")
 bindings_path("levels").write_text(json.dumps({"skills": {"levels": {"phases": ["code"], "arguments": {"level": "lite"}}}}))
+saved = bindings_path("levels").read_text()
+code, out, err = run("update", "levels", "--ref", "v1")
+check(code == 0 and not registry()["packages"]["levels"]["enabled"]
+      and bindings_path("levels").read_text() == saved
+      and 'arguments = {"level": "lite"} (plugin default: full)' in out,
+      "disabled update preserves and truthfully displays the arbitrary explicit argument")
+code, out, _ = run("settings", "levels")
+check(code == 0 and 'arguments = {"level": "lite"} (plugin default: full)' in out
+      and "not set" not in out, "settings does not hide an explicit non-args override")
+run("enable", "levels")
+code, _, err = run("update", "levels", "--ref", level2[:10])
+check(code == 0 and registry()["packages"]["levels"]["enabled"] and bindings_path("levels").read_text() == saved
+      and [s["arguments"] for s in runtime()["skills"] if s["package"] == "levels"] == [{"level": "lite"}],
+      "enabled update preserves the exact explicit argument without contradictory inferred args")
+run("disable", "levels")
 before = runtime()
 code, out, err = run("settings", "levels", "ultra")
 check(code == 0 and json.loads(bindings_path("levels").read_text())
