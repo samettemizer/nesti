@@ -603,6 +603,86 @@ run("disable", "misc-skills")
 code, out, _ = run("remove", "confbox")
 check(code == 0 and "Stale" not in out and Path(PATHS.config("confbox"), ".env").exists(), "remove keeps settings")
 
+# ---------------------------------------------------------------------------
+print("\n[12] Plugin settings: a plain skill's argument-hint, a manifest setting")
+LEVELS = BASE / "levels"
+commit(LEVELS, {"skills/levels/SKILL.md": '---\nname: levels\nargument-hint: "[lite|full|ultra|off]"\n---\nLevels.\n',
+                "skills/levels-extra/SKILL.md": "---\nname: levels-extra\n---\nExtra.\n"}, tag="v1")
+code, out, err = run("install", str(LEVELS), "--ref", "v1")
+check(code == 0 and "setting:  args = not set (plugin default) (choices: lite, full, ultra, off); change with: nesti /levels <value>"
+      in out, "install prints the setting derived from the main skill's argument-hint: %s" % err.strip())
+code, out, _ = run("settings", "levels")
+check(code == 0 and out == "levels settings:\n  args = not set (plugin default) (choices: lite, full, ultra, off)\n"
+      "Change with: nesti /levels <value>\n", "settings shows args, its value and its choices")
+bindings_path("levels").write_text(json.dumps({"skills": {"levels": {"phases": ["code"], "arguments": {"level": "lite"}}}}))
+before = runtime()
+code, out, err = run("settings", "levels", "ultra")
+check(code == 0 and json.loads(bindings_path("levels").read_text())
+      == {"skills": {"levels": {"phases": ["code"], "arguments": {"args": "ultra"}}}}
+      and "next 'nesti /plugin enable levels'" in out and runtime() == before,
+      "disabled: arguments become exactly {args}, phases kept, applied at the next enable: %s" % err.strip())
+saved = bindings_path("levels").read_text()
+code, _, err = run("settings", "levels", "max")
+check(code == 2 and "one of: lite, full, ultra, off" in err and bindings_path("levels").read_text() == saved,
+      "a value outside the choices: usage error, nothing written")
+run("enable", "levels")
+code, out, err = run("settings", "levels", "lite")
+check(code == 0 and "Enabled levels" in out
+      and [s["arguments"] for s in runtime()["skills"] if s["package"] == "levels"] == [{"args": "lite"}],
+      "enabled: re-enabled with the new argument: %s" % err.strip())
+run("disable", "levels")
+code, out, _ = run("settings", "misc-skills")
+check(code == 0 and out == "misc-skills offers no settings.\n", "no argument-hint: no settings")
+code, _, err = run("settings", "misc-skills", "x")
+check(code == 1 and "offers no settings" in err, "setting a plugin without a setting fails")
+code, _, err = run("settings", "nope")
+check(code == 1 and "not installed" in err, "an unknown plugin fails")
+for label, settings in (("two settings", [{"key": "A"}, {"key": "B"}]), ("empty choices", [{"key": "A", "choices": []}]),
+                        ("a choice with a space", [{"key": "A", "choices": ["a b"]}]),
+                        ("settings without compose", [{"key": "A"}])):
+    extra = {"skills": [{"name": "s", "path": "s.md"}]} if "without compose" in label else {"compose": "compose.yml"}
+    repo = BASE / ("bad-setting-" + label.replace(" ", "-"))
+    commit(repo, {"nesti-plugin.json": json.dumps(dict({"schema_version": 1, "name": "bad", "nesti_plugin_api": 1,
+                                                        "settings": settings}, **extra)),
+                  "compose.yml": "services: {}\n", "s.md": "S.\n"}, tag="v1")
+    code, _, err = run("install", str(repo), "--ref", "v1", "--trust")
+    check(code == 1 and "settings must list" in err and not Path(PATHS.package("bad")).exists(), "%s rejected" % label)
+SETBOX = BASE / "setbox"
+commit(SETBOX, {"nesti-plugin.json": json.dumps(dict(manifest, name="setbox", settings=[{"key": "MODEL"}])),
+                "compose.yml": "services: {}\n", "prepare.sh": "true\n", ".env.example": "API_TOKEN=\nHOOK_SECRET=\nMODEL=\n"},
+       tag="v1")
+code, out, err = run("install", str(SETBOX), "--ref", "v1", "--trust")
+check(code == 0 and "setting:  MODEL = not set (plugin default); change with: nesti /setbox <value>" in out,
+      "install prints the manifest setting: %s" % err.strip())
+env_file = Path(PATHS.config("setbox"), ".env")
+original = ("# reviewer settings\r\nAPI_TOKEN=tok-789\nexport MODEL=old/model # pick one\nHOOK_SECRET=%s\n\n# trailing" % SECRET).encode()
+env_file.write_bytes(original)
+os.chmod(str(env_file), 0o600)
+ups = len(FAKE.argvs("up"))
+model = "nvidia/nemotron-3-ultra-550b-a55b:free"
+code, out, err = run("settings", "setbox", model)
+check(code == 0 and env_file.read_bytes() == original.replace(b"export MODEL=old/model # pick one", b"export MODEL=" + model.encode())
+      and stat.S_IMODE(env_file.stat().st_mode) == 0o600, "only the MODEL line changes; other bytes and mode 600 kept: %s" % err.strip())
+check(len(FAKE.argvs("up")) == ups and "next 'nesti /plugin enable setbox'" in out, "disabled: saved, nothing restarted")
+code, out, _ = run("settings", "setbox")
+check(code == 0 and out == "setbox settings:\n  MODEL = %s\nChange with: nesti /setbox <value>\n" % model,
+      "settings prints only the declared key, never other .env values")
+saved = env_file.read_bytes()
+for bad in ("a b", 'x"y', "a#b", "$HOME", "a\\b", "x" * 129, ""):
+    code, _, err = run("settings", "setbox", bad)
+    check(code == 2 and env_file.read_bytes() == saved, "invalid value %r rejected, nothing written" % bad[:12])
+env_file.write_text("API_TOKEN=tok-789\nHOOK_SECRET=%s" % SECRET)
+code, _, err = run("settings", "setbox", "deepseek/deepseek-v4-pro")
+check(code == 0 and env_file.read_text() == "API_TOKEN=tok-789\nHOOK_SECRET=%s\nMODEL=deepseek/deepseek-v4-pro\n" % SECRET,
+      "an absent key is appended on its own line: %s" % err.strip())
+code, _, err = run("enable", "setbox")
+ups = len(FAKE.argvs("up"))
+code, out, err = run("settings", "setbox", model)
+check(code == 0 and len(FAKE.argvs("up")) == ups + 1 and "Enabled setbox" in out
+      and np._read_env(str(env_file))["MODEL"] == model and registry()["packages"]["setbox"]["enabled"],
+      "enabled: the value is saved and the service re-enabled: %s" % err.strip())
+run("remove", "setbox")
+
 print("\n%s" % ("All checks passed." if not _failures else "%d check(s) FAILED." % _failures))
 _TMP.cleanup()
 sys.exit(1 if _failures else 0)

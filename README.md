@@ -364,6 +364,8 @@ nesti /plugin list
 nesti /plugin disable <name>
 nesti /plugin update <name> --ref <tag-or-commit> [--trust]
 nesti /plugin remove <name>
+nesti /<name> settings
+nesti /<name> <value>
 ```
 
 - The ref is recorded as both what you requested and the full commit SHA.
@@ -372,6 +374,15 @@ nesti /plugin remove <name>
   JavaScript hooks never run. The skill named like the package is bound to the
   plan and code phases. Change phases and arguments in
   `.private/plugins/config/<name>/bindings.json`.
+- `nesti /<name> settings` shows a plugin's one setting, its current value and
+  its choices; `nesti /<name> <value>` switches it (built-in commands such as
+  `/stats` win on a name clash). A plain repository's setting is `args`, with
+  choices from its main skill's `argument-hint`, stored as
+  `arguments: {"args": <value>}` in `bindings.json`. A service declares one in
+  `nesti-plugin.json` as `"settings": [{"key": "<ENV_KEY>", "choices": [...]}]`
+  (choices optional); the value goes into its `.env`, and only that line
+  changes. An enabled plugin is re-enabled at once (a service restarts); a
+  disabled one picks the value up at its next `enable`.
 - A service package (`nesti-plugin.json`) shows its repository, SHA, prepare
   command, services, mounts and networks before any of its code runs. You must
   approve it, or pass `--trust`, for every new SHA. Trusting is not a sandbox:
@@ -427,10 +438,8 @@ nesti /plugin install https://github.com/DietrichGebert/ponytail.git --ref 96608
 nesti /plugin enable ponytail
 ```
 
-To pick `lite`, `full` or `ultra`, set `arguments.level` in
-`.private/plugins/config/ponytail/bindings.json`, e.g.
-`{"skills": {"ponytail": {"phases": ["plan", "code"], "arguments": {"level": "ultra"}}}}`,
-then run `nesti /plugin enable ponytail` again.
+To pick `lite`, `full`, `ultra` or `off`, run `nesti /ponytail ultra` (and
+`nesti /ponytail settings` to see the current level).
 
 ---
 
