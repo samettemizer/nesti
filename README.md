@@ -353,90 +353,11 @@ when configured.
 
 ## Plugins
 
-`nesti /plugin` runs on the host (`scripts/nesti_plugins.py`, Python 3.6+,
-standard library only). It uses your own Git credentials and Docker and needs
-neither Redis nor the orchestrator. Inside the container, `nesti /plugin` and
-`nesti /<installed plugin>` only point you to the host launcher (exit 1):
+Run `nesti /plugin` on the host: install a plugin, then enable it.
 
-```text
-nesti /plugin install <repo-url-or-owner/repo> [--ref <tag-or-commit>] [--trust]
-nesti /plugin enable <name>
-nesti /plugin list
-nesti /plugin disable <name>
-nesti /plugin update <name> --ref <tag-or-commit> [--trust]
-nesti /plugin remove <name>
-nesti /<name> settings
-nesti /<name> <value>
-```
-
-- Without `--ref`, install takes the latest default branch HEAD at clone time
-  and records that snapshot's full commit SHA as both ref and revision.
-  With `--ref`, the requested tag or commit and its full SHA are recorded.
-  Nothing updates automatically; `update` still requires `--ref`.
-- GitHub shorthand `owner/repo` expands to `https://github.com/owner/repo.git`.
-  An existing local `owner/repo` path takes precedence; use `./owner/repo` to
-  explicitly select a local path. HTTPS, SSH (including `user@host:path`),
-  `file://` and local paths remain supported, not SFTP. URLs carrying tokens
-  or passwords are rejected.
-- A plain `skills/*/SKILL.md` repository is read as data only; its npm or
-  JavaScript hooks never run. The skill named like the package is bound to the
-  plan and code phases. Change phases and arguments in
-  `.private/plugins/config/<name>/bindings.json`.
-- `nesti /<name> settings` shows a plugin's one setting, its current value and
-  its choices; `nesti /<name> <value>` switches it (built-in commands such as
-  `/stats` win on a name clash). A plain repository's setting is `args`, with
-  choices from its main skill's `argument-hint`, stored as
-  `arguments: {"args": <value>}` in `bindings.json`. A service declares one in
-  `nesti-plugin.json` as `"settings": [{"key": "<ENV_KEY>", "choices": [...]}]`
-  (choices optional); the value goes into its `.env`, and only that line
-  changes. An enabled plugin is re-enabled at once (a service restarts); a
-  disabled one picks the value up at its next `enable`.
-- A service package (`nesti-plugin.json`) shows its repository, SHA, prepare
-  command, services, mounts and networks before any of its code runs. You must
-  approve it, or pass `--trust`, for every new SHA. Trusting is not a sandbox:
-  package code runs with your Docker privileges. Its settings go in
-  `.private/plugins/config/<name>/.env`. `install` only prepares images;
-  `enable` starts the service. `remove` keeps settings and volumes.
-- A service may declare a `configure` step (fixed argv, like `prepare`). It
-  runs at every `enable`, before Compose starts, with the package's `.env`
-  values, `NESTI_PLUGIN_DIR`, `NESTI_PLUGIN_WORK_DIR`,
-  `NESTI_PLUGIN_CONFIG_DIR`, `NESTI_PROJECT_PATH` (from Nesti's `.env`) and
-  `NESTI_PLUGIN_CONTEXT`. That is a temporary JSON file holding the project
-  path and every other package's enabled skills (package, skill, revision,
-  ref, arguments, phases, text). If configure fails, nothing starts and the
-  plugin stays off. `enable` recreates the service's containers, so they
-  always run on the configuration just generated. Compose also sees
-  `NESTI_PROJECT_PATH` and the `NESTI_PLUGIN_*` paths. When skills, their
-  arguments or the project path change later, `list` and every other
-  `/plugin` command mark the service `stale`. Run `nesti /plugin enable
-  <name>` again to regenerate and restart it; Nesti never restarts it on its
-  own.
-- Sources live in `.private/plugins/packages/<name>/<sha>/` and are read-only
-  by contract (build artifacts go to `.private/plugins/work/`). Records are in
-  `state/plugins/registry.json` and enabled bindings and subscriptions in
-  `state/plugins/runtime/active.json`.
-- An issue reads the enabled skill bindings once, when planning starts, and
-  keeps that text, revision, ref and arguments for every coding attempt:
-  `enable`, `disable`, `update` or `remove` affect the next issue only. Each
-  bound skill enters the plan and/or code system prompt unmodified, below a
-  short header naming its package, revision, ref and arguments. Nesti's plan
-  format, FILE/DELETE output, database rules, test gates and task scope still
-  take precedence. Only the skill text is used: other harnesses' hooks, slash
-  commands and status lines do not apply. Without plugins the prompts carry no
-  skill. An enabled skill that cannot be read fails the issue with the reason in
-  its note.
-- Service receivers and the orchestrator join the external `nesti-plugins`
-  network, which `install.sh` creates with `--internal`. It is not a one-way
-  firewall: receivers can reach orchestrator ports on it. Receivers need their
-  own network for outbound access.
-- After Nesti opens a GitHub pull request and tries to close the issue, every enabled
-  subscription to `github.pull_request.ready` receives a GitHub `pull_request`
-  webhook (`action=opened`). The webhook carries the PR's actual state, draft flag,
-  author and head SHA. It is signed with `X-Hub-Signature-256`, and its delivery ID
-  is fixed per PR and head SHA. A failed delivery is logged and sent as a Telegram alert. It never changes
-  the PR or the issue, and it is not retried. A `202` reply means accepted, not
-  done. GitLab runs send nothing. With plugin skills, the PR's **AI provider**
-  line names each `package/skill@revision` and its arguments.
+- Without `--ref`, installation snapshots the current default branch; `--ref`
+  pins a tag or commit. Updates are manual: `nesti /plugin update <name> --ref <tag-or-commit>`.
+- Service plugins run code with your Docker privileges. Trust only known sources.
 
 Example, [Ponytail](https://github.com/DietrichGebert/ponytail) (fresh
 installs do not include it, and it uses its own default level until you set one):
