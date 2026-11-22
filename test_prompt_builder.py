@@ -15,6 +15,14 @@ BUILDERS = (
     ("plan", partial(prompts.build_plan_prompt, layout=SPA), (ISSUE,)),
     ("code", partial(prompts.build_code_prompt, layout=SPA), (ISSUE, "SCOPE: frontend\nAdd the column and its tests.")),
 )
+PLUGINS = [
+    {"package": "lazy", "skill": "lazy", "revision": "a" * 40, "ref": "v1", "arguments": {"level": "ultra"},
+     "phases": ["plan", "code"], "text": "---\nname: lazy\n---\n# Lazy {mode}\n\n  Keep it small.\n"},
+    {"package": "planner", "skill": "outline", "revision": "b" * 40, "ref": "main", "arguments": {},
+     "phases": ["plan"], "text": "Outline before you plan.\n"},
+    {"package": "coder", "skill": "terse", "revision": "c" * 40, "ref": "v2", "arguments": {},
+     "phases": ["code"], "text": "Terse code only.\n"},
+]
 
 
 def chunk(body: str, title: str = "Reference", score: float = 0.9) -> dict:
@@ -152,7 +160,9 @@ class PromptBuilderTests(unittest.TestCase):
                         self.assertNotIn("resources/js", plain)
                     cut = plain.index("TASK SCOPE:")
                     self.assertEqual(plain[:cut], specific[:cut])
-                    self.assertTrue(plain.startswith(prompts._PONYTAIL))
+                    with_plugins = build(scope, "README", SPA, domain, PLUGINS)
+                    plugin_cut = with_plugins.index("TASK SCOPE:")
+                    self.assertEqual(with_plugins[:plugin_cut], build(scope, "", SPA, None, PLUGINS)[:plugin_cut])
         first = prompts.build_code_prompt(ISSUE, "Add the column.", repo_context="app/A.php", layout=SPA)[1]
         retry = prompts.build_code_prompt(
             ISSUE, "Add the column.", repo_context="app/A.php\napp/B.php",
@@ -160,6 +170,37 @@ class PromptBuilderTests(unittest.TestCase):
         cut = first.index("\n## Existing Repository State")
         self.assertEqual(first[:cut], retry[:cut])
         self.assertIn("## Approved Implementation Plan", first[:cut])
+
+    def test_plugin_skills_enter_their_phase_verbatim_before_task_scope(self) -> None:
+        for phase, builder, args in BUILDERS:
+            bound = [skill for skill in PLUGINS if phase in skill["phases"]]
+            unbound = [skill for skill in PLUGINS if phase not in skill["phases"]]
+            for scope in prompts.SCOPES:
+                with self.subTest(phase=phase, scope=scope):
+                    plain_system, plain_user = builder(*args, scope=scope)
+                    system, user = builder(*args, scope=scope, plugin_skills=PLUGINS)
+                    self.assertEqual(user, plain_user)
+                    self.assertNotIn("PLUGIN SKILLS", plain_system)
+                    self.assertEqual(system.count("PLUGIN SKILLS"), 1)
+                    positions = [system.index(skill["text"]) for skill in bound]
+                    self.assertEqual(positions, sorted(positions))
+                    for skill in bound:
+                        header = system[:system.index(skill["text"])].rsplit("\n### ", 1)[1]
+                        for value in (f"{skill['package']}/{skill['skill']}", skill["revision"], skill["ref"]):
+                            self.assertIn(value, header)
+                    self.assertIn("level=ultra", system)
+                    for skill in unbound:
+                        self.assertNotIn(skill["text"], system)
+                    cut, plugin_cut = plain_system.index("TASK SCOPE:"), system.index("TASK SCOPE:")
+                    self.assertLess(positions[-1], plugin_cut)
+                    self.assertEqual(system[plugin_cut:], plain_system[cut:])
+                    self.assertEqual(system[:system.index("PLUGIN SKILLS")], plain_system[:cut])
+
+    def test_unbound_phase_or_no_plugins_leave_the_prompt_unchanged(self) -> None:
+        code_only = [skill for skill in PLUGINS if skill["phases"] == ["code"]]
+        plan = partial(prompts.build_plan_prompt, layout=SPA)
+        self.assertEqual(plan(ISSUE, plugin_skills=code_only), plan(ISSUE))
+        self.assertEqual(plan(ISSUE, plugin_skills=[]), plan(ISSUE))
 
 
 if __name__ == "__main__":

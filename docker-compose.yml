@@ -20,6 +20,21 @@ services:
       # Project root: identical host/container path because Boost sandboxes are bind-mounted by the host daemon.
       - "${NESTI_PROJECT_PATH:?Set NESTI_PROJECT_PATH in .env}:${NESTI_PROJECT_PATH:?Set NESTI_PROJECT_PATH in .env}"
       - ./state:/orchestrator/state
+      # Plugin skill sources and event signing keys (nesti /plugin), read-only; never the config dir.
+      # state/plugins/runtime/active.json arrives through ./state above.
+      # install.sh creates both dirs; Docker must not, or root would own them and `nesti /plugin` could not write keys.
+      - type: bind
+        source: ./.private/plugins/packages
+        target: /orchestrator/plugins/packages
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.private/plugins/secrets
+        target: /orchestrator/plugins/secrets
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       # nesti /provider login antigravity runs a short-lived local HTTP
       # listener (scripts/oauth.py AntigravityProvider) to capture Google's
@@ -32,6 +47,10 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-60}
     command: ["--loop"]
+    networks:
+      # `default` must stay listed: a service with `networks:` leaves it otherwise.
+      - default
+      - nesti-plugins
     depends_on:
       nesti-redis:
         condition: service_healthy
@@ -148,3 +167,11 @@ volumes:
   # Same lifecycle: survives `down`, removed only by `docker-compose down -v`.
   nesti_qdrant_data:
     driver: local
+
+networks:
+  # Plugin event delivery (node_commit → enabled subscriptions). Created by install.sh /
+  # `nesti /plugin`, never by Compose, so `down` cannot remove it under active plugins.
+  # Only the orchestrator joins; Redis, Qdrant, MCP and stats stay off it.
+  nesti-plugins:
+    name: nesti-plugins
+    external: true

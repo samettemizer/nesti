@@ -55,6 +55,14 @@ from graph.edges import (                        # noqa: E402
 from graph.tools import tool_detect_stack        # noqa: E402
 import skill_catalog                             # noqa: E402
 import project_layout                            # noqa: E402
+import graph.tools as graph_tools                # noqa: E402
+from pathlib import Path                         # noqa: E402
+
+# Plugin skills come from a private temporary runtime, never the checkout's state/:
+# absent (plugin-free prompts) until the plugin scenarios write one.
+PLUGIN_ROOT = Path(tempfile.mkdtemp(prefix="nesti-plugin-runtime-"))
+graph_tools._PLUGIN_RUNTIME = PLUGIN_ROOT / "runtime" / "active.json"
+graph_tools._PLUGIN_PACKAGES = PLUGIN_ROOT / "packages"
 
 API_ONLY = {"backend": ".", "frontend": None}
 ROOT_SPA = {"backend": ".", "frontend": ".frontend"}
@@ -403,8 +411,8 @@ f = run(103, docker_outcomes=[True], code_responses=[GOOD_CODE],
 check(f["plan"] == "" and "Planning failed" in f["failure_reason"], "routed plan → failure")
 check(f["attempt"] == 0 and calls["docker"] == 0, "no code/test attempts made")
 reopen = [(s, n) for _, s, n in calls["issues"] if s == "new"]
-check(len(reopen) == 1 and "planning providers failed" in reopen[0][1],
-      "reopened with planning note")
+check(len(reopen) == 1 and "All planning providers exhausted." in reopen[0][1],
+      "reopened with a planning note naming the actual error")
 check("NESTI_FAILED_RUN_V1" not in reopen[0][1], "planning failure leaves no failed-run marker")
 check("All planning providers exhausted." in f["error"], "error field populated")
 check(not os.path.exists(calls["workspaces"][0]), "cleanup ran after plan failure")
@@ -3983,21 +3991,306 @@ token_config = subprocess.run(
 check(json.loads(token_config.stdout) == 16000,
       "configured output tokens are a JSON number, not a rejected API string")
 
-print("\n── Ponytail level ──")
-_ponytail_probe = ("import prompt_builder as p; print(all(f'Use {p._PONYTAIL_LEVEL.upper()} for both'"
-                   " in f('fullstack', '', {'backend': '.', 'frontend': None})"
-                   " for f in (p._planning_system_prompt, p._coding_system_prompt)), p._PONYTAIL_LEVEL)")
-for _value, _level in ((None, "ultra"), ("", "ultra"), ("lite", "lite"), (" FULL ", "full"), ("ultra", "ultra")):
-    _env = {k: v for k, v in os.environ.items() if k != "NESTI_PONYTAIL_LEVEL"}
-    if _value is not None:
-        _env["NESTI_PONYTAIL_LEVEL"] = _value
-    _run = subprocess.run([sys.executable, "-c", _ponytail_probe], env=_env,
-                          capture_output=True, text=True)
-    check(_run.stdout.split() == ["True", _level],
-          f"NESTI_PONYTAIL_LEVEL={_value!r} puts {_level.upper()} into the plan and code prompts")
-_run = subprocess.run([sys.executable, "-c", "import prompt_builder"],
-                      env={**os.environ, "NESTI_PONYTAIL_LEVEL": "bogus"}, capture_output=True, text=True)
-check(_run.returncode != 0 and "Invalid NESTI_PONYTAIL_LEVEL" in _run.stderr,
-      "invalid NESTI_PONYTAIL_LEVEL fails the prompt_builder import")
+print("\n── Plugin skill snapshot ──")
+from graph.tools import tool_plugin_skills  # noqa: E402
+
+_SHA_A, _SHA_B = "a" * 40, "b" * 40
+_RUNTIME = graph_tools._PLUGIN_RUNTIME
+
+
+def plugin_source(package: str, sha: str, rel: str, text: str) -> str:
+    """Write one installed skill file below the temporary packages dir; return its path."""
+    path = PLUGIN_ROOT / "packages" / package / sha / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def plugin_runtime(skills, raw: str = "") -> None:
+    _RUNTIME.parent.mkdir(parents=True, exist_ok=True)
+    _RUNTIME.write_text(raw or json.dumps({"version": 1, "skills": skills, "subscriptions": []}), encoding="utf-8")
+
+
+def binding(package="lazy", skill="lazy", sha=_SHA_A, ref="v1", phases=("plan", "code"),
+            arguments=None, text="Lazy {rules}.\n  Keep it small.\n", path=None) -> dict:
+    return {"package": package, "revision": sha, "ref": ref, "skill": skill,
+            "path": path or plugin_source(package, sha, f"skills/{skill}/SKILL.md", text),
+            "phases": list(phases), "arguments": dict(arguments or {})}
+
+
+check(tool_plugin_skills() == {"success": True, "result": []}, "no runtime file: no plugin skills")
+plugin_runtime([])
+check(tool_plugin_skills() == {"success": True, "result": []}, "a runtime without bindings: no plugin skills")
+plugin_runtime([binding(arguments={"level": "ultra"}),
+                binding("planner", "planner", phases=("plan",), text="Plan rules.\n")])
+_snap = tool_plugin_skills()
+check(_snap == {"success": True, "result": [
+    {"package": "lazy", "skill": "lazy", "revision": _SHA_A, "ref": "v1", "arguments": {"level": "ultra"},
+     "phases": ["plan", "code"], "text": "Lazy {rules}.\n  Keep it small.\n"},
+    {"package": "planner", "skill": "planner", "revision": _SHA_A, "ref": "v1", "arguments": {},
+     "phases": ["plan"], "text": "Plan rules.\n"}]},
+    "bindings are snapshotted in runtime order with their text, revision, ref, arguments and phases")
+
+_outside = PLUGIN_ROOT / "outside.md"
+_outside.write_text("not a package file\n", encoding="utf-8")
+_link = PLUGIN_ROOT / "packages" / "lazy" / _SHA_A / "escape.md"
+_link.symlink_to(_outside)
+_lazy = PLUGIN_ROOT / "packages" / "lazy" / _SHA_A
+for _make, _raw, _cause in (  # bindings are built per case: each one rewrites the skill file
+    (None, "{not json", "not valid JSON"),
+    (None, json.dumps({"version": 2, "skills": []}), "version 1"),
+    (lambda: binding(path=str(_lazy / "missing.md")), "", "cannot read"),
+    (lambda: binding(text=" \n"), "", "is empty"),
+    (lambda: binding(path=str(_lazy / ".." / ".." / ".." / "outside.md")), "", "outside its package sources"),
+    (lambda: binding(path=str(_link)), "", "outside its package sources"),
+    (lambda: binding(text="x" * 8001), "", "limit"),
+    (lambda: binding(phases=("review",)), "", "phases"),
+    (lambda: binding(sha="v1"), "", "full commit SHA"),
+):
+    plugin_runtime([_make()] if _make else None, _raw)
+    _result = tool_plugin_skills()
+    check(not _result["success"] and _cause in _result["error"],
+          f"an unusable runtime or binding is an error, never skipped ({_cause})")
+
+# A run snapshots at planning; attempts keep that text after update/removal mid-run.
+plugin_runtime([binding(arguments={"level": "lite"}, text="Original standard {v1}.\n")])
+reset_calls(950)
+patch_tools(docker_outcomes=[False, False, True], code_responses=[GOOD_CODE])
+_fake_code = nodes._llm.generate_code
+
+
+def _code_then_update(system_prompt, user_prompt, messages=None):
+    if len(calls["code_systems"]) == 0:
+        shutil.rmtree(PLUGIN_ROOT / "packages" / "lazy" / _SHA_A)
+        plugin_runtime([binding(sha=_SHA_B, ref="v2", text="Updated standard.\n")])
+    return _fake_code(system_prompt, user_prompt, messages)
+
+
+nodes._llm.generate_code = _code_then_update
+f = compiled.invoke(initial(950), config={"recursion_limit": 60})
+check(f["mr_url"] and f["attempt"] == 3, "the plugin-bound run still passes through all three attempts")
+check("Original standard {v1}.\n" in calls["plan_systems"][0] and _SHA_A in calls["plan_systems"][0]
+      and "level=lite" in calls["plan_systems"][0], "the plan prompt carries the bound text, revision and arguments")
+check(len(calls["code_systems"]) == 3
+      and all("Original standard {v1}.\n" in s and "Updated standard" not in s for s in calls["code_systems"]),
+      "every code attempt keeps the plan-time snapshot after the package was updated and removed")
+check([s["text"] for s in f["plugin_skills"]] == ["Original standard {v1}.\n"]
+      and f["plugin_skills"][0]["revision"] == _SHA_A, "the run state holds the snapshot text, not a path")
+check(calls["mrs"][0].splitlines()[1].endswith(f"`) · plugin skills: lazy/lazy@{_SHA_A} (level=lite)"),
+      "the PR's AI provider line names the snapshot's package/skill@full revision and arguments")
+f = run(951, docker_outcomes=[True], code_responses=[GOOD_CODE])
+check("Updated standard.\n" in calls["plan_systems"][0] and "Original standard" not in calls["plan_systems"][0]
+      and "Updated standard.\n" in calls["code_systems"][0], "the next issue reads the current runtime")
+check(calls["mrs"][0].splitlines()[1].endswith(f"`) · plugin skills: lazy/lazy@{_SHA_B}"),
+      "a skill without arguments is named without parentheses")
+
+plugin_runtime([binding(path=str(PLUGIN_ROOT / "packages" / "lazy" / _SHA_B / "gone.md"))])
+f = run(952, docker_outcomes=[True], code_responses=[GOOD_CODE])
+reopen = [n for _, s, n in calls["issues"] if s == "new"]
+check(f["plan"] == "" and "Plugin skills unusable" in f["failure_reason"] and not f["mr_url"],
+      "an unreadable enabled binding fails the issue")
+check(not calls["plan_prompts"] and not calls["code_prompts"] and calls["docker"] == 0
+      and not calls["memory_similar"], "it fails before memory, any LLM call or sandbox")
+check(len(reopen) == 1 and "gone.md" in reopen[0], "the reopen note names the unreadable skill")
+check(not os.path.exists(calls["workspaces"][0]), "cleanup ran after the plugin failure")
+
+_RUNTIME.unlink()
+f = run(953, docker_outcomes=[True], code_responses=[GOOD_CODE])
+check(f["mr_url"] and f["plugin_skills"] == [] and "PLUGIN SKILLS" not in calls["plan_systems"][0]
+      and "PLUGIN SKILLS" not in calls["code_systems"][0], "without a runtime the prompts are plugin-free")
+check(calls["mrs"][0].splitlines()[1].startswith("**AI provider:**") and "plugin skills" not in calls["mrs"][0],
+      "a plugin-free PR names no plugin skill and no level")
+
+print("\n── Plugin PR event ──")
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
+import http.server  # noqa: E402
+import socket  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+import github_client  # noqa: E402
+from graph.tools import tool_plugin_pr_ready  # noqa: E402
+
+graph_tools._PLUGIN_SECRETS = PLUGIN_ROOT / "secrets"
+_EVENT = "github.pull_request.ready"
+with patch.dict(os.environ, {"NESTI_FORGE": "github"}):
+    check(graph_tools.forge.pr_ready_event() == _EVENT and _EVENT in graph_tools.nesti_plugins.EVENTS,
+          "GitHub emits the PR-ready event the host CLI accepts")
+with patch.dict(os.environ, {"NESTI_FORGE": "gitlab"}):
+    check(graph_tools.forge.pr_ready_event() == "", "GitLab emits no PR event")
+
+_received = []
+
+
+class _Receiver(http.server.BaseHTTPRequestHandler):
+    """Records each POST; /bad answers 500, /html non-JSON, /slow too late, anything else 202 queued."""
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        _received.append((self.path, dict(self.headers), body))
+        if self.path == "/slow":
+            time.sleep(1)
+        status, reply = {"/bad": (500, b'{"error": "boom"}'),
+                         "/html": (200, b"<html>ok</html>")}.get(self.path, (202, b'{"state": "queued"}'))
+        try:
+            self.send_response(status)
+            self.end_headers()
+            self.wfile.write(reply)
+        except OSError:  # the sender already timed out
+            pass
+
+    def log_message(self, *args):
+        pass
+
+
+_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Receiver)
+threading.Thread(target=_server.serve_forever, daemon=True).start()
+_base = f"http://127.0.0.1:{_server.server_port}"
+with socket.socket() as _closed:  # a port nothing listens on: the receiver is down
+    _closed.bind(("127.0.0.1", 0))
+    _down = f"http://127.0.0.1:{_closed.getsockname()[1]}/hook"
+
+_EVENT_BODY = b'{"action": "opened", "pull_request": {"number": 12}}'
+_EVENT_HEADERS = {"Content-Type": "application/json", "X-GitHub-Event": "pull_request",
+                  "X-GitHub-Delivery": "nesti-acme__shop-12-abc123"}
+_pr_reads = []
+_client = SimpleNamespace(
+    pull_request_event=lambda number: _pr_reads.append(number) or (_EVENT_BODY, _EVENT_HEADERS),
+    deliver_event=github_client.GitHubClient.deliver_event,
+)
+
+
+def subscription(package, url, secret=b"key", event=_EVENT) -> dict:
+    """One runtime subscription; secret=None leaves its signing key file missing."""
+    key = PLUGIN_ROOT / "secrets" / package / f"{event}.key"
+    if secret is not None:
+        key.parent.mkdir(parents=True, exist_ok=True)
+        key.write_bytes(secret)
+    return {"package": package, "revision": _SHA_A, "event": event, "url": url, "secret_file": str(key)}
+
+
+def pr_ready(subscriptions, forge_kind="github", number=12, raw=""):
+    """tool_plugin_pr_ready against a fresh runtime (None: no runtime file); (result, client built?)."""
+    _received.clear()
+    _pr_reads.clear()
+    if subscriptions is None and not raw:
+        _RUNTIME.unlink(missing_ok=True)
+    else:
+        _RUNTIME.parent.mkdir(parents=True, exist_ok=True)
+        _RUNTIME.write_text(raw or json.dumps({"version": 1, "skills": [], "subscriptions": subscriptions}),
+                            encoding="utf-8")
+    built = []
+    with patch.dict(os.environ, {"NESTI_FORGE": forge_kind}), \
+            patch.object(graph_tools.forge, "repo_client", lambda: built.append(1) or _client):
+        return tool_plugin_pr_ready(number), bool(built)
+
+
+for _subs, _case in ((None, "no runtime file"), ([], "no enabled subscription (plugin disabled)"),
+                     ([subscription("other", _base + "/a", event="github.other")], "only another event")):
+    _result, _built = pr_ready(_subs)
+    check(_result == {"success": True, "result": []} and not _built and not _received,
+          f"GitHub with {_case}: nothing is called")
+_result, _built = pr_ready([subscription("alpha", _base + "/a")], forge_kind="gitlab")
+check(_result == {"success": True, "result": []} and not _built and not _received,
+      "GitLab with an enabled subscription: nothing is called")
+
+_result, _ = pr_ready([subscription("alpha", _base + "/a", b"alpha-key"),
+                       subscription("beta", _base + "/b", b"beta-key")])
+check(_result == {"success": True, "result": [
+    {"package": "alpha", "revision": _SHA_A, "url": _base + "/a", "reply": {"state": "queued"}},
+    {"package": "beta", "revision": _SHA_A, "url": _base + "/b", "reply": {"state": "queued"}}]}
+      and _pr_reads == [12], "every enabled subscription gets the event; the PR is read once")
+_signed = {path: (headers, body) for path, headers, body in _received}
+check(all(_signed[path][1] == _EVENT_BODY and _signed[path][0]["X-Hub-Signature-256"]
+          == "sha256=" + hmac.new(key, _EVENT_BODY, hashlib.sha256).hexdigest()
+          for path, key in (("/a", b"alpha-key"), ("/b", b"beta-key"))),
+      "each receiver gets the exact bytes, signed with its own subscription's secret")
+check(all(h["X-GitHub-Delivery"] == "nesti-acme__shop-12-abc123" and h["X-GitHub-Event"] == "pull_request"
+          and "Authorization" not in h for h, _ in _signed.values()),
+      "same delivery id for both receivers; no Authorization header")
+
+with patch.object(github_client, "_EVENT_TIMEOUT", 0.3):
+    _result, _ = pr_ready([subscription("down", _down), subscription("bad", _base + "/bad"),
+                           subscription("html", _base + "/html"), subscription("slow", _base + "/slow"),
+                           subscription("nokey", _base + "/a", secret=None),
+                           subscription("empty", _base + "/a", secret=b""),
+                           subscription("ok", _base + "/ok", b"ok-key")])
+_by = {d["package"]: d for d in _result["result"]} if _result["success"] else {}
+check(_result["success"] and [d["package"] for d in _result["result"]]
+      == ["down", "bad", "html", "slow", "nokey", "empty", "ok"]
+      and all("error" in _by[p] for p in ("down", "bad", "html", "slow", "nokey", "empty"))
+      and _by["ok"].get("reply") == {"state": "queued"},
+      "down receiver, 500, non-JSON, timeout, missing and empty keys fail only their own entry")
+check("HTTP 500" in _by.get("bad", {}).get("error", "") and "non-JSON" in _by.get("html", {}).get("error", "")
+      and "ok-key" not in json.dumps(_result), "failures name their cause; the secret is not in the result")
+
+for _raw, _subs, _cause in (
+        ("{not json", None, "not valid JSON"),
+        (json.dumps({"version": 1, "skills": []}), None, "version 1"),
+        ("", [dict(subscription("alpha", _base + "/a"), url="file:///etc/passwd")], "http(s)"),
+        ("", [dict(subscription("alpha", _base + "/a"), secret_file="/etc/passwd")], "outside"),
+        ("", [dict(subscription("alpha", _base + "/a"), revision="v1")], "full commit SHA")):
+    _result, _built = pr_ready(_subs, raw=_raw)
+    check(not _result["success"] and _cause in _result["error"] and not _built and not _received,
+          f"a malformed runtime is an error and nothing is sent ({_cause})")
+_result, _ = pr_ready([subscription("alpha", _base + "/a")], number=None)
+check(not _result["success"] and not _received, "a PR without a number is an error and nothing is sent")
+_client.pull_request_event = lambda number: (_ for _ in ()).throw(RuntimeError("PR #12 has no user.login"))
+_result, _ = pr_ready([subscription("alpha", _base + "/a")])
+check(not _result["success"] and "user.login" in _result["error"] and not _received,
+      "missing PR data is an error and nothing is sent")
+_server.shutdown()
+_server.server_close()
+
+
+def commit_with_event(event_result, plugin_skills=()):
+    """node_commit on a GitHub PR with the PR-ready tool stubbed; (result, seen)."""
+    seen = {"order": [], "descriptions": [], "events": [], "alerts": []}
+    mr = {"iid": 12, "web_url": "https://github.test/acme/shop/pull/12"}
+    with patch.dict(os.environ, {"NESTI_FORGE": "github"}), \
+            patch.object(nodes, "tool_gitlab_commit_and_push",
+                         lambda *a: {"success": True, "result": {"pushed": True}}), \
+            patch.object(nodes, "tool_gitlab_open_mr", lambda **kw: seen["descriptions"].append(kw["description"])
+                         or {"success": True, "result": {"mr_url": mr["web_url"], "mr": mr}}), \
+            patch.object(nodes, "tool_issue_set_status",
+                         lambda issue_id, status, note="": seen["order"].append(status) or {"success": True}), \
+            patch.object(nodes, "tool_plugin_pr_ready",
+                         lambda number: seen["order"].append("event") or seen["events"].append(number)
+                         or event_result), \
+            patch.object(nodes, "telegram_notify", seen["alerts"].append), \
+            patch.object(nodes, "tool_memory_remember_solution",
+                         lambda **kw: {"success": True, "result": {"stored": False}}), \
+            patch.object(nodes, "tool_memory_forget_episodes", lambda *a: {"success": True, "result": {}}), \
+            patch.object(nodes, "_store", SimpleNamespace(delete=lambda issue_id: None)):
+        result = nodes.node_commit({"issue_id": 12, "subject": "Add <thing>", "repo_path": "/tmp/pr-event",
+                                    "branch_name": "feature/issue-12-add-thing", "plan": "p",
+                                    "issue": {"subject": "Add <thing>", "description": "d"}, "run_id": "ev",
+                                    "plugin_skills": list(plugin_skills)})
+    return result, seen
+
+
+_ok_result = {"success": True, "result": [
+    {"package": "alpha", "revision": _SHA_A, "url": "http://a/hook", "reply": {"state": "queued"}},
+    {"package": "beta", "revision": _SHA_A, "url": "http://b/hook",
+     "error": "down: <HTTPConnection object at 0x1>"},
+    {"package": "gamma", "revision": _SHA_A, "url": "http://c/hook", "error": "HTTP 500"}]}
+_r, _seen = commit_with_event(_ok_result)
+check(_r == {"mr_url": "https://github.test/acme/shop/pull/12"} and _seen["order"] == ["closed", "event"]
+      and _seen["events"] == [12], "the event follows the close attempt with the PR number; mr_url unchanged")
+check(len(_seen["alerts"]) == 2 and "down: &lt;HTTPConnection object at 0x1&gt;" in _seen["alerts"][0]
+      and "beta" in _seen["alerts"][0] and "Add &lt;thing&gt;" in _seen["alerts"][0]
+      and "gamma" in _seen["alerts"][1], "one HTML-escaped Telegram alert per failed subscription")
+_r, _seen = commit_with_event({"success": False, "error": "plugin runtime is not valid JSON <x>"})
+check(_r == {"mr_url": "https://github.test/acme/shop/pull/12"} and _seen["order"] == ["closed", "event"]
+      and len(_seen["alerts"]) == 1 and "&lt;x&gt;" in _seen["alerts"][0],
+      "a failed delivery tool alerts once and keeps the PR and the closed issue")
+_r, _seen = commit_with_event({"success": True, "result": []},
+                              [{"package": "lazy", "skill": "lazy", "revision": _SHA_A,
+                                "arguments": {"z": "1", "level": "ultra"}},
+                               {"package": "planner", "skill": "plan", "revision": _SHA_B, "arguments": {}}])
+check(not _seen["alerts"] and _seen["descriptions"][0].splitlines()[1].endswith(
+    f"`) · plugin skills: lazy/lazy@{_SHA_A} (level=ultra, z=1); planner/plan@{_SHA_B}"),
+      "no subscription: no alert; provenance lists every snapshot skill, arguments sorted")
+shutil.rmtree(PLUGIN_ROOT, ignore_errors=True)
 
 print(f"\nALL {passed_checks} CHECKS PASSED ✅")

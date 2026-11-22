@@ -18,8 +18,13 @@ What differs from GitLab:
 """
 
 import base64
+import hashlib
+import hmac
+import json
 import logging
 import os
+
+import requests
 
 import forge
 import git_auth
@@ -29,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_URL = "https://github.com"
 _REQUEST_TIMEOUT = 30
+_EVENT_TIMEOUT = 10
 
 
 class GitHubClient(git_auth.GitRepoClient):
@@ -103,3 +109,54 @@ class GitHubClient(git_auth.GitRepoClient):
         """html_url of an open pull request from *branch_name*, or None."""
         pr = self._open_pull(branch_name)
         return pr["web_url"] if pr else None
+
+    def pull_request_event(self, pr_number: int) -> tuple[bytes, dict]:
+        """
+        GitHub's ``pull_request`` webhook (``action=opened``) for PR *pr_number*: the exact body bytes and
+        the unsigned headers.  Every value is read from the API; a missing one raises, never guessed.
+        """
+        response = self._session.get(f"{self._repo_api}/pulls/{pr_number}", timeout=_REQUEST_TIMEOUT)
+        raise_for_status(response)
+        pr = response.json()
+
+        def field(*keys: str):
+            value = pr
+            for key in keys:
+                value = value.get(key) if isinstance(value, dict) else None
+            if value is None or value == "":
+                raise RuntimeError(f"{forge.term('mr')} #{pr_number} has no {'.'.join(keys)} in GitHub's answer.")
+            return value
+
+        repo, head_sha = field("base", "repo", "full_name"), field("head", "sha")
+        body = json.dumps({
+            "action": "opened",
+            "repository": {"full_name": repo},
+            "pull_request": {
+                "number": pr_number, "state": field("state"), "draft": field("draft"),
+                "user": {"login": field("user", "login"), "type": field("user", "type")},
+                "author_association": field("author_association"),
+                "head": {"sha": head_sha},
+            },
+        }).encode()
+        return body, {
+            "Content-Type": "application/json",
+            "X-GitHub-Event": "pull_request",
+            "X-GitHub-Delivery": f"nesti-{repo.replace('/', '__')}-{pr_number}-{head_sha}",
+        }
+
+    @staticmethod
+    def deliver_event(url: str, body: bytes, headers: dict, secret: bytes) -> dict:
+        """POST *body* signed with *secret* (``X-Hub-Signature-256``) to *url*; the receiver's JSON object reply."""
+        signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
+        # Plain requests, never self._session: the GitHub token must not reach a plugin.
+        response = requests.post(url, data=body, timeout=_EVENT_TIMEOUT, allow_redirects=False,
+                                 headers={**headers, "X-Hub-Signature-256": f"sha256={signature}"})
+        if not 200 <= response.status_code < 300:
+            raise RuntimeError(f"the receiver answered HTTP {response.status_code}: {response.text[:200]}")
+        try:
+            reply = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"the receiver answered non-JSON: {response.text[:200]}") from exc
+        if not isinstance(reply, dict):
+            raise RuntimeError(f"the receiver answered a non-object: {response.text[:200]}")
+        return reply

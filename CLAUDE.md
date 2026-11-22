@@ -24,7 +24,8 @@ graph/nodes.py               nodes; each returns a partial IssueState
 graph/edges.py, builder.py   one router per test layer; compiled `graph`
 mcp_server/                  FastMCP stdio server; tools/{issues,gitlab,docker,skills,memory,oauth,project,stats}.py
 llm_client.py                provider cascade — the only module that calls LLMs
-prompt_builder.py            plan + code prompts composed per task scope, FILE-block output format
+prompt_builder.py            plan + code prompts composed per task scope, FILE-block output format; enabled
+                             plugin skills (node_plan's snapshot) verbatim per phase before TASK SCOPE
 issue_scope.py               backend/frontend/fullstack task scope + documentation-request check
 issue_domain.py              domain-split backend: owning domains from stated names/routes, LLM classify via the
                              passed client, GitLab domain question/answer + reconcile; never imports graph.*
@@ -35,11 +36,12 @@ frontend_runner.py           Vitest + Playwright sandboxes
 gitlab_issues_client.py      issue intake + label lock; gitlab_client.py: repo + MR
 github_issues_client.py      GitHub counterpart (NESTI_FORGE=github): labels only via POST/DELETE …/labels,
                              trusted = OWNER/MEMBER/COLLABORATOR authors, 65,536-char note fit keeping the marker;
-                             github_client.py: repo + PR (422 "already exists" → the open PR, body fitted)
+                             github_client.py: repo + PR (422 "already exists" → the open PR, body fitted),
+                             pull_request_event + deliver_event: signed GitHub pull_request webhook for plugins
 forge.py                     forge client Protocols + factory (NESTI_FORGE, default gitlab), display words
                              (term), failed_run_marker, acted-on project: .env (orchestrator) or the MCP
                              client's git remote, whose host picks GitHub or GitLab; identity() scopes
-                             every per-issue Redis key
+                             every per-issue Redis key; pr_ready_event(): the forge's plugin PR event ("" on GitLab)
 git_auth.py                  forge-neutral git auth: per-call http.extraHeader env (never in the remote
                              URL / .git/config) + credential redaction of git error text; GitRepoClient:
                              the clone/branch/verified-push flow both repo clients share
@@ -59,6 +61,11 @@ scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetc
                              preflight.py, seed_live_issues.py,
                              prepare_reranker.py (build-time model artifact),
                              evaluate_reranker.py + reranker_evaluation.py (offline quality gate)
+                             nesti_plugins.py: host-only `nesti /plugin` (Python 3.6+ stdlib, no Nesti imports) →
+                             state/plugins/registry.json + runtime/active.json; sources in .private/plugins/
+                             (mounted read-only into the orchestrator); graph/tools.py reuses its constants;
+                             a service's optional `configure` step runs at enable with its .env, NESTI_PROJECT_PATH
+                             and NESTI_PLUGIN_CONTEXT (other packages' skills); enable recreates, list flags stale
 skills/, templates/          vendored doc corpus (primevue/laravel/practices),
                              bootstrap templates (laravel/, spa/), boost/ SPA discovery skill
 test_graph_smoke.py          offline regression net (.venv/bin/python test_graph_smoke.py)
@@ -263,11 +270,13 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `graph/nodes.py` | `llm_client.py` | `generate_plan/code(system, user, messages=None)` → `str` |
 | `graph/nodes.py` | `issue_scope.py` | `classify_issue()` / `declared_scope()` never raise; scope ∈ `backend`\|`frontend`\|`fullstack` |
 | `graph/nodes.py` | `issue_domain.py` | `domain_catalog()` → `dict`, `None` without a domain architecture; `detect()` → `DomainDecision(domains: tuple, ask, basis)`; `classify(..., llm)` → `(list[str], str)`, never raises; `selection(catalog, names)` → `{root, layers, names, selected, route_files, foreign_route_files}` |
-| `graph/nodes.py` | `prompt_builder.py` | `build_plan_prompt(..., scope, scope_evidence)` / `build_code_prompt(..., scope)` → `(system, user)` |
+| `graph/nodes.py` | `prompt_builder.py` | `build_plan_prompt(..., scope, scope_evidence, plugin_skills)` / `build_code_prompt(..., scope, plugin_skills)` → `(system, user)` |
 | `graph/nodes.py` | `conversation_store.py` | `append()` → updated `list[dict]` |
 | `graph/nodes.py` | `docker_runner.py` | `write_files()` → `(bool, list[str])` |
 | `graph/nodes.py` | `docker_runner.py` | `run_tests()` → `(bool, str)` |
 | `graph/nodes.py` | `graph/tools.py` | `tool_app_facts(backend_path)` → `{"success", "result": {"facts": str, "tables": int, "reason": str}}`; empty facts when skipped |
+| `graph/nodes.py` | `graph/tools.py` | `tool_plugin_skills()` → `{"success", "result": [{package, skill, revision, ref, arguments, phases, text}]}` in runtime order; `[]` without `active.json` or bindings; a malformed runtime or unusable enabled binding → `success=False`, which `node_plan` turns into a failed issue; called once per run, `node_code` reuses `plugin_skills` |
+| `graph/nodes.py` | `graph/tools.py` → `github_client.py` | `tool_plugin_pr_ready(pr_number)` → `{"success", "result": [{package, revision, url, reply \| error}]}`, one per enabled subscription to `forge.pr_ready_event()`, read from `active.json` at call time; `[]` (nothing called) on GitLab or without a subscription; the PR is read once from the API (missing identity field → error), each POST is plain `requests`, HMAC-signed with its own `secret_file`, no redirects, no GitHub token, 10 s timeout; `node_commit` calls it after the close attempt and only logs/alerts (html-escaped) per failure — never changes `mr_url`, the issue or cleanup; no retry |
 | `graph/tools.py` | `docker_runner.py` | `run_app_facts()` → `(bool, str)` |
 | `graph/tools.py` | `docker_runner.py` | `run_openapi_export()` / `run_bootstrap()` / `run_scramble_install()` → `(bool, str)` |
 | `graph/tools.py` | `frontend_runner.py` | `run_vitest()` / `run_playwright()` → `(bool, str)` |

@@ -1,13 +1,16 @@
 """
 test_github_client.py – GitHubClient against a local bare repository (clone,
 initial commit, token-less remote, push verification, existing-branch rule)
-and a fake HTTP session (PR open, 422 "already exists", 65,536 body limit).
+and a fake HTTP session (PR open, 422 "already exists", 65,536 body limit,
+signed pull_request plugin event).
 No network.
 
 Run:  .venv/bin/python test_github_client.py
 """
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -234,6 +237,62 @@ check(len(body) <= ghc.BODY_LIMIT and body.startswith("Closes #7\n\n## Summary\n
 gh._session = _Session(post=[_Response({"message": "rate limited"}, 403, {"Retry-After": "60"})])
 error = _raises(lambda: gh.open_merge_request("b", 7, "Add thing"), requests.HTTPError)
 check(error is not None and "Retry-After=60" in str(error), "403 on PR open raises with GitHub's retry hint")
+
+print("── pull_request plugin event ──")
+_pull = {"number": 12, "state": "open", "draft": False, "author_association": "MEMBER",
+         "user": {"login": "nesti-bot", "type": "User"}, "head": {"sha": "abc123"},
+         "base": {"repo": {"full_name": "acme/shop"}}}
+gh._session = _Session(get=[_Response(_pull), _Response(_pull)])
+event_body, event_headers = gh.pull_request_event(12)
+check(gh._session.calls[0][1] == "https://api.github.test/repos/acme/shop/pulls/12"
+      and json.loads(event_body) == {
+          "action": "opened", "repository": {"full_name": "acme/shop"},
+          "pull_request": {"number": 12, "state": "open", "draft": False,
+                           "user": {"login": "nesti-bot", "type": "User"}, "author_association": "MEMBER",
+                           "head": {"sha": "abc123"}}},
+      "the event is read from the PR API: real author, association, state, draft flag and head sha")
+check(event_headers["X-GitHub-Event"] == "pull_request"
+      and event_headers["X-GitHub-Delivery"] == "nesti-acme__shop-12-abc123"
+      and gh.pull_request_event(12) == (event_body, event_headers),
+      "event name and delivery id per GitHub; the same PR and head sha give the same bytes and id")
+for _drop in (("user", "login"), ("author_association",), ("head", "sha"), ("draft",)):
+    _broken = json.loads(json.dumps(_pull))
+    _parent = _broken
+    for _key in _drop[:-1]:
+        _parent = _parent[_key]
+    del _parent[_drop[-1]]
+    gh._session = _Session(get=[_Response(_broken)])
+    error = _raises(lambda: gh.pull_request_event(12), RuntimeError)
+    check(error is not None and ".".join(_drop) in str(error), f"a PR without {'.'.join(_drop)} raises, never guessed")
+
+_posts = []
+with patch("requests.post", lambda url, **kw: _posts.append((url, kw))
+           or _Response({"delivery": "d", "state": "queued"}, 202)):
+    reply = GitHubClient.deliver_event("http://plugin.test/hook", event_body, event_headers, b"s3cret")
+url, sent = _posts[0]
+headers = sent["headers"]
+check(url == "http://plugin.test/hook" and reply == {"delivery": "d", "state": "queued"} and sent["data"] is event_body,
+      "the exact event bytes go to the subscription URL; the receiver's reply is returned")
+check(headers["X-Hub-Signature-256"] == "sha256=" + hmac.new(b"s3cret", event_body, hashlib.sha256).hexdigest(),
+      "the signature is HMAC-SHA256 over the exact sent bytes with the subscription's secret")
+check("Authorization" not in headers and not any(_TOKEN in str(v) for v in sent.values())
+      and sent["allow_redirects"] is False and sent["timeout"] <= 10,
+      "the GitHub token never reaches a plugin; no redirects; a short timeout")
+
+
+class _NotJson(_Response):
+    def json(self):
+        raise ValueError("Expecting value")
+
+
+for answer, case in ((_Response({"error": "bad sig"}, 401), "a 401"),
+                     (_Response({}, 302, {"Location": "http://elsewhere.test"}), "a redirect"),
+                     (_NotJson("<html>", 200), "a non-JSON reply"),
+                     (_Response(["queued"], 200), "a non-object reply")):
+    with patch("requests.post", lambda url, **kw: answer):
+        error = _raises(lambda: GitHubClient.deliver_event("http://plugin.test/hook", event_body, {}, b"s3cret"),
+                        RuntimeError)
+    check(error is not None and "s3cret" not in str(error), f"{case} raises, without the secret in the error")
 
 print(f"\n{'All GitHub client checks passed.' if not _failures else f'{_failures} check(s) FAILED.'}")
 sys.exit(1 if _failures else 0)

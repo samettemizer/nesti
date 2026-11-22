@@ -449,6 +449,11 @@ fi
 # --- 6. Containers -------------------------------------------------------------
 STEP="containers"
 mkdir -p state logs
+# Generic plugin storage and the external event network only; plugins are installed with `nesti /plugin`.
+mkdir -p .private/plugins/packages .private/plugins/work .private/plugins/config .private/plugins/secrets \
+    .private/plugins/tmp state/plugins/runtime
+chmod 700 .private/plugins/config .private/plugins/secrets
+docker network inspect nesti-plugins >/dev/null 2>&1 || docker network create --internal nesti-plugins >/dev/null
 docker image inspect postgres:15 >/dev/null 2>&1 || docker pull postgres:15
 # Stats and orchestrator share an image tag; concurrent exports race on a clean install.
 COMPOSE_PARALLEL_LIMIT=1 "${COMPOSE[@]}" build

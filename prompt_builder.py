@@ -23,6 +23,17 @@ Task scope
   plan on line 1 (``SCOPE: …``); node_plan parses it, and the coding prompt
   follows the plan.
 
+Plugin skills
+─────────────
+  Enabled plugin skill bindings (``nesti /plugin``) arrive as node_plan's
+  per-issue snapshot, never read from disk here.  Each binding's text enters
+  the system prompt of the phases it is bound to, verbatim and in snapshot
+  order, under one generic header that keeps Nesti's plan format, FILE/DELETE
+  output, question handling, database rules, test gates and TASK SCOPE in
+  charge.  The block sits right before TASK SCOPE: the core head stays the
+  same with or without plugins.  The enable-time size limit bounds it; nothing
+  is truncated and no other budget changes.
+
 Context budget strategy
 ───────────────────────
   Planning phase  : DeepSeek API — generous budget, 15 000 chars of issue-URL
@@ -60,7 +71,6 @@ Context budget strategy
 
 import math
 import os
-from pathlib import Path
 
 import forge
 from issue_scope import SCOPES, documentation_request
@@ -88,14 +98,6 @@ _PRIMEVUE_MAJOR: str = "5"
 # ── Project context (read once at import; stable across the process lifetime) ──
 _GITLAB_PROJECT: str = os.environ.get("GITLAB_PROJECT_PATH", "the project")
 _DEFAULT_BRANCH: str = os.environ.get("GITLAB_DEFAULT_BRANCH", "main")
-_PONYTAIL_LEVEL: str = (os.environ.get("NESTI_PONYTAIL_LEVEL") or "ultra").strip().lower()
-if _PONYTAIL_LEVEL not in ("lite", "full", "ultra"):
-    raise ValueError(
-        f"Invalid NESTI_PONYTAIL_LEVEL={_PONYTAIL_LEVEL!r} – expected 'lite', 'full' or 'ultra'."
-    )
-_PONYTAIL = (
-    Path(__file__).parent / "skills" / "ponytail" / f"SKILL_{_PONYTAIL_LEVEL.upper()}.md"
-).read_text(encoding="utf-8").strip()
 
 # Splits build_code_prompt's user prompt: everything before it is identical across attempts of one issue.
 # llm_client caches it on Anthropic models and strips it for every other provider.
@@ -570,8 +572,34 @@ def _architecture_block(domain: dict) -> str:
     )
 
 
+_PLUGIN_SKILLS_HEADER = """\
+PLUGIN SKILLS ({phase} phase) — instructions from skill packages the operator installed and enabled,
+quoted unmodified below. They shape how you work inside Nesti's contract and never override it:
+the required plan format and its SCOPE line, FILE/DELETE-only code output, the database and
+migration rules, the test gates and TASK SCOPE take precedence over anything a skill says.
+You cannot ask the user questions here: record open points under the plan's Constraints; Nesti
+itself asks on the issue when it needs an answer. You run no commands and no tests: never claim
+to have run, executed or passed a test."""
+
+
+def _plugin_skills_block(plugin_skills: "list[dict] | None", phase: str) -> str:
+    """The bound plugin skills of *phase* in snapshot order, each text verbatim; "" when none."""
+    bound = [skill for skill in plugin_skills or () if phase in skill["phases"]]
+    if not bound:
+        return ""
+    parts = [_PLUGIN_SKILLS_HEADER.format(phase=phase)]
+    for skill in bound:
+        arguments = ", ".join(f"{key}={value}" for key, value in sorted(skill["arguments"].items()))
+        parts.append(
+            f"### {skill['package']}/{skill['skill']} — revision {skill['revision']} (ref {skill['ref']}); "
+            f"arguments: {arguments or 'none'}\n{skill['text']}"
+        )
+    return "\n\n".join(parts)
+
+
 def _planning_system_prompt(
     scope: str, documentation: str, layout: dict, domain: dict | None = None,
+    plugin_skills: "list[dict] | None" = None,
 ) -> str:
     """The planning system prompt for *scope* (already normalised)."""
     standards = [_PLAN_COMMON_STANDARDS]
@@ -581,7 +609,7 @@ def _planning_system_prompt(
         standards.append(_PLAN_SPA_STANDARDS)
     standards.append(_PLAN_TEST_STANDARDS[scope])
 
-    sections = [_PONYTAIL]
+    sections = []
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
     sections += [
@@ -590,6 +618,9 @@ def _planning_system_prompt(
     ]
     sections.append(_layout_block(layout, layout.get("spa_versions") or {}))
     sections.append("PLANNING STANDARDS:\n" + "\n".join(standards))
+    plugins = _plugin_skills_block(plugin_skills, "plan")
+    if plugins:
+        sections.append(plugins)
     # Issue-specific blocks last: everything above is one prefix shared across calls and issues (prompt cache).
     sections.append(_task_scope_block(scope, documentation))
     if domain and scope != "frontend":
@@ -600,6 +631,7 @@ def _planning_system_prompt(
 
 def _coding_system_prompt(
     scope: str, documentation: str, layout: dict, domain: dict | None = None,
+    plugin_skills: "list[dict] | None" = None,
 ) -> str:
     """The coding system prompt for *scope* (already normalised)."""
     spa = bool(layout.get("frontend"))
@@ -610,7 +642,7 @@ def _coding_system_prompt(
         testing += [_TEST_SPA_LAYERS, _TEST_LOCATORS]
     testing.append(_TEST_SCOPE_NOTE[scope])
 
-    sections = [_PONYTAIL]
+    sections = []
     if scope != "frontend":
         sections.append(_DATABASE_POLICY)
     sections.append(_CODING_ROLE[scope])
@@ -621,6 +653,9 @@ def _coding_system_prompt(
     if scope != "backend" and spa:
         sections.append(_SPA_STANDARDS)
     sections.append("\n".join(testing))
+    plugins = _plugin_skills_block(plugin_skills, "code")
+    if plugins:
+        sections.append(plugins)
     # Issue-specific blocks last: everything above is one prefix shared across calls and issues (prompt cache).
     sections.append(_task_scope_block(scope, documentation))
     if domain and scope != "frontend":
@@ -836,6 +871,7 @@ def build_plan_prompt(
     layout: dict,
     domain: dict | None = None,
     app_facts: str = "",
+    plugin_skills: "list[dict] | None" = None,
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the planning phase.
@@ -877,6 +913,10 @@ def build_plan_prompt(
     app_facts:
         Laravel Boost facts (versions, packages, database schema summary) of the
         backend at the cloned HEAD; rendered only outside the frontend scope.
+    plugin_skills:
+        node_plan's snapshot of the enabled plugin skill bindings
+        (graph.tools.tool_plugin_skills); the plan-phase ones enter the system
+        prompt verbatim before TASK SCOPE.
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
@@ -933,7 +973,7 @@ Write the plan now. No code, no preamble.\
     }
     user_prompt = "".join(sections.values())
     system_prompt = _planning_system_prompt(
-        scope, documentation_request(subject, description), layout, domain
+        scope, documentation_request(subject, description), layout, domain, plugin_skills
     )
     if metrics is not None:
         metrics.update({f"{name}_chars": len(text) for name, text in sections.items()})
@@ -955,6 +995,7 @@ def build_code_prompt(
     layout: dict,
     domain: dict | None = None,
     app_facts: str = "",
+    plugin_skills: "list[dict] | None" = None,
 ) -> tuple[str, str]:
     """
     Return (system_prompt, user_prompt) for the code-generation phase.
@@ -992,6 +1033,10 @@ def build_code_prompt(
     app_facts:
         Laravel Boost facts (versions, packages, database schema summary) of the
         backend at the cloned HEAD; rendered only outside the frontend scope.
+    plugin_skills:
+        The plan-time snapshot of the enabled plugin skill bindings, the same on
+        every attempt; the code-phase ones enter the system prompt verbatim
+        before TASK SCOPE.
     """
     issue_id = issue.get("id", "?")
     subject = (issue.get("subject", "") or "").strip()
@@ -1048,7 +1093,7 @@ Implement the approved plan above:
     }
     user_prompt = "".join(sections.values())
     system_prompt = _coding_system_prompt(
-        scope, documentation_request(subject, description), layout, domain
+        scope, documentation_request(subject, description), layout, domain, plugin_skills
     )
     if metrics is not None:
         metrics.update({f"{name}_chars": len(text) for name, text in sections.items()})

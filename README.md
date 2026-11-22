@@ -240,6 +240,9 @@ Configure `.env`, then start:
 ```bash
 cp .env.example .env
 # Set forge access (GitLab, or NESTI_FORGE=github) and an API key or consumer subscription.
+# The orchestrator joins the plugin event network and mounts the plugin dirs; install.sh creates them.
+docker network create --internal nesti-plugins
+mkdir -p .private/plugins/packages .private/plugins/secrets && chmod 700 .private/plugins/secrets
 docker-compose up -d --build
 ```
 Sandbox images are built and skills indexed automatically before polling.
@@ -348,6 +351,89 @@ when configured.
 
 ---
 
+## Plugins
+
+`nesti /plugin` runs on the host (`scripts/nesti_plugins.py`, Python 3.6+,
+standard library only). It uses your own Git credentials and Docker and needs
+neither Redis nor the orchestrator:
+
+```text
+nesti /plugin install <repo-url> --ref <tag-or-commit> [--trust]
+nesti /plugin enable <name>
+nesti /plugin list
+nesti /plugin disable <name>
+nesti /plugin update <name> --ref <tag-or-commit> [--trust]
+nesti /plugin remove <name>
+```
+
+- The ref is recorded as both what you requested and the full commit SHA.
+  Nothing updates automatically. URLs that carry tokens are rejected.
+- A plain `skills/*/SKILL.md` repository is read as data only; its npm or
+  JavaScript hooks never run. The skill named like the package is bound to the
+  plan and code phases. Change phases and arguments in
+  `.private/plugins/config/<name>/bindings.json`.
+- A service package (`nesti-plugin.json`) shows its repository, SHA, prepare
+  command, services, mounts and networks before any of its code runs. You must
+  approve it, or pass `--trust`, for every new SHA. Trusting is not a sandbox:
+  package code runs with your Docker privileges. Its settings go in
+  `.private/plugins/config/<name>/.env`. `install` only prepares images;
+  `enable` starts the service. `remove` keeps settings and volumes.
+- A service may declare a `configure` step (fixed argv, like `prepare`). It
+  runs at every `enable`, before Compose starts, with the package's `.env`
+  values, `NESTI_PLUGIN_DIR`, `NESTI_PLUGIN_WORK_DIR`,
+  `NESTI_PLUGIN_CONFIG_DIR`, `NESTI_PROJECT_PATH` (from Nesti's `.env`) and
+  `NESTI_PLUGIN_CONTEXT`. That is a temporary JSON file holding the project
+  path and every other package's enabled skills (package, skill, revision,
+  ref, arguments, phases, text). If configure fails, nothing starts and the
+  plugin stays off. `enable` recreates the service's containers, so they
+  always run on the configuration just generated. Compose also sees
+  `NESTI_PROJECT_PATH` and the `NESTI_PLUGIN_*` paths. When skills, their
+  arguments or the project path change later, `list` and every other
+  `/plugin` command mark the service `stale`. Run `nesti /plugin enable
+  <name>` again to regenerate and restart it; Nesti never restarts it on its
+  own.
+- Sources live in `.private/plugins/packages/<name>/<sha>/` and are read-only
+  by contract (build artifacts go to `.private/plugins/work/`). Records are in
+  `state/plugins/registry.json` and enabled bindings and subscriptions in
+  `state/plugins/runtime/active.json`.
+- An issue reads the enabled skill bindings once, when planning starts, and
+  keeps that text, revision, ref and arguments for every coding attempt:
+  `enable`, `disable`, `update` or `remove` affect the next issue only. Each
+  bound skill enters the plan and/or code system prompt unmodified, below a
+  short header naming its package, revision, ref and arguments. Nesti's plan
+  format, FILE/DELETE output, database rules, test gates and task scope still
+  take precedence. Only the skill text is used: other harnesses' hooks, slash
+  commands and status lines do not apply. Without plugins the prompts carry no
+  skill. An enabled skill that cannot be read fails the issue with the reason in
+  its note.
+- Service receivers and the orchestrator join the external `nesti-plugins`
+  network, which `install.sh` creates with `--internal`. It is not a one-way
+  firewall: receivers can reach orchestrator ports on it. Receivers need their
+  own network for outbound access.
+- After Nesti opens a GitHub pull request and tries to close the issue, every enabled
+  subscription to `github.pull_request.ready` receives a GitHub `pull_request`
+  webhook (`action=opened`). The webhook carries the PR's actual state, draft flag,
+  author and head SHA. It is signed with `X-Hub-Signature-256`, and its delivery ID
+  is fixed per PR and head SHA. A failed delivery is logged and sent as a Telegram alert. It never changes
+  the PR or the issue, and it is not retried. A `202` reply means accepted, not
+  done. GitLab runs send nothing. With plugin skills, the PR's **AI provider**
+  line names each `package/skill@revision` and its arguments.
+
+Example, [Ponytail](https://github.com/DietrichGebert/ponytail) (fresh
+installs do not include it, and it uses its own default level until you set one):
+
+```text
+nesti /plugin install https://github.com/DietrichGebert/ponytail.git --ref 96608e078b2d5ea607c5c3b8b5a54d1c1fba6846
+nesti /plugin enable ponytail
+```
+
+To pick `lite`, `full` or `ultra`, set `arguments.level` in
+`.private/plugins/config/ponytail/bindings.json`, e.g.
+`{"skills": {"ponytail": {"phases": ["plan", "code"], "arguments": {"level": "ultra"}}}}`,
+then run `nesti /plugin enable ponytail` again.
+
+---
+
 ## Configuration
 
 Use [`.env.example`](.env.example) as the configuration reference:
@@ -370,6 +456,7 @@ Use [`.env.example`](.env.example) as the configuration reference:
 **Offline smoke tests** (no Docker, no network):
 ```bash
 python test_graph_smoke.py
+python test_plugins.py        # host plugin CLI with local Git repos and a stubbed Docker runner
 ```
 
 **Live integration tests** (needs Docker + network):
