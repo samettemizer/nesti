@@ -248,7 +248,9 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
     more options (by name, or a bare list of numbers); each unmatched trusted reply gets
     the question again (one re-ask per reply; untrusted replies are ignored); manual pauses are never lifted.
     Greenfield backends, backends without a domain root (`domain_catalog()` is
-    `None`) and frontend-scope issues are never asked.
+    `None`), frontend-scope issues and issues whose only targets are explicit
+    file paths outside every domain (`file_targets()`: no stated domain, no
+    route) are never asked.
     The domains shape prompts only, never a gate: the architecture block names
     only the chosen domains, their files are quoted, and unchosen domains' files
     stay out of the inventory listings, API contracts and `routes/<dir>/` quotes
@@ -270,7 +272,7 @@ test_live_laravel.py         opt-in real-container proof (Docker + network)
 | `graph/nodes.py` | `graph/tools.py` | Returns `{"success": bool, ...}` — always |
 | `graph/nodes.py` | `llm_client.py` | `generate_plan/code(system, user, messages=None)` → `str` |
 | `graph/nodes.py` | `issue_scope.py` | `classify_issue()` / `declared_scope()` never raise; scope ∈ `backend`\|`frontend`\|`fullstack` |
-| `graph/nodes.py` | `issue_domain.py` | `domain_catalog()` → `dict`, `None` without a domain architecture; `detect()` → `DomainDecision(domains: tuple, ask, basis)`; `classify(..., llm)` → `(list[str], str)`, never raises; `selection(catalog, names)` → `{root, layers, names, selected, route_files, foreign_route_files}` |
+| `graph/nodes.py` | `issue_domain.py` | `domain_catalog()` → `dict`, `None` without a domain architecture; `detect()` → `DomainDecision(domains: tuple, ask, basis)`; `file_targets()` → `list[str]` of explicit file targets outside every domain, `[]` when a domain, route or domain-owned/ambiguous PHP path is named; `classify(..., llm)` → `(list[str], str)`, never raises; `selection(catalog, names)` → `{root, layers, names, selected, route_files, foreign_route_files}` |
 | `graph/nodes.py` | `prompt_builder.py` | `build_plan_prompt(..., scope, scope_evidence, plugin_skills)` / `build_code_prompt(..., scope, plugin_skills)` → `(system, user)` |
 | `graph/nodes.py` | `conversation_store.py` | `append()` → updated `list[dict]` |
 | `graph/nodes.py` | `docker_runner.py` | `write_files()` → `(bool, list[str])` |

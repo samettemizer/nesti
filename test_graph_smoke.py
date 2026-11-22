@@ -3002,6 +3002,20 @@ try:
           "routes owned by two distinct domains decide both")
     _dec = issue_domain.detect("Show the active announcements", "", _cat)
     check(_dec.domains == () and not _dec.ask, "no route or domain leaves it to the classifier")
+    check(issue_domain.file_targets("Update README.md and .gitignore", "", _cat) == ["README.md", ".gitignore"]
+          and issue_domain.file_targets("Set debug in config/app.php", "Add KEY to .env.example.", _cat)
+          == ["config/app.php", ".env.example"]
+          and issue_domain.file_targets("Tidy routes/api.php", "", _cat) == ["routes/api.php"],
+          "explicit file targets outside every domain are found")
+    check(all(issue_domain.file_targets(s, "", _cat) == [] for s in (
+        "Fix app/Domains/Members/Models/X.php",
+        "Fix routes/domains/Members.php",
+        "Fix validation in MembersController.php",
+        "Do not touch README.md, fix the members list",
+        "Add GET /announcements/x and document it in README.md",
+        "Domain: Members, update README.md",
+        "See https://x.io/README.md, works on Vue.js and Node.js",
+    )), "domain files, ambiguous PHP names, negations, routes, stated domains, URLs and frameworks are not targets")
     _put(_domain_probe, "routes/domains/Shared.php",
          "<?php\nuse App\\Domains\\Announcements\\Http\\Controllers\\AnnouncementsController;\n"
          "use App\\Domains\\Members\\Http\\Controllers\\MembersController;\n"
@@ -3122,6 +3136,9 @@ check(not calls["asks"] and f["domain"]["selected"] == ["Announcements", "Member
       and "MembersController.php (complete)" in calls["plan_prompts"][0]
       and "AnnouncementsController.php (complete)" in calls["plan_prompts"][0],
       "routes in two domains decide both; the prompts carry both domains")
+f = _domain_run(3408, "Update README.md and .gitignore", answer_raises=True, classify_reply=_one)
+check(not calls["asks"] and f["domain"]["selected"] == [],
+      "an issue naming only file targets outside every domain skips the domain decision")
 
 http = _IssueHTTP()
 http.add_issue(40, ["nesti", "nesti::in-progress"])

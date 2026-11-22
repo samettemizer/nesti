@@ -29,6 +29,7 @@ from pathlib import Path
 
 import forge
 import project_layout
+from issue_scope import _not_negated
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,14 @@ _USE_RE = re.compile(r"^\s*use\s+\\?([\w\\]+?)(?:\s+as\s+(\w+))?\s*;", re.M)
 _ACTION_RE = re.compile(r"\\?([A-Za-z_][\w\\]*)::class")
 _ROUTE_PATH_RE = re.compile(r"(?<![\w.:/\\-])/[\w{}:.-]+(?:/[\w{}:.-]+)*")
 _FILE_SUFFIX_RE = re.compile(r"\.(?:php|vue|js|ts|json|md|css|html|xml|ya?ml)$", re.I)
+# A path token with a known extension, or a lowercase dotfile (.gitignore, .env.example); route paths and URLs never match.
+_FILE_TARGET_RE = re.compile(r"""
+(?<![\w./\\-])(?:[\w.-]+/)*
+(?: \.[a-z][\w-]*(?:\.[\w-]+)*
+  | [\w-]+(?:\.[\w-]+)*\.(?i:php|vue|js|mjs|cjs|ts|json|md|css|scss|html|xml|ya?ml|txt|lock|ini|toml|neon|sh|dist|example)
+)(?![\w/-]|\.\w)
+""", re.X)
+_LARAVEL_DIR_RE = re.compile(r"(?:^|/)(?:app|bootstrap|config|database|lang|public|resources|routes|tests)/")
 # Separators are mutually exclusive (comma / "and" / bare whitespace), so a long gap cannot backtrack exponentially.
 _NUMBERS_RE = re.compile(r"\s*\d+[.)]?(?:(?:\s*,\s*|\s+and\s+|\s+)\d+[.)]?)*\s*(?:,\s*)?", re.I)
 _CLASSIFY_SYSTEM = (
@@ -229,6 +238,29 @@ def detect(subject: str, description: str, catalog: dict) -> DomainDecision:
         basis = "; ".join(["stated in the issue"] * bool(stated) + ["route " + ", ".join(paths)] * bool(paths))
         return DomainDecision(tuple(n for n in names if n in owners), False, basis)
     return DomainDecision((), False, "no route or domain named in the issue")
+
+
+def file_targets(subject: str, description: str, catalog: dict) -> list[str]:
+    """Explicit file targets the issue names when they alone show no domain is involved; [] otherwise."""
+    decision = detect(subject, description, catalog)
+    if decision.domains or decision.ask:
+        return []
+    text = _URL_RE.sub(" ", f"{subject}\n{description}")
+    in_root = re.compile(rf"(?:^|/)app/{re.escape(catalog['root'])}/", re.I)
+    owned = [f for f, owners in catalog["file_owners"].items() if any(owners)]
+    found: list[str] = []
+    for match in _FILE_TARGET_RE.finditer(text):
+        target = match.group(0)
+        if not _not_negated(text, match.start()):
+            continue
+        if "/" not in target and target.lower().endswith(".js") and target[:1].isupper():
+            continue  # Vue.js, Node.js: framework names, not files
+        if (in_root.search(target) or any(target == f or target.endswith("/" + f) for f in owned)
+                or (target.lower().endswith(".php") and not _LARAVEL_DIR_RE.search(target))):
+            return []  # inside a domain, or a bare/partial PHP path that may be
+        if target not in found:
+            found.append(target)
+    return found
 
 
 def classify(subject: str, description: str, catalog: dict, llm) -> tuple[list[str], str]:

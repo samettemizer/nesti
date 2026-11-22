@@ -83,7 +83,7 @@ from graph.tools import (
 )
 import forge
 from forge import failed_run_marker
-from issue_domain import classify as classify_domain, detect as detect_domain, domain_catalog, selection
+from issue_domain import classify as classify_domain, detect as detect_domain, domain_catalog, file_targets, selection
 from issue_scope import ScopeDecision, classify_issue, declared_scope, widen
 from llm_client import LLMClient
 from project_layout import SCAFFOLD_BACKEND_DIR, LayoutError, clone_layout, spa_dir_for
@@ -994,9 +994,11 @@ def node_detect_domain(state: IssueState) -> dict:
     run continues unchanged.  Otherwise an earlier human answer to Nesti's
     question wins, then issue_domain.detect (every stated domain plus every
     domain owning a named route), then the planner classification (accepted
-    only when exactly one domain is plausible).  When nothing decides, the issue
-    gets the domain question and is paused; ``failure_reason`` routes to
-    cleanup.  Logs exactly one ``DOMAIN:`` line per invocation.
+    only when exactly one domain is plausible).  A frontend-scope issue, or one
+    whose only targets are explicit file paths outside every domain, skips the
+    decision.  When nothing decides, the issue gets the domain question and is
+    paused; ``failure_reason`` routes to cleanup.  Logs exactly one ``DOMAIN:``
+    line per invocation.
     """
     logger.debug("→ node_detect_domain")
     issue_id = state["issue_id"]
@@ -1016,6 +1018,10 @@ def node_detect_domain(state: IssueState) -> dict:
     description = state["issue"].get("description", "") or ""
     if classify_issue(subject, description).scope == "frontend":
         log("skipped", "frontend scope")
+        return {"domain": selection(catalog, [])}
+    targets = file_targets(subject, description, catalog)
+    if targets:
+        log("skipped", "explicit file targets: " + ", ".join(targets))
         return {"domain": selection(catalog, [])}
 
     answered = tool_issue_domain_answer(issue_id, names)
