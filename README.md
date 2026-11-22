@@ -355,7 +355,8 @@ when configured.
 
 `nesti /plugin` runs on the host (`scripts/nesti_plugins.py`, Python 3.6+,
 standard library only). It uses your own Git credentials and Docker and needs
-neither Redis nor the orchestrator:
+neither Redis nor the orchestrator. Inside the container, `nesti /plugin` and
+`nesti /<installed plugin>` only point you to the host launcher (exit 1):
 
 ```text
 nesti /plugin install <repo-url> --ref <tag-or-commit> [--trust]

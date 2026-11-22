@@ -54,6 +54,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import redis
 import requests
 
+from scripts import nesti_plugins
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("oauth-cli")
 
@@ -1282,6 +1284,13 @@ def main() -> None:
         # Plugins are cloned with host Git credentials and run through host Docker: never inside this container.
         print("'/plugin' runs on the host, not in the container: use the host launcher, e.g. 'nesti /plugin list' "
               "(scripts/nesti). It needs Python 3.6+, Git and Docker on the host; neither Redis nor the orchestrator.")
+        sys.exit(1)
+    plugin = cmd[1:] if cmd.startswith("/") and cmd not in ("/provider", "/usage") else ""
+    if nesti_plugins.NAME_RE.match(plugin) \
+            and os.path.isdir(os.path.join(nesti_plugins.CONTAINER_PACKAGES_DIR, plugin)):
+        # Plugin settings live in the host config dir, which is never mounted here.
+        print(f"nesti {cmd} runs on the host: run 'nesti {cmd} …' from the Nesti checkout (scripts/nesti), "
+              "not inside the container.")
         sys.exit(1)
 
     store = TokenStore()
