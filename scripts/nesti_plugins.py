@@ -306,7 +306,9 @@ def check_ref(ref: str) -> None:
 
 
 def absolute_local(url: str) -> str:
-    """A local repository path made absolute, so identity and update never depend on the cwd."""
+    """Expand GitHub shorthand or make a local path absolute; existing local paths take precedence."""
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*", url) and not os.path.exists(url):
+        return "https://github.com/" + url + ("" if url.endswith(".git") else ".git")
     head = url.split("/", 1)[0]
     drive = os.name == "nt" and re.match(r"^[A-Za-z]:[\\/]", url)  # POSIX git reads C:/x as scp-like host C
     if "://" not in url and (drive or ":" not in head):
@@ -350,14 +352,14 @@ def _resolve(checkout: str, ref: str) -> str:
     raise PluginError("ref %r is not a tag or commit of the repository" % ref)
 
 
-def _fetch(paths: Paths, url: str, ref: str) -> Tuple[str, str, str]:
-    """Clone ``url`` into a private scratch dir at ``ref``; returns (scratch, checkout, sha)."""
+def _fetch(paths: Paths, url: str, ref: Optional[str]) -> Tuple[str, str, str]:
+    """Clone at a tag/commit or default HEAD; returns (scratch, checkout, sha)."""
     os.makedirs(paths.tmp, exist_ok=True)
     scratch = tempfile.mkdtemp(prefix="fetch-", dir=paths.tmp)
     checkout = os.path.join(scratch, "src")
     try:
         _git(["clone", "--no-checkout", "--quiet", "--", url, checkout])
-        sha = _resolve(checkout, ref)
+        sha = _resolve(checkout, ref) if ref is not None else _git(["-C", checkout, "rev-parse", "--verify", "HEAD^{commit}"])
         _git(["-C", checkout, "checkout", "--quiet", "--detach", sha])
         _rmtree(os.path.join(checkout, ".git"))
     except BaseException:
@@ -1071,15 +1073,18 @@ def _write_bindings_template(paths: Paths, name: str, info: Dict[str, Any]) -> N
         _write_json(path, {"skills": _default_bindings(info)})
 
 
-def cmd_install(paths: Paths, docker: Docker, url: str, ref: str, trust: bool) -> None:
+def cmd_install(paths: Paths, docker: Docker, url: str, ref: Optional[str], trust: bool) -> None:
     """Clone, validate and record a revision; service packages are trusted and prepared, never started."""
     check_url(url)
-    check_ref(ref)
+    if ref is not None:
+        check_ref(ref)
     url = absolute_local(url)
     source = normalize_source(url)
     with _locked(paths):
         registry = load_registry(paths)
         scratch, checkout, sha = _fetch(paths, url, ref)
+        if ref is None:
+            ref = sha
         try:
             info = inspect_package(checkout, source)
             name = info["name"]
@@ -1456,9 +1461,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nesti /plugin", description="Manage Nesti plugins on this host.")
     sub = parser.add_subparsers(dest="command", metavar="command")
     for command in ("install", "update"):
-        cmd = sub.add_parser(command, help="%s a package at a tag or commit" % command)
+        cmd = sub.add_parser(command, help="install a package snapshot" if command == "install"
+                             else "update a package to a tag or commit")
         cmd.add_argument("repo_url" if command == "install" else "name")
-        cmd.add_argument("--ref", required=True, help="tag or commit; recorded with its full SHA")
+        cmd.add_argument("--ref", required=command == "update",
+                         help="tag or commit; install defaults to the default branch HEAD, pinned to its full SHA")
         cmd.add_argument("--trust", action="store_true", help="approve running a service revision's code")
     for command, text in (("enable", "activate"), ("disable", "deactivate"), ("remove", "uninstall (keeps settings)")):
         sub.add_parser(command, help=text).add_argument("name")

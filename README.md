@@ -359,7 +359,7 @@ neither Redis nor the orchestrator. Inside the container, `nesti /plugin` and
 `nesti /<installed plugin>` only point you to the host launcher (exit 1):
 
 ```text
-nesti /plugin install <repo-url> --ref <tag-or-commit> [--trust]
+nesti /plugin install <repo-url-or-owner/repo> [--ref <tag-or-commit>] [--trust]
 nesti /plugin enable <name>
 nesti /plugin list
 nesti /plugin disable <name>
@@ -369,8 +369,15 @@ nesti /<name> settings
 nesti /<name> <value>
 ```
 
-- The ref is recorded as both what you requested and the full commit SHA.
-  Nothing updates automatically. URLs that carry tokens are rejected.
+- Without `--ref`, install takes the latest default branch HEAD at clone time
+  and records that snapshot's full commit SHA as both ref and revision.
+  With `--ref`, the requested tag or commit and its full SHA are recorded.
+  Nothing updates automatically; `update` still requires `--ref`.
+- GitHub shorthand `owner/repo` expands to `https://github.com/owner/repo.git`.
+  An existing local `owner/repo` path takes precedence; use `./owner/repo` to
+  explicitly select a local path. HTTPS, SSH (including `user@host:path`),
+  `file://` and local paths remain supported, not SFTP. URLs carrying tokens
+  or passwords are rejected.
 - A plain `skills/*/SKILL.md` repository is read as data only; its npm or
   JavaScript hooks never run. The skill named like the package is bound to the
   plan and code phases. Change phases and arguments in
@@ -434,8 +441,18 @@ nesti /<name> <value>
 Example, [Ponytail](https://github.com/DietrichGebert/ponytail) (fresh
 installs do not include it, and it uses its own default level until you set one):
 
+Choose **one** of these alternative installs (the last pins an explicit commit;
+you can also pass a tag):
+
 ```text
+nesti /plugin install https://github.com/DietrichGebert/ponytail.git
+nesti /plugin install DietrichGebert/ponytail
 nesti /plugin install https://github.com/DietrichGebert/ponytail.git --ref 96608e078b2d5ea607c5c3b8b5a54d1c1fba6846
+```
+
+Then enable the installed snapshot:
+
+```text
 nesti /plugin enable ponytail
 ```
 

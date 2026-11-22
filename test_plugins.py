@@ -180,8 +180,9 @@ check("__future__" not in imports and "dataclasses" not in imports, "no __future
 meta = np.parse_frontmatter("---\nname: 'ponytail'\ndescription: >\n  Lazy senior\n  dev mode.\nlicense: MIT\n---\nbody\n")
 check(meta == {"name": "ponytail", "description": "Lazy senior dev mode.", "license": "MIT"}, "frontmatter: limited key/value metadata")
 if os.name != "nt":
-    check([np.absolute_local(u) for u in ("git@host:o/r", "host:repo", "C:/x", "https://h/o/r")]
-          == ["git@host:o/r", "host:repo", "C:/x", "https://h/o/r"], "POSIX: scp-like, SSH alias, C:/x and URLs stay as typed")
+    transports = ("git@host:o/r", "host:repo", "C:/x", "https://h/o/r", "ssh://git@host/o/r", "file:///tmp/o/r")
+    check([np.absolute_local(u) for u in transports] == list(transports),
+          "POSIX: scp-like, SSH alias, C:/x, HTTPS, SSH and file URLs stay as typed")
     check(np.absolute_local("dir/a:b") == os.path.join(os.getcwd(), "dir", "a:b"), "POSIX: a local path with a later colon becomes absolute")
 envfile = BASE / "sample.env"
 envfile.write_text('A=abc123 # rotated\nB="abc #123" # note\nC=\'x # y\'\nD=a#b\nexport E=plain\n# F=no\n')
@@ -226,12 +227,16 @@ code, _, err = run("install", str(IMPOSTOR), "--ref", "v1")
 check(code == 1 and "another source cannot reuse" in err, "another source cannot reuse the name")
 
 for url in ("https://user:tok@github.com/a/b.git", "https://ghp_abc@github.com/a/b", "https://github.com/a/b?access_token=x",
-            "ext::sh -c touch% /tmp/pwned", "-uhttps://github.com/a/b", "http://github.com/a/b", "user:pw@host:a/b"):
-    code, _, err = run("install", "--ref", "v1", "--", url)
+            "ext::sh -c touch% /tmp/pwned", "-uhttps://github.com/a/b", "http://github.com/a/b", "user:pw@host:a/b",
+            "sftp://host/a/b", "ssh://user:pw@host/a/b", "https://github.com/a/b#token", "owner/repo\n"):
+    code, _, err = run("install", "--", url)
     check(code == 1, "URL refused: %s" % url)
 check(not os.listdir(PATHS.tmp), "refused/failed installs leave no scratch directories")
-code, _, _ = run("install", str(PONY))
-check(code == 2, "--ref is required (usage error)")
+code, _, _ = run("update", "ponytail")
+check(code == 2, "update still requires --ref (usage error)")
+for ref in ("", "--upload-pack=evil", "v1..v2", "HEAD~1"):
+    code, _, err = run("install", str(PONY), "--ref=" + ref)
+    check(code == 1 and "invalid --ref" in err, "invalid explicit ref %r is rejected" % ref)
 OTHER = BASE / "Misc Skills"
 misc_sha = commit(OTHER, {"skills/alpha/SKILL.md": "Alpha.\n", "skills/beta/SKILL.md": "Beta.\n"})
 code, _, err = run("install", str(OTHER), "--ref", "main")
@@ -252,6 +257,73 @@ check(code == 0 and "already installed" in out, "the same repository by absolute
 code, _, err = run("update", "relpkg", "--ref", "v2")
 check(code == 0 and registry()["packages"]["relpkg"]["sha"] == rel2, "update from another cwd succeeds: %s" % err.strip())
 run("remove", "relpkg")
+
+print("\n[2b] Default branch snapshots and GitHub shorthand through the CLI")
+SNAP = BASE / "local-owner" / "local-repo"
+old_snapshot = commit(SNAP, {"plugin.json": '{"name": "snapshot"}',
+                             "skills/snapshot/SKILL.md": "---\nname: snapshot\n---\nOld.\n"}, tag="old")
+git(SNAP, "checkout", "-q", "-b", "stable")
+snapshot = commit(SNAP, {"skills/snapshot/SKILL.md": "---\nname: snapshot\n---\nLatest.\n"})
+https_url = "https://github.com/DietrichGebert/ponytail.git"
+git(BASE, "config", "--global", "url.%s.insteadOf" % SNAP.as_uri(), https_url)
+cwd = os.getcwd()
+try:
+    os.chdir(BASE)
+    for url in (https_url, "DietrichGebert/ponytail"):
+        code, _, err = run("install", url)
+        rec = registry()["packages"].get("snapshot", {})
+        check(code == 0 and rec.get("ref") == rec.get("sha") == snapshot,
+              "install %s without --ref pins the non-main default branch HEAD: %s" % (url, err.strip()))
+        check(rec.get("url") == https_url and rec.get("source") == https_url[:-4],
+              "HTTPS and shorthand record the same canonical URL and source")
+        src = Path(PATHS.package("snapshot", snapshot))
+        check((src / "skills/snapshot/SKILL.md").read_text().endswith("Latest.\n") and not (src / ".git").exists(),
+              "snapshot contains the default branch revision, without live Git metadata")
+        before = registry()
+        code, out, err = run("install", "DietrichGebert/ponytail.git")
+        check(code == 0 and "already installed" in out and registry() == before,
+              "equivalent shorthand with .git is idempotent")
+        code, _, err = run("enable", "snapshot")
+        check(code == 0 and all(s["ref"] == s["revision"] == snapshot
+                               for s in runtime()["skills"] if s["package"] == "snapshot"),
+              "enabled default snapshot publishes a concrete ref and revision")
+        run("remove", "snapshot")
+
+    for url in ("local-owner/local-repo", "./local-owner/local-repo", str(SNAP), SNAP.as_uri()):
+        code, _, err = run("install", url)
+        rec = registry()["packages"].get("snapshot", {})
+        check(code == 0 and rec.get("url") == (url if url.startswith("file:") else str(SNAP))
+              and rec.get("sha") == snapshot, "existing bare and explicit local paths remain local: %s" % url)
+        run("remove", "snapshot")
+    os.chdir(SNAP.parent)
+    code, _, err = run("install", "../local-owner/local-repo")
+    check(code == 0 and registry()["packages"]["snapshot"]["source"] == str(SNAP),
+          "../ paths remain local")
+    check(np.absolute_local("./missing/repo") == str(SNAP.parent / "missing/repo")
+          and np.absolute_local("missing/repo") == "https://github.com/missing/repo.git",
+          "./ explicitly selects a local path even before it exists")
+    before = registry()
+    newer_snapshot = commit(SNAP, {"skills/snapshot/SKILL.md": "---\nname: snapshot\n---\nNewer.\n"})
+    code, _, err = run("install", str(SNAP))
+    check(code == 1 and "update snapshot --ref %s" % newer_snapshot in err and registry() == before,
+          "later upstream HEAD does not auto-update; refusal gives a concrete update command")
+    code, _, err = run("update", "snapshot", "--ref", "old")
+    check(code == 0 and registry()["packages"]["snapshot"]["ref"] == "old"
+          and registry()["packages"]["snapshot"]["sha"] == old_snapshot,
+          "default snapshot still updates only to an explicit tag/commit")
+    run("remove", "snapshot")
+finally:
+    os.chdir(cwd)
+    git(BASE, "config", "--global", "--unset", "url.%s.insteadOf" % SNAP.as_uri())
+EMPTY = BASE / "empty-repo"
+EMPTY.mkdir()
+git(EMPTY, "init", "-q", "-b", "empty")
+code, _, err = run("install", str(EMPTY))
+check(code == 1 and not os.listdir(PATHS.tmp), "an unborn default HEAD fails cleanly and removes scratch checkout")
+for command, ref_usage in (("install", "[--ref REF]"), ("update", "--ref REF")):
+    code, out, err = run(command, "--help")
+    check(code == 0 and ref_usage in out and ("[--ref REF]" in out) == (command == "install"),
+          "%s --help exposes the correct ref requirement" % command)
 
 # ---------------------------------------------------------------------------
 print("\n[3] Path and identity safety")
@@ -343,6 +415,10 @@ check("repository: %s" % HOOK in out and hook1 in out and "prepare:    sh prepar
       and "service receiver: hookbox:test" in out and "mount: volume data -> /data" in out and "network nesti-plugins (external)" in out
       and "mount: bind ${STAGE:?unset}/omp -> /stage (read-only)" in out and "mount: bind $LONG2/y -> /y" in out,
       "trust summary shows repository, SHA, prepare, services, volumes/mounts (variable sources as written), networks")
+code, out, err = run("install", str(HOOK))
+check(code == 1 and "--trust" in err and hook2 in out and not FAKE.argvs("sh")
+      and not Path(PATHS.package("hookbox")).exists() and "hookbox" not in registry()["packages"],
+      "omitted ref still requires trust for the resolved service SHA before prepare")
 sub = os.path.join(os.sep + "pkg", "deploy")
 lines = np._describe_compose({"services": {"s": {"image": "i", "volumes": [
     {"type": "bind", "source": os.path.join(sub, "${X}") + "/a", "target": "/a"},
