@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-side ``nesti /plugin``: install, enable, list, disable, update and remove plugins.
+"""Host-side ``nesti /plugin``: install, enable, list, disable, update, remove plugins and switch their setting.
 
 Runs on the host through ``scripts/nesti`` with Python 3.6+ and the standard
 library only; it never imports a Nesti container module and needs neither
@@ -83,9 +83,10 @@ REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 HEX_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 ARG_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SETTING_VALUE_RE = re.compile(r"[^\s'\"#$\\\x00-\x1f\x7f]{1,128}")  # fullmatch; '$' would interpolate in Compose
 URL_PATH_RE = re.compile(r"^/[A-Za-z0-9._~/%-]*$")
 _MANIFEST_KEYS = {"schema_version", "name", "nesti_plugin_api", "compose", "prepare", "configure", "config",
-                  "skills", "events"}
+                  "skills", "events", "settings"}
 _EVENT_KEYS = {"name", "service", "port", "path", "readiness_path", "secret_key"}
 _PROBE_CODE = (
     "import sys, urllib.request\n"
@@ -98,6 +99,10 @@ Runner = Callable[..., Tuple[int, str]]
 
 class PluginError(Exception):
     """A plugin operation failed; the message is shown to the operator."""
+
+
+class UsageError(PluginError):
+    """A rejected command-line value (exit 2)."""
 
 
 class Paths(object):
@@ -489,6 +494,16 @@ def _load_manifest(root: str) -> Dict[str, Any]:
         raise PluginError("config.required must list environment variable names")
     if "env_example" in config:
         _package_path(root, config["env_example"], "env_example")
+    settings = data.get("settings", [])
+    # shortcut: one setting per plugin, widen when the interactive nesti CLI lands
+    if not isinstance(settings, list) or len(settings) > 1 or (settings and compose is None) or any(
+            not isinstance(s, dict) or set(s) - {"key", "choices"} or not isinstance(s.get("key"), str)
+            or not ENV_KEY_RE.match(s["key"]) or ("choices" in s and (
+                not isinstance(s["choices"], list) or not s["choices"]
+                or any(not isinstance(c, str) or not SETTING_VALUE_RE.fullmatch(c) for c in s["choices"])))
+            for s in settings):
+        raise PluginError('settings must list at most one {"key": <env name>, "choices": [<values>]} '
+                          'and need a compose file')
     skills, seen = data.get("skills", []), set()
     if not isinstance(skills, list):
         raise PluginError("skills must be a list")
@@ -591,29 +606,36 @@ def _bindings_file(paths: Paths, name: str) -> str:
     return os.path.join(paths.config(name), "bindings.json")
 
 
+def _load_bindings(paths: Paths, name: str) -> Dict[str, Any]:
+    """bindings.json as written, with its top-level shape checked; {} when absent."""
+    path = _bindings_file(paths, name)
+    if not os.path.isfile(path):
+        return {}
+    if os.path.getsize(path) > BINDINGS_MAX_BYTES:
+        raise PluginError("%s is larger than %d bytes" % (path, BINDINGS_MAX_BYTES))
+    try:
+        data = json.loads(_read_text(path, "bindings"))
+    except ValueError as exc:
+        raise PluginError("%s is not valid JSON: %s" % (path, exc)) from exc
+    if not isinstance(data, dict) or set(data) - {"skills"} or not isinstance(data.get("skills", {}), dict):
+        raise PluginError('%s must look like {"skills": {"<skill>": {"phases": [...], "arguments": {...}}}}' % path)
+    return data
+
+
 def effective_bindings(paths: Paths, name: str, info: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Bound skills in package order: defaults overridden per skill by bindings.json."""
     effective = _default_bindings(info)
     path = _bindings_file(paths, name)
-    if os.path.isfile(path):
-        if os.path.getsize(path) > BINDINGS_MAX_BYTES:
-            raise PluginError("%s is larger than %d bytes" % (path, BINDINGS_MAX_BYTES))
-        try:
-            data = json.loads(_read_text(path, "bindings"))
-        except ValueError as exc:
-            raise PluginError("%s is not valid JSON: %s" % (path, exc)) from exc
-        if not isinstance(data, dict) or set(data) - {"skills"} or not isinstance(data.get("skills", {}), dict):
-            raise PluginError('%s must look like {"skills": {"<skill>": {"phases": [...], "arguments": {...}}}}' % path)
-        for skill, entry in data.get("skills", {}).items():
-            if skill not in effective:
-                raise PluginError("%s names unknown skill %r (available: %s)"
-                                  % (path, skill, ", ".join(sorted(effective))))
-            if not isinstance(entry, dict) or set(entry) - {"phases", "arguments"}:
-                raise PluginError("%s: skill %s may hold only phases and arguments" % (path, skill))
-            if "phases" in entry:
-                effective[skill]["phases"] = _check_phases(entry["phases"], "%s: skill %s" % (path, skill))
-            if "arguments" in entry:
-                effective[skill]["arguments"] = _check_arguments(entry["arguments"], "%s: skill %s" % (path, skill))
+    for skill, entry in _load_bindings(paths, name).get("skills", {}).items():
+        if skill not in effective:
+            raise PluginError("%s names unknown skill %r (available: %s)"
+                              % (path, skill, ", ".join(sorted(effective))))
+        if not isinstance(entry, dict) or set(entry) - {"phases", "arguments"}:
+            raise PluginError("%s: skill %s may hold only phases and arguments" % (path, skill))
+        if "phases" in entry:
+            effective[skill]["phases"] = _check_phases(entry["phases"], "%s: skill %s" % (path, skill))
+        if "arguments" in entry:
+            effective[skill]["arguments"] = _check_arguments(entry["arguments"], "%s: skill %s" % (path, skill))
     return [{"skill": s["name"], "path": s["path"], "phases": effective[s["name"]]["phases"],
              "arguments": effective[s["name"]]["arguments"]}
             for s in info["skills"] if effective[s["name"]]["phases"]]
@@ -1111,6 +1133,7 @@ def cmd_install(paths: Paths, docker: Docker, url: str, ref: str, trust: bool) -
         print("  settings: %s%s" % (os.path.join(paths.config(name), ".env"), example))
         if required:
             print("  required: %s" % ", ".join(sorted(set(required))))
+    _print_setting(paths, name, info, paths.package(name, sha))
     print("Enable with: nesti /plugin enable %s" % name)
 
 
@@ -1151,6 +1174,118 @@ def cmd_enable(paths: Paths, docker: Docker, name: str) -> None:
         print("  skill %s: %s" % (binding["skill"], ", ".join(binding["phases"])))
     for sub in subscriptions:
         print("  event %s -> %s" % (sub["event"], sub["url"]))
+
+
+def _declared_setting(source_dir: str, info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The package's setting {"name", "choices", "skill"}: its manifest entry or its main skill's argument-hint."""
+    # shortcut: one setting per plugin, widen when the interactive nesti CLI lands
+    if info["manifest"]:
+        declared = info["manifest"].get("settings", [])
+        return {"name": declared[0]["key"], "choices": declared[0].get("choices"), "skill": None} if declared else None
+    main = next((s for s in info["skills"] if s["main"]), None)
+    if main is None:
+        return None
+    text = _read_text(_package_path(source_dir, main["path"], "skill %s" % main["name"]), "skill")
+    hint = parse_frontmatter(text).get("argument-hint", "").strip().strip("[]").strip()
+    if not hint:
+        return None
+    choices = [c.strip() for c in hint.split("|") if c.strip()] if "|" in hint else []
+    return {"name": "args", "choices": choices or None, "skill": main["name"]}
+
+
+def _setting_text(paths: Paths, name: str, info: Dict[str, Any], setting: Dict[str, Any]) -> str:
+    """'<name> = <value> (choices: ...)'; reads only the declared key, never another .env value."""
+    if setting["skill"]:
+        effective_bindings(paths, name, info)  # validates the entries read below
+        entry = _load_bindings(paths, name).get("skills", {}).get(setting["skill"], {})
+        value = entry.get("arguments", {}).get("args", "")
+    else:
+        value = _read_env(os.path.join(paths.config(name), ".env")).get(setting["name"], "")
+    choices = " (choices: %s)" % ", ".join(setting["choices"]) if setting["choices"] else ""
+    return "%s = %s%s" % (setting["name"], value or "not set (plugin default)", choices)
+
+
+def _print_setting(paths: Paths, name: str, info: Dict[str, Any], source_dir: str) -> None:
+    try:
+        setting = _declared_setting(source_dir, info)
+        if setting:
+            print("  setting:  %s; change with: nesti /%s <value>" % (_setting_text(paths, name, info, setting), name))
+    except PluginError as exc:
+        print("  setting:  %s" % exc)
+
+
+def _set_env(path: str, key: str, value: str) -> None:
+    """Set one .env key: only its line changes (appended when absent); every other byte and the mode stay."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read().decode("utf-8")
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        data, mode = "", 0o600
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PluginError("cannot read settings %s: %s" % (path, exc)) from exc
+    lines, found = data.splitlines(True), None
+    for index, raw in enumerate(lines):
+        line = raw.strip()
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        name, sep, _ = line.partition("=")
+        if sep and not line.startswith("#") and name.strip() == key:
+            found = index  # the last one wins, as in _read_env
+    if found is None:
+        lines.append("%s%s=%s\n" % ("\n" if data and not data.endswith(("\n", "\r")) else "", key, value))
+    else:
+        body = lines[found].rstrip("\r\n")
+        lines[found] = body[:body.index("=") + 1] + value + lines[found][len(body):]
+    _write_atomic(path, "".join(lines).encode("utf-8"), mode)
+    os.chmod(path, mode)  # the umask may have narrowed the new file's mode
+
+
+def cmd_settings(paths: Paths, name: str) -> None:
+    """Show the plugin's declared setting and its current value; read-only."""
+    record = _record(load_registry(paths), name)
+    source_dir = paths.package(name, record["sha"])
+    info = inspect_package(source_dir, record["source"])
+    setting = _declared_setting(source_dir, info)
+    if setting is None:
+        print("%s offers no settings." % name)
+        return
+    print("%s settings:" % name)
+    print("  %s" % _setting_text(paths, name, info, setting))
+    print("Change with: nesti /%s <value>" % name)
+
+
+def cmd_set(paths: Paths, docker: Docker, name: str, value: str) -> None:
+    """Switch the plugin's declared setting; an enabled plugin is re-enabled to apply it."""
+    with _locked(paths):
+        record = _record(load_registry(paths), name)
+        source_dir = paths.package(name, record["sha"])
+        info = inspect_package(source_dir, record["source"])
+        setting = _declared_setting(source_dir, info)
+        if setting is None:
+            raise PluginError("%s offers no settings" % name)
+        if setting["choices"] and value not in setting["choices"]:
+            raise UsageError("%s must be one of: %s" % (setting["name"], ", ".join(setting["choices"])))
+        if not setting["choices"] and not SETTING_VALUE_RE.fullmatch(value):
+            raise UsageError("%s must be 1 to 128 characters without whitespace, quotes, '#', '$', '\\' "
+                             "or control characters" % setting["name"])
+        if setting["skill"]:
+            try:
+                _check_arguments({"args": value}, setting["name"])
+            except PluginError as exc:
+                raise UsageError(str(exc)) from exc
+            effective_bindings(paths, name, info)  # never overwrite a broken bindings.json
+            data = _load_bindings(paths, name)
+            data.setdefault("skills", {}).setdefault(setting["skill"], {})["arguments"] = {"args": value}
+            _write_json(_bindings_file(paths, name), data)
+        else:
+            _set_env(os.path.join(paths.config(name), ".env"), setting["name"], value)
+        enabled = record["enabled"]
+    if not enabled:
+        print("Set %s %s = %s; it applies at the next 'nesti /plugin enable %s'." % (name, setting["name"], value, name))
+        return
+    print("Set %s %s = %s; re-enabling %s." % (name, setting["name"], value, name))
+    cmd_enable(paths, docker, name)  # takes the lock itself: flock is not re-entrant
 
 
 def _deactivate(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str) -> None:
@@ -1254,6 +1389,7 @@ def cmd_update(paths: Paths, docker: Docker, name: str, ref: str, trust: bool) -
         _rmtree(paths.work(name, old_sha))
         _rmdir_empty(paths.work(name))
     print("Updated %s to %s (ref %s)%s." % (name, sha, ref, "" if record["enabled"] else "; it stays disabled"))
+    _print_setting(paths, name, info, paths.package(name, sha))
 
 
 def _restore(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str, old_sha: str, sha: str,
@@ -1327,6 +1463,9 @@ def _parser() -> argparse.ArgumentParser:
     for command, text in (("enable", "activate"), ("disable", "deactivate"), ("remove", "uninstall (keeps settings)")):
         sub.add_parser(command, help=text).add_argument("name")
     sub.add_parser("list", help="show installed packages")
+    settings = sub.add_parser("settings", help="show a plugin's setting, or set it (also: nesti /<name> settings|<value>)")
+    settings.add_argument("name")
+    settings.add_argument("value", nargs="?")
     return parser
 
 
@@ -1354,13 +1493,17 @@ def main(argv: Optional[List[str]] = None, root: Optional[str] = None, runner: O
             cmd_update(paths, docker, args.name, args.ref, args.trust)
         elif args.command == "list":
             cmd_list(paths, docker)
+        elif args.command == "settings" and args.value is None:
+            cmd_settings(paths, args.name)
+        elif args.command == "settings":
+            cmd_set(paths, docker, args.name, args.value)
         else:
             {"enable": cmd_enable, "disable": cmd_disable, "remove": cmd_remove}[args.command](paths, docker, args.name)
-        if args.command != "list":
+        if args.command != "list" and not (args.command == "settings" and args.value is None):
             _print_stale(paths)
     except PluginError as exc:
         print("nesti /plugin: error: %s" % exc, file=sys.stderr)
-        return 1
+        return 2 if isinstance(exc, UsageError) else 1
     except KeyboardInterrupt:
         return 130
     return 0

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Host-side `nesti`: forwards to the container CLI; /arch (static file) and /stats (live nesti-stats page) then open in a new host browser window.
-# /plugin runs on the host (scripts/nesti_plugins.py): it needs host Git credentials and Docker, not the container.
+# /plugin and /<installed plugin> (its settings) run on the host (scripts/nesti_plugins.py): they need host Git credentials and Docker, not the container.
 set -e
 if [ "${1-}" = mcp ]; then
     # MCP acts on the GitLab project or GitHub repository of the client's checkout: the cwd, or the directory given.
@@ -9,8 +9,23 @@ if [ "${1-}" = mcp ]; then
     exec docker exec -i -e NESTI_CLIENT_REMOTE nesti-mcp python -m mcp_server.server
 fi
 here=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)
-if [ "${1-}" = /plugin ]; then
-    shift
+host=
+case "${1-}" in
+  /plugin) shift; host=1 ;;
+  /arch|/boost|/provider|/stats|/usage) ;;  # container commands (scripts/oauth.py) win over a plugin's name
+  /*)
+    name=${1#/}
+    case "$name" in
+      ''|*[!a-z0-9_-]*) ;;
+      *) if [ -d "$here/.private/plugins/packages/$name" ]; then  # install creates it, remove deletes it
+           shift
+           if [ "$#" = 1 ] && [ "$1" = settings ]; then shift; fi
+           set -- settings "$name" "$@"
+           host=1
+         fi ;;
+    esac ;;
+esac
+if [ -n "$host" ]; then
     # Same host Python order as install.sh: active venv, ./.venv, python3, python, py -3; 3.6 or newer.
     for py in "${VIRTUAL_ENV:+$VIRTUAL_ENV/Scripts/python.exe}" "${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}" \
         "$here/.venv/Scripts/python.exe" "$here/.venv/bin/python" python3 python; do

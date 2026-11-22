@@ -1692,6 +1692,31 @@ with patch.dict(os.environ, {
     check(_exit == 0 and "vendor/image" not in _output,
           "the public text model catalog works without Redis or an enabled API")
 
+
+def _cli(*argv):
+    output = io.StringIO()
+    with patch.object(_oauth.sys, "argv", ["nesti", *argv]), redirect_stdout(output):
+        try:
+            _oauth.main()
+        except SystemExit as exc:
+            return exc.code, output.getvalue()
+    return 0, output.getvalue()
+
+
+with tempfile.TemporaryDirectory() as _packages:
+    os.mkdir(os.path.join(_packages, "ponytail"))
+    os.mkdir(os.path.join(_packages, "usage"))
+    with patch.object(_oauth.nesti_plugins, "CONTAINER_PACKAGES_DIR", _packages):
+        with patch("scripts.oauth.TokenStore", side_effect=AssertionError("host-only must not need Redis")):
+            _exit, _output = _cli("/ponytail", "settings")
+        check(_exit == 1 and "nesti /ponytail runs on the host" in _output,
+              "container CLI: an installed plugin's command points to the host launcher, exit 1, no Redis")
+        with patch("scripts.oauth.TokenStore") as _store_cls:
+            _store_cls.return_value.available = False
+            _exit, _output = _cli("/usage")
+        check(_exit == 1 and "runs on the host" not in _output and "cannot reach Redis" in _output,
+              "container CLI: a built-in command wins over a plugin of the same name")
+
 # ═════ Scenario 23: ChatGPT subscription — Codex backend stream and quota ═════
 print("\n── Scenario 23: ChatGPT subscription (Codex backend) ──")
 import io  # noqa: E402
