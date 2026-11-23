@@ -2,8 +2,8 @@
 """Argument-less host ``nesti`` TTY menu, run only by the checkout's .venv Python.
 
 Requires Python 3.9+ and requirements-host.txt. Actions re-run scripts/nesti;
-provider/model browsing reads credential-free container JSON and never selects
-an inference model. Plugin secrets travel through stdin, never argv.
+provider/model browsing reads credential-free container JSON; selecting an
+inference model requires confirmation. Plugin secrets use stdin, never argv.
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def _models_menu(q, name: str) -> None:
         if not matches:
             choices.append(q.Choice("No matching text models.", disabled="Change the filter"))
         choices.append(q.Choice("Back", value="back"))
-        selected = _ask(q.select(f"{name} models (browse only)", choices=choices))
+        selected = _ask(q.select(f"{name} models", choices=choices))
         if selected is None or selected == "back":
             return
         if selected == "filter":
@@ -95,10 +95,15 @@ def _models_menu(q, name: str) -> None:
                 query = value.strip()
         else:
             print(("[FREE] " if selected["free"] else "") + _model_title(selected))
-            print("Read-only details. Catalog prices are indicative; routed provider pricing may differ.")
-            print("The configured planner/coder model and API enable flags are unchanged.")
-            if _ask(q.select("Model details", choices=["Back"])) is None:
+            print("Catalog prices are indicative; routed provider pricing may differ.")
+            print("Selecting a model affects subsequent OpenRouter calls; API enable flags and consumer priority stay unchanged.")
+            action = _ask(q.select("Model details", choices=["Use this model for Nesti", "Back"]))
+            if action is None:
                 return
+            if action == "Use this model for Nesti" and _ask(q.confirm(
+                f"Use {selected['id']} for Nesti's planner and coder?", default=False
+            )):
+                _run(["/provider", "model", name, selected["id"]])
 
 
 def _provider_menu(q) -> None:

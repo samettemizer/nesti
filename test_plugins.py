@@ -1072,7 +1072,7 @@ with mock.patch.object(nm, "_metadata", return_value=model_rows) as metadata, \
             "filter", "NVIDIA", model_rows[0], "Back", "filter", "absent", "filter", None, "back",
         ]), mock.patch.object(nm, "_run") as action, contextlib.redirect_stdout(io.StringIO()) as out:
     nm._models_menu(ui, "openrouter")
-    lists = [p[2]["choices"] for p in ui.prompts if p[0] == "select" and "browse only" in p[1]]
+    lists = [p[2]["choices"] for p in ui.prompts if p[0] == "select" and p[1] == "openrouter models"]
     check(metadata.call_count == 1 and not action.called, "model browsing fetches once and never mutates configuration")
     check(len(lists[1]) == 3 and lists[1][1]["value"] == model_rows[0],
           "local filter matches model IDs case-insensitively")
@@ -1080,13 +1080,42 @@ with mock.patch.object(nm, "_metadata", return_value=model_rows) as metadata, \
           "empty model filter stays safe when filter edit is cancelled")
     check("[FREE]" in out.getvalue() and "context 1,000,000" in out.getvalue()
           and "in $0 / out $0 per 1M" in out.getvalue() and "unchanged" in out.getvalue(),
-          "model details show free/context/prices and explicitly remain read-only")
+          "model details show free/context/prices without changing configuration")
 for replies in ([None], ["back"], ["filter", None, None], [model_rows[0], None],
                 ["filter", "nemotron", None]):
     with mock.patch.object(nm, "_metadata", return_value=model_rows), \
             mock.patch.object(nm, "_ask", side_effect=replies), mock.patch.object(nm, "_run") as action:
         nm._models_menu(MenuUI(), "openrouter")
         check(not action.called, "model filter/detail cancellation does not perform actions")
+for confirmation in (True, False, None):
+    ui = MenuUI()
+    with mock.patch.object(nm, "_metadata", return_value=model_rows), \
+            mock.patch.object(nm, "_ask", side_effect=[
+                model_rows[0], "Use this model for Nesti", confirmation, "back",
+            ]), mock.patch.object(nm, "_run", return_value=0) as action:
+        nm._models_menu(ui, "openrouter")
+        check(action.call_args_list == (
+            [mock.call(["/provider", "model", "openrouter", "nvidia/free"])] if confirmation else []
+        ), "only approved model selection invokes the existing setter exactly once")
+        prompt = next(p for p in ui.prompts if p[0] == "confirm")
+        check(prompt[2]["default"] is False and "nvidia/free" in prompt[1]
+              and "planner and coder" in prompt[1],
+              "model confirmation defaults to no and identifies the affected roles and ID")
+for status in (1, 130):
+    with mock.patch.object(nm, "_metadata", return_value=model_rows) as metadata, \
+            mock.patch.object(nm, "_ask", side_effect=[
+                model_rows[0], "Use this model for Nesti", True,
+                "filter", "paid", model_rows[1], "Use this model for Nesti", True, "back",
+            ]), mock.patch.object(nm, "_run", side_effect=[status, 0]) as action, \
+            contextlib.redirect_stdout(io.StringIO()) as out:
+        nm._models_menu(MenuUI(), "openrouter")
+        check(action.call_args_list == [
+            mock.call(["/provider", "model", "openrouter", "nvidia/free"]),
+            mock.call(["/provider", "model", "openrouter", "vendor/paid"]),
+        ] and metadata.call_count == 1,
+              "failed/interrupted model setter leaves filtering and the next selection usable")
+        check("success" not in out.getvalue().lower(),
+              "menu leaves setter success reporting to the existing CLI")
 providers = json.loads(provider_output) + [
     {"name": "copilot", "kind": "consumer", "authenticated": False, "coming_soon": True},
 ]
