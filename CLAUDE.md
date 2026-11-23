@@ -66,7 +66,10 @@ scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetc
                              (mounted read-only into the orchestrator); graph/tools.py reuses its constants;
                              a service's optional `configure` step runs at enable with its .env, NESTI_PROJECT_PATH
                              and NESTI_PLUGIN_CONTEXT (other packages' skills); enable recreates, list flags stale;
-                             `nesti /<name> settings|<value>` shows/switches the plugin's one declared setting
+                             `nesti /<name> settings|<value>|<KEY> <value>` shows/switches a native plugin's declared
+                             settings (one `args` for a plain skill package); secrets only via `-`
+                             nesti_menu.py: argument-less host `nesti` on a TTY → Questionary menu
+                             (./.venv only, Python 3.9+, requirements-host.txt); every action re-runs scripts/nesti
 skills/, templates/          vendored doc corpus (primevue/laravel/practices),
                              bootstrap templates (laravel/, spa/), boost/ SPA discovery skill
 test_graph_smoke.py          offline regression net (.venv/bin/python test_graph_smoke.py)
