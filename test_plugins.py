@@ -1042,14 +1042,63 @@ with mock.patch.object(nm.subprocess, "run", return_value=subprocess.CompletedPr
                                           input="hidden\n", text=True), "secret reaches child stdin, not argv")
 with mock.patch.object(nm.subprocess, "run", side_effect=KeyboardInterrupt):
     check(nm._run(["/provider"]) == 130, "interrupted child preserves status 130")
-provider_output = "  - future-provider (Authenticated)\n  - other-provider\n  - billed (platform API key)\n"
+provider_output = json.dumps([
+    {"name": "future-provider", "kind": "consumer", "authenticated": True},
+    {"name": "other-provider", "kind": "consumer", "authenticated": False},
+    {"name": "openrouter", "kind": "platform", "authenticated": True},
+])
 with mock.patch.object(nm.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, provider_output, "")):
     check(nm._consumers() == [("future-provider", True), ("other-provider", False)],
-          "consumer names are dynamic, authenticated parsed, billed APIs excluded")
+          "consumer names are dynamic, authentication explicit, platform APIs excluded")
 with mock.patch.object(nm.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "failed\n", "reason\n")), \
         contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
     check(nm._consumers() is None and out.getvalue() == "failed\n" and err.getvalue() == "reason\n",
           "provider listing errors are printed and cancel selection")
+for invalid in ("not json", "{}", "[null]"):
+    with mock.patch.object(nm.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, invalid, "")), \
+            contextlib.redirect_stderr(io.StringIO()) as err:
+        check(nm._consumers() is None and "update the orchestrator CLI" in err.getvalue(),
+              "invalid provider transport cancels with upgrade guidance")
+
+model_rows = [
+    {"id": "nvidia/free", "name": "Nemotron", "context": 1000000,
+     "input_price": "0", "output_price": "0", "free": True},
+    {"id": "vendor/paid", "name": "Other", "context": None,
+     "input_price": "0.15", "output_price": "variable", "free": False},
+]
+ui = MenuUI()
+with mock.patch.object(nm, "_metadata", return_value=model_rows) as metadata, \
+        mock.patch.object(nm, "_ask", side_effect=[
+            "filter", "NVIDIA", model_rows[0], "Back", "filter", "absent", "filter", None, "back",
+        ]), mock.patch.object(nm, "_run") as action, contextlib.redirect_stdout(io.StringIO()) as out:
+    nm._models_menu(ui, "openrouter")
+    lists = [p[2]["choices"] for p in ui.prompts if p[0] == "select" and "browse only" in p[1]]
+    check(metadata.call_count == 1 and not action.called, "model browsing fetches once and never mutates configuration")
+    check(len(lists[1]) == 3 and lists[1][1]["value"] == model_rows[0],
+          "local filter matches model IDs case-insensitively")
+    check(any("No matching" in c["title"] for c in lists[-1]),
+          "empty model filter stays safe when filter edit is cancelled")
+    check("[FREE]" in out.getvalue() and "context 1,000,000" in out.getvalue()
+          and "in $0 / out $0 per 1M" in out.getvalue() and "unchanged" in out.getvalue(),
+          "model details show free/context/prices and explicitly remain read-only")
+for replies in ([None], ["back"], ["filter", None, None], [model_rows[0], None],
+                ["filter", "nemotron", None]):
+    with mock.patch.object(nm, "_metadata", return_value=model_rows), \
+            mock.patch.object(nm, "_ask", side_effect=replies), mock.patch.object(nm, "_run") as action:
+        nm._models_menu(MenuUI(), "openrouter")
+        check(not action.called, "model filter/detail cancellation does not perform actions")
+providers = json.loads(provider_output) + [
+    {"name": "copilot", "kind": "consumer", "authenticated": False, "coming_soon": True},
+]
+ui = MenuUI()
+with mock.patch.object(nm, "_metadata", return_value=providers), \
+        mock.patch.object(nm, "_ask", side_effect=[providers[0], providers[2], None]), \
+        mock.patch.object(nm, "_models_menu") as models, mock.patch.object(nm, "_run") as action:
+    nm._provider_menu(ui)
+    titles = [c["title"] for c in ui.prompts[0][2]["choices"]]
+    check("openrouter (Authenticated)" in titles and "copilot (coming soon)" in titles
+          and models.call_args == mock.call(ui, "openrouter") and not action.called,
+          "provider picker opens model browser but defers consumer changes")
 for outcome in (OSError("no docker"), subprocess.TimeoutExpired("docker", 10)):
     with mock.patch.object(nm.subprocess, "run", side_effect=outcome):
         check(not nm._orchestrator_running(), "unavailable Docker disables container actions")
@@ -1080,7 +1129,7 @@ for replies in (["logout", "future-provider", False, "exit"], ["/boost", False, 
 for replies, expected in ((["login", "other-provider", "exit"], ["/provider", "login", "other-provider"]),
                            (["logout", "future-provider", True, "exit"], ["/provider", "logout", "future-provider"]),
                            (["/boost", True, "exit"], ["/boost"]), (["/stats", "exit"], ["/stats"]),
-                           (["/arch", "exit"], ["/arch"]), (["/provider", "exit"], ["/provider"])):
+                           (["/arch", "exit"], ["/arch"])):
     code, ui, action, _ = menu_session(replies, consumers=[("future-provider", True), ("other-provider", False)])
     check(code == 0 and action.call_args == mock.call(expected), "provider/project action preserves direct CLI arguments")
     if replies[0] == "logout":
@@ -1088,6 +1137,10 @@ for replies, expected in ((["login", "other-provider", "exit"], ["/provider", "l
 with contextlib.redirect_stdout(io.StringIO()) as out:
     code, _, action, _ = menu_session(["logout", "exit"], consumers=[])
 check("No consumer provider is logged in." in out.getvalue() and not action.called, "empty logout explains state")
+with mock.patch.object(nm, "_provider_menu") as provider_menu:
+    code, ui, action, _ = menu_session(["/provider", "exit"])
+    check(code == 0 and provider_menu.call_args == mock.call(ui) and not action.called,
+          "Provider status opens interactive provider selection instead of printing the CLI list")
 code, ui, _, _ = menu_session(["exit"], entries=[])
 check(any("No plugins installed" in c["title"] and c["disabled"] for c in ui.prompts[0][2]["choices"]),
       "empty plugin list offers installation guidance")

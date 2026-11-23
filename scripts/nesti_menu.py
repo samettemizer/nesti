@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Argument-less host ``nesti`` TTY menu, run only by the checkout's .venv Python.
 
-Requires Python 3.9+ and requirements-host.txt. Every action re-runs scripts/nesti
-with the direct CLI arguments; plugin secrets travel through stdin, never argv.
+Requires Python 3.9+ and requirements-host.txt. Actions re-run scripts/nesti;
+provider/model browsing reads credential-free container JSON and never selects
+an inference model. Plugin secrets travel through stdin, never argv.
 """
 from __future__ import annotations
 
 import logging
 import os
-import re
+import json
 import subprocess
 import sys
 
@@ -19,7 +20,6 @@ ROOT = nesti_plugins.default_root()
 LAUNCHER = os.path.join(ROOT, "scripts", "nesti")
 CONTAINER = "nesti-orchestrator"
 NOT_RUNNING = "nesti-orchestrator is not running (start it with: docker compose up -d)"
-PROVIDER_LINE_RE = re.compile(r"^\s*- ([a-z0-9-]+)( \(Authenticated\))?")
 
 
 def _run(args: list[str], stdin_text: str | None = None) -> int:
@@ -38,18 +38,88 @@ def _orchestrator_running() -> bool:
     return result.returncode == 0 and result.stdout.strip() == "true"
 
 
-def _consumers() -> list[tuple[str, bool]] | None:
-    result = subprocess.run(["docker", "exec", CONTAINER, "nesti", "/provider"], capture_output=True, text=True)
+def _metadata(args: list[str]) -> list[dict] | None:
+    result = subprocess.run(["docker", "exec", CONTAINER, "nesti", *args, "--json"],
+                            capture_output=True, text=True)
     if result.returncode:
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
         return None
-    consumers = []
-    for line in result.stdout.splitlines():
-        match = PROVIDER_LINE_RE.match(line)
-        if match and "(platform API" not in line:
-            consumers.append((match[1], bool(match[2])))
-    return consumers
+    try:
+        data = json.loads(result.stdout)
+        if not isinstance(data, list) or not all(isinstance(row, dict) for row in data):
+            raise ValueError("Expected metadata rows")
+        return data
+    except ValueError:
+        print("Cannot read provider metadata; update the orchestrator CLI.", file=sys.stderr)
+        return None
+
+
+def _consumers() -> list[tuple[str, bool]] | None:
+    providers = _metadata(["/provider"])
+    if providers is None:
+        return None
+    return [(p["name"], p.get("authenticated") is True) for p in providers
+            if p.get("kind") == "consumer" and isinstance(p.get("name"), str)]
+
+
+def _model_title(model: dict) -> str:
+    context = f"{model['context']:,}" if model["context"] is not None else "unknown"
+    return (f"{model['id']} — {model['name']} | context {context} | "
+            f"in ${model['input_price']} / out ${model['output_price']} per 1M")
+
+
+def _models_menu(q, name: str) -> None:
+    models = _metadata(["/provider", "models", name])
+    if models is None:
+        return
+    query = ""
+    while True:
+        matches = [m for m in models if query.casefold() in f"{m['id']} {m['name']}".casefold()]
+        choices = [q.Choice("Filter models by ID/name" + (f" ({query})" if query else ""), value="filter")]
+        for model in matches:
+            title = _model_title(model)
+            if model["free"]:
+                title = ([("bold fg:ansigreen", "[FREE] "), ("", title)]
+                         if sys.stdout.isatty() and "NO_COLOR" not in os.environ else "[FREE] " + title)
+            choices.append(q.Choice(title, value=model))
+        if not matches:
+            choices.append(q.Choice("No matching text models.", disabled="Change the filter"))
+        choices.append(q.Choice("Back", value="back"))
+        selected = _ask(q.select(f"{name} models (browse only)", choices=choices))
+        if selected is None or selected == "back":
+            return
+        if selected == "filter":
+            value = _ask(q.text("Filter by model ID or name (empty shows all)", default=query))
+            if value is not None:
+                query = value.strip()
+        else:
+            print(("[FREE] " if selected["free"] else "") + _model_title(selected))
+            print("Read-only details. Catalog prices are indicative; routed provider pricing may differ.")
+            print("The configured planner/coder model and API enable flags are unchanged.")
+            if _ask(q.select("Model details", choices=["Back"])) is None:
+                return
+
+
+def _provider_menu(q) -> None:
+    providers = _metadata(["/provider"])
+    if providers is None:
+        return
+    while True:
+        choices = []
+        for provider in providers:
+            title = provider["name"] + (" (Authenticated)" if provider.get("authenticated") is True else "")
+            if provider.get("coming_soon"):
+                title += " (coming soon)"
+            choices.append(q.Choice(title, value=provider))
+        choices.append(q.Choice("Back", value="back"))
+        selected = _ask(q.select("Choose a provider", choices=choices))
+        if selected is None or selected == "back":
+            return
+        if selected["kind"] == "platform":
+            _models_menu(q, selected["name"])
+        else:
+            print("Consumer account changes here are deferred; existing login/logout commands are unchanged.")
 
 
 def _ask(question):
@@ -126,6 +196,8 @@ def main() -> int:
                 return 0
             if isinstance(selected, dict):
                 _plugin_menu(q, selected)
+            elif selected == "/provider":
+                _provider_menu(q)
             elif selected in ("login", "logout"):
                 consumers = _consumers()
                 if consumers is None:

@@ -2,7 +2,8 @@
 scripts/oauth.py - Nesti provider CLI ("nesti /provider", "nesti /usage").
 
 OpenRouter model management:
-    nesti /provider models openrouter [search]
+    nesti /provider models openrouter [search] [--json]
+    nesti /provider openrouter models [search] [--json]
     nesti /provider model openrouter [model-id|--reset]
 
 The public catalog lists text-input/text-output model IDs, context sizes and
@@ -12,14 +13,13 @@ nesti:provider:model:openrouter, and overrides OPENROUTER_MODEL. A running
 orchestrator reads it on each OpenRouter call; --reset restores the environment
 setting. No implicit model is selected and no API enable flag is changed.
 If Redis cannot be read, inference fails closed rather than billing a different
-model. OAuth credentials and /usage remain consumer-subscription-only.
+model. OAuth credentials remain consumer-only; /usage also reads OpenRouter's
+API-key USD budget. Provider/model --json output is a credential-free host-menu
+transport. Browsing never changes the selected model or enables billing.
 
 Provider status as of 2026-09-20 (see RISK_NOTICES below for citations):
 
-    copilot      Live. GitHub officially documents a Fine-grained PAT with
-                 the "Copilot Requests" account permission as the supported
-                 method for CI/CD and other non-interactive environments.
-                 No reverse engineering involved.
+    copilot      Coming soon: consumer inference integration is deferred.
     gpt-plus     Live. OpenAI has made no equivalent ToS statement (and an
                  OpenAI engineer has publicly endorsed third-party harness
                  use of Codex/ChatGPT subscriptions). Implemented via the
@@ -939,15 +939,19 @@ def list_provider_models(provider_name: str, search: str = "") -> list[dict]:
         timeout=int(os.environ.get("OPENROUTER_TIMEOUT", "600")),
     )
     response.raise_for_status()
-    models = response.json()["data"]
+    payload = response.json()
+    models = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(models, list):
         raise ValueError("OpenRouter returned an invalid model catalog.")
     query = search.casefold()
     return [
         model for model in models
-        if isinstance(model.get("id"), str)
-        and "text" in model.get("architecture", {}).get("input_modalities", [])
-        and "text" in model.get("architecture", {}).get("output_modalities", [])
+        if isinstance(model, dict) and isinstance(model.get("id"), str) and model["id"]
+        and isinstance(model.get("architecture"), dict)
+        and isinstance(model["architecture"].get("input_modalities"), list)
+        and isinstance(model["architecture"].get("output_modalities"), list)
+        and "text" in model["architecture"]["input_modalities"]
+        and "text" in model["architecture"]["output_modalities"]
         and (not query or query in f"{model['id']} {model.get('name', '')}".casefold())
     ]
 
@@ -1073,14 +1077,15 @@ def print_help() -> None:
     """Print the container-native provider commands."""
     print("Nesti Provider CLI")
     print("Commands:")
-    print("  /provider                              List consumer and platform providers")
+    print("  /provider [--json]                     List provider status (host menu opens a chooser)")
     print("  /provider login <name>                 Log in to a consumer provider")
     print("  /provider logout <name>                Log out of a consumer provider")
     print("  /provider models <name> [search]       List text models and USD prices per 1M tokens")
+    print("  /provider <name> models [search]       Alias for models-first; both accept --json")
     print("  /provider model <name>                 Show the selected planner/coder model")
     print("  /provider model <name> <model-id>      Persist a model selection (currently: openrouter)")
     print("  /provider model <name> --reset        Restore the environment model setting")
-    print("  /usage                                 Show usage/quota for authenticated consumers")
+    print("  /usage                                 Show consumer quota and OpenRouter API-key USD usage")
     print("  /boost                                 Run Laravel Boost convention discovery and rebuild <NESTI_PROJECT_PATH>/.omp")
     print("  /arch [--json]                         Show the project architecture (host launcher opens the page) or print layout.json")
     print("  /stats                                 Render LLM request and tool-run statistics (host launcher opens the page)")
@@ -1094,24 +1099,121 @@ def _model_price(value: str | None) -> str:
         return "unknown"
     if not price.is_finite() or price < 0:
         return "variable"
-    return format(price * 1_000_000, ".6f").rstrip("0").rstrip(".")
+    rendered = format(price * 1_000_000, "f")
+    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
-def _cmd_provider_models(provider_name: str, search: str = "") -> None:
-    models = list_provider_models(provider_name, search)
+def _display_text(value: object) -> str:
+    """Keep external metadata printable, without terminal control sequences."""
+    return "".join(c for c in value if c.isprintable()) if isinstance(value, str) else ""
+
+
+def _model_metadata(model: dict) -> dict:
+    pricing = model.get("pricing")
+    pricing = pricing if isinstance(pricing, dict) else {}
+    context = model.get("context_length")
+    free = True
+    for key in ("prompt", "completion", "request"):
+        if key == "request" and key not in pricing:
+            continue
+        try:
+            price = Decimal(str(pricing.get(key)))
+            free = free and price.is_finite() and price == 0
+        except InvalidOperation:
+            free = False
+    return {
+        "id": _display_text(model["id"]), "name": _display_text(model.get("name")),
+        "context": context if type(context) is int and context > 0 else None,
+        "input_price": _model_price(pricing.get("prompt")),
+        "output_price": _model_price(pricing.get("completion")),
+        "free": free,
+    }
+
+
+def _cmd_provider_models(provider_name: str, search: str = "", json_output: bool = False) -> None:
+    models = [_model_metadata(model) for model in list_provider_models(provider_name, search)]
+    if json_output:
+        print(json.dumps(models))
+        return
     if not models:
         print("No matching text models.")
         return
     width = max(len(model["id"]) for model in models)
     print(f"{'Model ID':<{width}}  {'Context':>10}  {'Input $/1M':>12}  {'Output $/1M':>12}")
+    color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
     for model in models:
-        pricing = model.get("pricing") or {}
-        print(
-            f"{model['id']:<{width}}  {str(model.get('context_length') or 'unknown'):>10}  "
-            f"{_model_price(pricing.get('prompt')):>12}  "
-            f"{_model_price(pricing.get('completion')):>12}"
-        )
+        badge = ("\033[1;32m[FREE]\033[0m" if color else "[FREE]") if model["free"] else ""
+        context = f"{model['context']:,}" if model["context"] is not None else "unknown"
+        print(f"{model['id']:<{width}}  {context:>10}  {model['input_price']:>12}  "
+              f"{model['output_price']:>12}  {badge}")
     print("Catalog prices are indicative; routed provider pricing and availability may differ.")
+
+
+def _provider_metadata(store: TokenStore) -> list[dict]:
+    return [
+        {"name": name, "kind": "consumer", "authenticated": bool(store.get_token(name)),
+         "coming_soon": name == "copilot"}
+        for name in PROVIDERS
+    ] + [
+        {"name": name, "kind": "platform", "authenticated": bool(
+            os.environ.get(f"{name.upper()}_API_KEY", "").strip()), "coming_soon": False}
+        for name in MODEL_ENV_VARS
+    ]
+
+
+def _quota_number(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return "unknown"
+    try:
+        number = Decimal(str(value))
+        return format(number, "f") if number.is_finite() and number >= 0 else "unknown"
+    except InvalidOperation:
+        return "unknown"
+
+
+def _openrouter_usage() -> str:
+    """Read only the configured key's documented budget, never account balance."""
+    try:
+        response = requests.get(
+            f"{OPENROUTER_API_BASE}/key",
+            headers={"Authorization": "Bearer " + os.environ["OPENROUTER_API_KEY"].strip()},
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise ValueError("Invalid key metadata")
+    except (requests.RequestException, ValueError) as exc:
+        status = exc.response.status_code if isinstance(exc, requests.HTTPError) and exc.response is not None else None
+        cause = f"HTTP {status}" if status is not None else type(exc).__name__
+        return f"[openrouter]: Usage unavailable ({cause}); check container connectivity and OPENROUTER_API_KEY."
+    cap = "no key cap" if "limit" in data and data["limit"] is None else _quota_number(data.get("limit"))
+    lines = [
+        "[openrouter]: API-key usage (USD; not account balance)",
+        f"  All-time: {_quota_number(data.get('usage'))}",
+        f"  Daily: {_quota_number(data.get('usage_daily'))}  Weekly: {_quota_number(data.get('usage_weekly'))}  "
+        f"Monthly: {_quota_number(data.get('usage_monthly'))}",
+        f"  Remaining: {_quota_number(data.get('limit_remaining'))}  Key cap: {cap}",
+        f"  Reset: {_display_text(data.get('limit_reset')) or 'unknown'}",
+    ]
+    daily = data.get("free_model_daily_requests")
+    if isinstance(daily, dict):
+        counts = {k: str(daily[k]) if type(daily.get(k)) is int and daily[k] >= 0 else "unknown"
+                  for k in ("used", "limit", "remaining")}
+        lines.append(f"  Free model daily requests: {counts['used']} used / {counts['limit']} limit; "
+                     f"{counts['remaining']} remaining")
+    budget = data.get("effective_budget")
+    if isinstance(budget, dict):
+        lines.extend([
+            f"  Effective budget: {_display_text(budget.get('scope')) or 'unknown'} (USD)",
+            f"    Spent: {_quota_number(budget.get('spend_usd'))}  "
+            f"Remaining: {_quota_number(budget.get('remaining_usd'))}  "
+            f"Cap: {_quota_number(budget.get('limit_usd'))}",
+            f"    Reset interval: {_display_text(budget.get('reset_interval')) or 'unknown'}; "
+            f"resets at: {_display_text(budget.get('resets_at')) or 'unknown'}",
+        ])
+    return "\n".join(lines)
 
 
 def _cmd_provider_model(store: TokenStore, provider_name: str, model_id: str | None) -> None:
@@ -1259,15 +1361,21 @@ def main() -> None:
     cmd = sys.argv[1]
     args = sys.argv[2:]
 
+    if cmd == "/provider" and len(args) >= 2 and args[1] == "models":
+        args = ["models", args[0], *args[2:]]
     # The public catalog needs neither Redis nor a configured API key.
     if cmd == "/provider" and args and args[0] == "models":
+        json_output = "--json" in args
+        if json_output:
+            args = [arg for arg in args if arg != "--json"]
         if len(args) not in (2, 3):
             print_help()
             sys.exit(1)
         try:
-            _cmd_provider_models(args[1], args[2] if len(args) == 3 else "")
+            _cmd_provider_models(args[1], args[2] if len(args) == 3 else "", json_output)
         except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-            print(f"Error fetching models: {exc}")
+            print(f"Error fetching models ({type(exc).__name__}); check provider name and container connectivity.",
+                  file=sys.stderr)
             sys.exit(1)
         return
 
@@ -1294,26 +1402,28 @@ def main() -> None:
         sys.exit(1)
 
     store = TokenStore()
+    has_openrouter_key = bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
     if not store.available:
         print("Error: cannot reach Redis — provider state cannot be read or saved.")
-        sys.exit(1)
+        if cmd != "/usage" or not has_openrouter_key:
+            sys.exit(1)
+        print("Consumer usage unavailable: Redis is unreachable.")
 
     if cmd == "/provider":
-        if len(args) == 0:
+        if not args or args == ["--json"]:
+            providers = _provider_metadata(store)
+            if args:
+                print(json.dumps(providers))
+                return
             print("Available providers:")
-            for p in PROVIDERS:
-                status = " (Authenticated)" if store.get_token(p) else ""
-                if p in RISK_NOTICES:
+            for provider in providers:
+                name = provider["name"]
+                status = " (Authenticated)" if provider["authenticated"] else ""
+                if provider["coming_soon"]:
+                    status += " (coming soon)"
+                if name in RISK_NOTICES:
                     status += " [accepted-risk provider — 'login' prints why]"
-                print(f"  - {p}{status}")
-            for name in MODEL_ENV_VARS:
-                enabled = os.environ.get(f"{name.upper()}_API_ENABLED", "false").strip().lower() == "true"
-                has_key = bool(os.environ.get(f"{name.upper()}_API_KEY", "").strip())
-                model = configured_model(store, name) or "not selected"
-                print(
-                    f"  - {name} (platform API; {'enabled' if enabled else 'disabled'}; "
-                    f"key {'configured' if has_key else 'missing'}; model: {model})"
-                )
+                print(f"  - {name}{status}")
         elif args[0] == "model" and len(args) in (2, 3):
             try:
                 _cmd_provider_model(store, args[1], args[2] if len(args) == 3 else None)
@@ -1329,8 +1439,10 @@ def main() -> None:
             sys.exit(1)
 
     elif cmd == "/usage":
-        tokens = store.get_all_tokens()
-        if not tokens:
+        if has_openrouter_key:
+            print(_openrouter_usage())
+        tokens = store.get_all_tokens() if store.available else {}
+        if not tokens and not has_openrouter_key:
             print("No authenticated providers. Use '/provider login [name]' first.")
             sys.exit(0)
 
