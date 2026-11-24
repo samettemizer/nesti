@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Nesti setup wizard: .env, forge check, project checkout, containers, provider logins.
+# Nesti setup wizard: .env, forge check, project checkout, containers, provider logins, interactive menu.
 set -Eeuo pipefail
 
 STEP="start"
@@ -502,6 +502,24 @@ fi
 
 # --- 9. Launcher ---------------------------------------------------------------
 STEP="launcher"
+# Optional host menu; failures preserve both an existing venv and the plain CLI.
+install_menu() {
+    local venv_py
+    if [ ! -e .venv ] && [ ! -L .venv ]; then
+        "${PYTHON[@]}" -c 'import sys; sys.exit(sys.version_info < (3, 9))' \
+            || { echo "  host Python is older than 3.9" >&2; return 1; }
+        "${PYTHON[@]}" -m venv .venv \
+            || { rm -rf .venv; echo "  python -m venv failed (Debian/Ubuntu: install python3-venv)" >&2; return 1; }
+    fi
+    venv_py=.venv/bin/python
+    [ -x .venv/Scripts/python.exe ] && venv_py=.venv/Scripts/python.exe
+    "$venv_py" -c 'import sys; sys.exit(sys.version_info < (3, 9))' \
+        || { echo "  .venv Python is older than 3.9 or unavailable" >&2; return 1; }
+    "$venv_py" -m pip install --disable-pip-version-check -q -r requirements-host.txt
+}
+if ! install_menu; then
+    echo "Warning: the interactive 'nesti' menu is not installed; every 'nesti <command>' still works. Re-run ./install.sh to retry." >&2
+fi
 LAUNCHER="$HOME/.local/bin/nesti"
 TARGET=$(readlink -f scripts/nesti)
 if [ "$WINDOWS" -eq 1 ] || [ "$(readlink -f "$LAUNCHER" 2>/dev/null || true)" != "$TARGET" ]; then
@@ -542,6 +560,7 @@ Nesti is installed.
   Providers: ${AUTHED:-none authenticated}
 
 Next steps:
+  - interactive menu: nesti
   - open an issue on the project with the '$ISSUE_LABEL' label
   - follow the run: ${COMPOSE[*]} logs -f nesti-orchestrator
   - usage statistics: nesti /stats

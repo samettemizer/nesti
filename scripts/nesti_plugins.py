@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Host-side ``nesti /plugin``: install, enable, list, disable, update, remove plugins and switch their setting.
+"""Host-side ``nesti /plugin``: install, enable, list, disable, update, remove plugins and switch their settings.
 
 Runs on the host through ``scripts/nesti`` with Python 3.6+ and the standard
 library only; it never imports a Nesti container module and needs neither
 Redis nor the orchestrator. Sources come from the operator's Git (host SSH /
 credential helpers); service packages run through host Docker Compose.
+
+Native manifests declare multiple ``settings`` with a ``key`` and optional
+``choices`` or ``secret: true``. Plain skill packages expose one inferred ``args``
+setting. Secret values are accepted only through ``-`` (hidden prompt or stdin).
 
 Storage below the Nesti root:
   .private/plugins/packages/<name>/<sha>/      installed sources, read-only by contract
@@ -34,6 +38,7 @@ later, ``list`` and every mutating command report the service as stale until it 
 
 import argparse
 import contextlib
+import getpass
 import hashlib
 import json
 import logging
@@ -497,15 +502,15 @@ def _load_manifest(root: str) -> Dict[str, Any]:
     if "env_example" in config:
         _package_path(root, config["env_example"], "env_example")
     settings = data.get("settings", [])
-    # shortcut: one setting per plugin, widen when the interactive nesti CLI lands
-    if not isinstance(settings, list) or len(settings) > 1 or (settings and compose is None) or any(
-            not isinstance(s, dict) or set(s) - {"key", "choices"} or not isinstance(s.get("key"), str)
-            or not ENV_KEY_RE.match(s["key"]) or ("choices" in s and (
+    if not isinstance(settings, list) or (settings and compose is None) or any(
+            not isinstance(s, dict) or set(s) - {"key", "choices", "secret"} or not isinstance(s.get("key"), str)
+            or not ENV_KEY_RE.match(s["key"]) or ("secret" in s and not isinstance(s["secret"], bool))
+            or (s.get("secret") and "choices" in s) or ("choices" in s and (
                 not isinstance(s["choices"], list) or not s["choices"]
                 or any(not isinstance(c, str) or not SETTING_VALUE_RE.fullmatch(c) for c in s["choices"])))
-            for s in settings):
-        raise PluginError('settings must list at most one {"key": <env name>, "choices": [<values>]} '
-                          'and need a compose file')
+            for s in settings) or len({s["key"] for s in settings}) != len(settings):
+        raise PluginError('settings must list distinct {"key": <env name>, "choices": [<values>]} or '
+                          '{"key": <env name>, "secret": true} entries and need a compose file')
     skills, seen = data.get("skills", []), set()
     if not isinstance(skills, list):
         raise PluginError("skills must be a list")
@@ -656,7 +661,8 @@ def _compile_bindings(paths: Paths, registry: Dict[str, Any], name: str, info: D
             for binding in record.get("bindings", []):
                 for phase in binding["phases"]:
                     totals[phase] += binding["chars"]
-    setting = _declared_setting(source_dir, info) if not info["manifest"] else None
+    settings = [] if info["manifest"] else _declared_settings(source_dir, info)
+    setting = settings[0] if settings else None
     for binding in bound:
         if setting and setting.get("default") and binding["skill"] == setting["skill"] and not binding["arguments"]:
             binding["arguments"] = {"args": setting["default"]}
@@ -679,8 +685,8 @@ def _compile_bindings(paths: Paths, registry: Dict[str, Any], name: str, info: D
 # ---------------------------------------------------------------------------
 
 def run_command(argv: List[str], cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None,
-                timeout: Optional[float] = None, stream: bool = False) -> Tuple[int, str]:
-    """Run argv without a shell; returns (exit code, stdout, plus stderr on failure). 124 = timeout."""
+                timeout: Optional[float] = None, stream: bool = False, merge_output: bool = False) -> Tuple[int, str]:
+    """Run argv; capture stdout (plus errors on failure), or merge diagnostics for redaction. 124 = timeout."""
     full_env = None
     if env:
         full_env = dict(os.environ)
@@ -689,20 +695,22 @@ def run_command(argv: List[str], cwd: Optional[str] = None, env: Optional[Dict[s
         if stream:
             return subprocess.run(argv, cwd=cwd, env=full_env, timeout=timeout).returncode, ""
         proc = subprocess.run(argv, cwd=cwd, env=full_env, timeout=timeout, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
+                              stderr=subprocess.STDOUT if merge_output else subprocess.PIPE, encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return 127, "%s: command not found" % argv[0]
     except subprocess.TimeoutExpired:
         return 124, "timed out after %s s" % timeout
-    return proc.returncode, proc.stdout if proc.returncode == 0 else proc.stdout + proc.stderr
+    return proc.returncode, proc.stdout if proc.returncode == 0 or merge_output else proc.stdout + proc.stderr
 
 
 class Docker(object):
     """Docker and Compose argv builders over an injectable runner."""
 
-    def __init__(self, runner: Optional[Runner] = None, compose: Optional[List[str]] = None) -> None:
+    def __init__(self, runner: Optional[Runner] = None, compose: Optional[List[str]] = None,
+                 redactions: Optional[Dict[str, str]] = None) -> None:
         self.runner = runner or run_command
         self._compose = compose
+        self._redactions = redactions or {}
 
     def compose(self) -> List[str]:
         """``docker-compose`` when installed, else ``docker compose`` (install.sh's order)."""
@@ -713,7 +721,7 @@ class Docker(object):
     def _check(self, argv: List[str], what: str, **kwargs: Any) -> str:
         code, output = self.runner(argv, **kwargs)
         if code:
-            raise PluginError("%s failed (exit %d): %s" % (what, code, output.strip()[-800:]))
+            raise PluginError("%s failed (exit %d): %s" % (what, code, _redact(output, self._redactions).strip()[-800:]))
         return output
 
     def config(self, source_dir: str, compose_file: str) -> Dict[str, Any]:
@@ -819,6 +827,12 @@ def _digest(context: Dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(context, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _redact(text: str, values: Dict[str, str]) -> str:
+    for value in sorted(set(values.values()) - {""}, key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    return text
+
+
 def _configure(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str, sha: str,
                argv: List[str], values: Dict[str, str]) -> str:
     """Run the package's configure step with settings and runtime context; returns the context digest."""
@@ -833,7 +847,9 @@ def _configure(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str
         env["NESTI_PLUGIN_CONTEXT"] = context_file
         os.makedirs(paths.work(name, sha), exist_ok=True)
         source_dir = paths.package(name, sha)
-        code, _ = docker.runner(_step_argv(source_dir, argv, "configure"), cwd=source_dir, env=env, stream=True)
+        code, output = docker.runner(_step_argv(source_dir, argv, "configure"), cwd=source_dir, env=env, merge_output=True)
+        if output:
+            print(_redact(output, values), end="" if output.endswith("\n") else "\n")
     finally:
         with contextlib.suppress(OSError):
             os.unlink(context_file)
@@ -1018,8 +1034,10 @@ def _activate(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str,
     events = manifest.get("events", [])
     source_dir = paths.package(name, sha)
     project = _project(name)
+    values = {}
     try:
         values = _settings(paths, name, manifest)
+        docker = Docker(docker.runner, docker.compose(), redactions=values)
         compose_file = _package_path(source_dir, manifest["compose"], "compose")
         digest = None
         if manifest.get("configure"):
@@ -1046,7 +1064,7 @@ def _activate(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str,
             _write_secret(paths, name, event["name"], values[event["secret_key"]])
         return subscriptions, digest
     except (PluginError, OSError) as exc:
-        raise PluginError("%s%s" % (exc, _stop_project(docker, project))) from exc
+        raise PluginError(_redact("%s%s" % (exc, _stop_project(docker, project)), values)) from exc
     except BaseException:  # e.g. Ctrl-C during configure or readiness: stop what may run, then re-raise
         with contextlib.suppress(Exception):
             _stop_project(docker, project)
@@ -1141,7 +1159,7 @@ def cmd_install(paths: Paths, docker: Docker, url: str, ref: Optional[str], trus
         print("  settings: %s%s" % (os.path.join(paths.config(name), ".env"), example))
         if required:
             print("  required: %s" % ", ".join(sorted(set(required))))
-    _print_setting(paths, name, info, paths.package(name, sha))
+    _print_settings(paths, name, info, paths.package(name, sha))
     print("Enable with: nesti /plugin enable %s" % name)
 
 
@@ -1184,27 +1202,26 @@ def cmd_enable(paths: Paths, docker: Docker, name: str) -> None:
         print("  event %s -> %s" % (sub["event"], sub["url"]))
 
 
-def _declared_setting(source_dir: str, info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Manifest setting or main skill hint; only a unique ``<choice> (default)`` in its description is inferred."""
-    # shortcut: one setting per plugin, widen when the interactive nesti CLI lands
+def _declared_settings(source_dir: str, info: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Manifest settings or main skill hint; only a unique description default is inferred."""
     if info["manifest"]:
-        declared = info["manifest"].get("settings", [])
-        return {"name": declared[0]["key"], "choices": declared[0].get("choices"), "skill": None} if declared else None
+        return [{"name": s["key"], "choices": s.get("choices"), "secret": s.get("secret", False), "skill": None}
+                for s in info["manifest"].get("settings", [])]
     main = next((s for s in info["skills"] if s["main"]), None)
     if main is None:
-        return None
+        return []
     text = _read_text(_package_path(source_dir, main["path"], "skill %s" % main["name"]), "skill")
     meta = parse_frontmatter(text)
     hint = meta.get("argument-hint", "").strip().strip("[]").strip()
     if not hint:
-        return None
+        return []
     choices = [c.strip() for c in hint.split("|") if c.strip()] if "|" in hint else []
     description = meta.get("description", "")
     defaults = re.findall(r"(\S+)\s+\(default\)", description)
     default = defaults[0] if description.count("(default)") == 1 and len(defaults) == 1 \
         and defaults[0] in choices and SETTING_VALUE_RE.fullmatch(defaults[0]) \
         and len(defaults[0]) <= MAX_ARGUMENT_CHARS else None
-    return {"name": "args", "choices": choices or None, "skill": main["name"], "default": default}
+    return [{"name": "args", "choices": choices or None, "secret": False, "skill": main["name"], "default": default}]
 
 
 def _setting_text(paths: Paths, name: str, info: Dict[str, Any], setting: Dict[str, Any]) -> str:
@@ -1226,16 +1243,23 @@ def _setting_text(paths: Paths, name: str, info: Dict[str, Any], setting: Dict[s
         else:
             value = "%s (plugin default)" % default if default else "not set (plugin default unknown)"
     else:
-        value = _read_env(os.path.join(paths.config(name), ".env")).get(setting["name"], "") or "not set (plugin default)"
+        raw = _read_env(os.path.join(paths.config(name), ".env")).get(setting["name"], "")
+        value = ("set (secret)" if raw else "not set (secret)") if setting["secret"] else raw or "not set (plugin default)"
     choices = " (choices: %s)" % ", ".join(setting["choices"]) if setting["choices"] else ""
     return "%s = %s%s%s" % (label, value, default_note, choices)
 
 
-def _print_setting(paths: Paths, name: str, info: Dict[str, Any], source_dir: str) -> None:
+def _change_hint(name: str, settings: List[Dict[str, Any]], setting: Dict[str, Any]) -> str:
+    return "nesti /%s %s%s" % (name, "" if len(settings) == 1 else setting["name"] + " ",
+                              "-" if setting["secret"] else "<value>")
+
+
+def _print_settings(paths: Paths, name: str, info: Dict[str, Any], source_dir: str) -> None:
     try:
-        setting = _declared_setting(source_dir, info)
-        if setting:
-            print("  setting:  %s; change with: nesti /%s <value>" % (_setting_text(paths, name, info, setting), name))
+        settings = _declared_settings(source_dir, info)
+        for setting in settings:
+            print("  setting:  %s; change with: %s" % (_setting_text(paths, name, info, setting),
+                                                      _change_hint(name, settings, setting)))
     except PluginError as exc:
         print("  setting:  %s" % exc)
 
@@ -1268,28 +1292,43 @@ def _set_env(path: str, key: str, value: str) -> None:
 
 
 def cmd_settings(paths: Paths, name: str) -> None:
-    """Show the plugin's declared setting and its current value; read-only."""
+    """Show the plugin's declared settings and safe current values; read-only."""
     record = _record(load_registry(paths), name)
     source_dir = paths.package(name, record["sha"])
     info = inspect_package(source_dir, record["source"])
-    setting = _declared_setting(source_dir, info)
-    if setting is None:
+    settings = _declared_settings(source_dir, info)
+    if not settings:
         print("%s offers no settings." % name)
         return
     print("%s settings:" % name)
-    print("  %s" % _setting_text(paths, name, info, setting))
-    print("Change with: nesti /%s <value>" % name)
+    for setting in settings:
+        print("  %s" % _setting_text(paths, name, info, setting))
+    hint = _change_hint(name, settings, settings[0]) if len(settings) == 1 else "nesti /%s <KEY> <value>" % name
+    if len(settings) > 1 and any(s["secret"] for s in settings):
+        hint += "; a secret takes '-' and is typed at the prompt"
+    print("Change with: %s" % hint)
 
 
-def cmd_set(paths: Paths, docker: Docker, name: str, value: str) -> None:
-    """Switch the plugin's declared setting; an enabled plugin is re-enabled to apply it."""
+def cmd_set(paths: Paths, docker: Docker, name: str, value: str, key: Optional[str] = None,
+            prompted: bool = False) -> None:
+    """Switch a declared setting; an enabled plugin is re-enabled to apply it."""
     with _locked(paths):
         record = _record(load_registry(paths), name)
         source_dir = paths.package(name, record["sha"])
         info = inspect_package(source_dir, record["source"])
-        setting = _declared_setting(source_dir, info)
-        if setting is None:
+        settings = _declared_settings(source_dir, info)
+        if not settings:
             raise PluginError("%s offers no settings" % name)
+        keys = ", ".join(s["name"] for s in settings)
+        if key is None and len(settings) != 1:
+            raise UsageError("%s has %d settings: use nesti /%s <KEY> <value> (keys: %s)"
+                             % (name, len(settings), name, keys))
+        setting = settings[0] if key is None else next((s for s in settings if s["name"] == key), None)
+        if setting is None:
+            raise UsageError("%s has no setting %s (keys: %s)" % (name, key, keys))
+        if setting["secret"] and not prompted:
+            raise UsageError("%s is a secret: pass '-' and type the value at the prompt, so it never reaches "
+                             "the command line or shell history" % setting["name"])
         if setting["choices"] and value not in setting["choices"]:
             raise UsageError("%s must be one of: %s" % (setting["name"], ", ".join(setting["choices"])))
         if not setting["choices"] and not SETTING_VALUE_RE.fullmatch(value):
@@ -1307,11 +1346,19 @@ def cmd_set(paths: Paths, docker: Docker, name: str, value: str) -> None:
         else:
             _set_env(os.path.join(paths.config(name), ".env"), setting["name"], value)
         enabled = record["enabled"]
+    message = "Set %s %s%s" % (name, setting["name"], " (secret)" if setting["secret"] else " = " + value)
     if not enabled:
-        print("Set %s %s = %s; it applies at the next 'nesti /plugin enable %s'." % (name, setting["name"], value, name))
+        print("%s; it applies at the next 'nesti /plugin enable %s'." % (message, name))
         return
-    print("Set %s %s = %s; re-enabling %s." % (name, setting["name"], value, name))
+    print("%s; re-enabling %s." % (message, name))
     cmd_enable(paths, docker, name)  # takes the lock itself: flock is not re-entrant
+
+
+def _read_value(prompt: str) -> str:
+    try:
+        return getpass.getpass(prompt) if sys.stdin.isatty() else sys.stdin.readline().rstrip("\r\n")
+    except EOFError:
+        return ""
 
 
 def _deactivate(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str) -> None:
@@ -1418,7 +1465,7 @@ def cmd_update(paths: Paths, docker: Docker, name: str, ref: Optional[str], trus
         _rmtree(paths.work(name, old_sha))
         _rmdir_empty(paths.work(name))
     print("Updated %s to %s (ref %s)%s." % (name, sha, ref, "" if record["enabled"] else "; it stays disabled"))
-    _print_setting(paths, name, info, paths.package(name, sha))
+    _print_settings(paths, name, info, paths.package(name, sha))
 
 
 def _restore(paths: Paths, docker: Docker, registry: Dict[str, Any], name: str, old_sha: str, sha: str,
@@ -1481,6 +1528,31 @@ def cmd_list(paths: Paths, docker: Docker) -> None:
             print("  stale:    %s" % note)
 
 
+def plugin_overview(paths: Paths) -> List[Dict[str, Any]]:
+    """Read only declared settings for display; never return secret values."""
+    registry = load_registry(paths)
+    entries = []
+    for name in sorted(registry["packages"]):
+        record = registry["packages"][name]
+        entry = {"name": name, "kind": record["kind"], "enabled": record["enabled"],
+                 "error": record.get("error"), "settings": []}
+        try:
+            source_dir = paths.package(name, record["sha"])
+            info = inspect_package(source_dir, record["source"])
+            entry["settings"] = [{"name": s["name"], "text": _setting_text(paths, name, info, s),
+                                  "choices": s["choices"], "secret": s["secret"]}
+                                 for s in _declared_settings(source_dir, info)]
+        except PluginError as exc:
+            entry.update(error=str(exc), settings=[])
+        if entry["error"]:
+            try:
+                entry["error"] = _redact(entry["error"], _read_env(os.path.join(paths.config(name), ".env")))
+            except PluginError:
+                entry["error"] = "cannot read plugin settings"
+        entries.append(entry)
+    return entries
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nesti /plugin", description="Manage Nesti plugins on this host.")
     sub = parser.add_subparsers(dest="command", metavar="command")
@@ -1493,9 +1565,11 @@ def _parser() -> argparse.ArgumentParser:
     for command, text in (("enable", "activate"), ("disable", "deactivate"), ("remove", "uninstall (keeps settings)")):
         sub.add_parser(command, help=text).add_argument("name")
     sub.add_parser("list", help="show installed packages")
-    settings = sub.add_parser("settings", help="show a plugin's setting, or set it (also: nesti /<name> settings|<value>)")
+    settings = sub.add_parser("settings", help="show a plugin's settings, or set one "
+                             "(also: nesti /<name> [settings | <value> | <KEY> <value>])")
     settings.add_argument("name")
-    settings.add_argument("value", nargs="?")
+    settings.add_argument("first", nargs="?")
+    settings.add_argument("second", nargs="?")
     return parser
 
 
@@ -1523,13 +1597,17 @@ def main(argv: Optional[List[str]] = None, root: Optional[str] = None, runner: O
             cmd_update(paths, docker, args.name, args.ref, args.trust)
         elif args.command == "list":
             cmd_list(paths, docker)
-        elif args.command == "settings" and args.value is None:
+        elif args.command == "settings" and args.first is None:
             cmd_settings(paths, args.name)
         elif args.command == "settings":
-            cmd_set(paths, docker, args.name, args.value)
+            key, value = (None, args.first) if args.second is None else (args.first, args.second)
+            prompted = value == "-"
+            if prompted:
+                value = _read_value("%s value: " % (key or args.name))
+            cmd_set(paths, docker, args.name, value, key, prompted)
         else:
             {"enable": cmd_enable, "disable": cmd_disable, "remove": cmd_remove}[args.command](paths, docker, args.name)
-        if args.command != "list" and not (args.command == "settings" and args.value is None):
+        if args.command != "list" and not (args.command == "settings" and args.first is None):
             _print_stale(paths)
     except PluginError as exc:
         print("nesti /plugin: error: %s" % exc, file=sys.stderr)

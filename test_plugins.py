@@ -14,6 +14,9 @@ import contextlib
 import io
 import json
 import os
+import pty
+import select
+import shutil
 import stat
 import subprocess
 import sys
@@ -26,6 +29,7 @@ REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "scripts"))
 
 import nesti_plugins as np  # noqa: E402
+import nesti_menu as nm  # noqa: E402
 
 _failures = 0
 _TMP = tempfile.TemporaryDirectory(prefix="nesti-plugins-test-")
@@ -87,7 +91,7 @@ class FakeDocker:
         self.interrupt = False
         self.contexts = []
 
-    def __call__(self, argv, cwd=None, env=None, timeout=None, stream=False):
+    def __call__(self, argv, cwd=None, env=None, timeout=None, stream=False, merge_output=False):
         argv = list(argv)
         self.calls.append({"argv": argv, "cwd": cwd, "env": dict(env or {})})
         if argv[:2] == ["docker", "ps"] and "ps" in self.fail:
@@ -150,9 +154,9 @@ class FakeDocker:
 FAKE = FakeDocker()
 
 
-def run(*argv):
+def run(*argv, stdin=""):
     out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch.object(sys, "stdin", io.StringIO()):
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch.object(sys, "stdin", io.StringIO(stdin)):
         code = np.main(list(argv), root=str(ROOT), runner=FAKE, compose=["docker", "compose"])
     return code, out.getvalue(), err.getvalue()
 
@@ -569,6 +573,52 @@ def launcher(*args, **extra):
                           stdin=subprocess.DEVNULL, capture_output=True, text=True)
 
 
+result = launcher()
+check(result.returncode == 0 and result.stdout.strip() == "docker exec -i nesti-orchestrator nesti",
+      "no arguments without a TTY keeps the container help path")
+
+
+def terminal(argv, environment):
+    master, slave = pty.openpty()
+    try:
+        with subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, env=environment) as proc:
+            os.close(slave)
+            slave = None
+            chunks = []
+            deadline = time.monotonic() + 10
+            while True:
+                if time.monotonic() >= deadline:
+                    proc.kill()
+                    raise AssertionError("PTY command timed out")
+                if not select.select([master], [], [], 0.1)[0]:
+                    continue
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return proc.wait(timeout=10), b"".join(chunks).decode()
+    finally:
+        if slave is not None:
+            os.close(slave)
+        os.close(master)
+
+
+menu_root = BASE / "menu-root"
+(menu_root / "scripts").mkdir(parents=True)
+(menu_root / ".venv" / "bin").mkdir(parents=True)
+shutil.copyfile(REPO / "scripts" / "nesti", menu_root / "scripts" / "nesti")
+stub = menu_root / ".venv" / "bin" / "python"
+stub.write_text('#!/bin/sh\ncase "$*" in "-c import questionary") exit ${FAKE_Q:-0};; esac\necho "menu $*"\n')
+stub.chmod(0o755)
+code, out = terminal(["sh", str(menu_root / "scripts" / "nesti")], dict(env, FAKE_Q="0"))
+check(code == 0 and "menu %s/scripts/nesti_menu.py" % menu_root in out and "docker" not in out,
+      "TTY without arguments opens the checkout-venv menu")
+code, out = terminal(["sh", str(menu_root / "scripts" / "nesti")], dict(env, FAKE_Q="1"))
+check(code == 0 and "docker exec -it nesti-orchestrator nesti" in out and "needs Questionary" in out,
+      "missing Questionary falls back to the command list with guidance")
 result = launcher("/plugin", "list")
 check(result.returncode == 0 and "docker" not in result.stdout + result.stderr, "/plugin runs the host module, never docker exec")
 result = launcher("/plugin")
@@ -763,7 +813,9 @@ code, _, err = run("settings", "misc-skills", "x")
 check(code == 1 and "offers no settings" in err, "setting a plugin without a setting fails")
 code, _, err = run("settings", "nope")
 check(code == 1 and "not installed" in err, "an unknown plugin fails")
-for label, settings in (("two settings", [{"key": "A"}, {"key": "B"}]), ("empty choices", [{"key": "A", "choices": []}]),
+for label, settings in (("a repeated key", [{"key": "A"}, {"key": "A"}]), ("empty choices", [{"key": "A", "choices": []}]),
+                        ("a secret with choices", [{"key": "A", "secret": True, "choices": ["x"]}]),
+                        ("a non-boolean secret", [{"key": "A", "secret": "yes"}]),
                         ("a choice with a space", [{"key": "A", "choices": ["a b"]}]),
                         ("settings without compose", [{"key": "A"}])):
     extra = {"skills": [{"name": "s", "path": "s.md"}]} if "without compose" in label else {"compose": "compose.yml"}
@@ -808,6 +860,355 @@ check(code == 0 and len(FAKE.argvs("up")) == ups + 1 and "Enabled setbox" in out
       and np._read_env(str(env_file))["MODEL"] == model and registry()["packages"]["setbox"]["enabled"],
       "enabled: the value is saved and the service re-enabled: %s" % err.strip())
 run("remove", "setbox")
+
+MULTIBOX = BASE / "multibox"
+commit(MULTIBOX, {"nesti-plugin.json": json.dumps(dict(manifest, name="multibox", configure=["sh", "configure.sh"],
+                   settings=[{"key": "MODEL", "choices": ["a/b", "c/d"]}, {"key": "API_KEY", "secret": True}])),
+                  "compose.yml": "services: {}\n", "prepare.sh": "true\n", "configure.sh": "true\n",
+                  ".env.example": "API_TOKEN=\nHOOK_SECRET=\n"}, tag="v1")
+code, _, err = run("install", str(MULTIBOX), "--ref", "v1", "--trust")
+check(code == 0, "multiple distinct settings install: %s" % err.strip())
+env_file = Path(PATHS.config("multibox"), ".env")
+original = ("API_TOKEN=tok-789\r\nAPI_KEY=old-key\nHOOK_SECRET=%s\n" % SECRET).encode()
+env_file.write_bytes(original)
+env_file.chmod(0o640)
+code, out, err = run("settings", "multibox")
+check(code == 0 and "MODEL = not set (plugin default) (choices: a/b, c/d)" in out
+      and "API_KEY = set (secret)" in out and not any(s in out + err for s in ("old-key", "tok-789", SECRET)),
+      "multiple settings display only declared public values and secret presence")
+for args, diagnostic in ((("a/b",), "2 settings"), (("UNKNOWN", "c/d"), "has no setting UNKNOWN"),
+                         (("API_KEY", "new-key"), "'-'")):
+    code, out, err = run("settings", "multibox", *args)
+    check(code == 2 and diagnostic in err and "new-key" not in out + err and env_file.read_bytes() == original,
+          "ambiguous key, unknown key and argv secrets fail without writes: %s" % diagnostic)
+code, _, _ = run("settings", "multibox", "MODEL", "c/d")
+check(code == 0 and env_file.read_bytes() == original + b"MODEL=c/d\n", "explicit key appends only its value")
+code, out, err = run("settings", "multibox", "API_KEY", "-", stdin="new-key\n")
+check(code == 0 and env_file.read_bytes() == original.replace(b"old-key", b"new-key") + b"MODEL=c/d\n"
+      and stat.S_IMODE(env_file.stat().st_mode) == 0o640 and "new-key" not in out + err,
+      "stdin secret changes only its key, preserves mode and never echoes")
+saved = env_file.read_bytes()
+for bad in ("", "invalid secret\n", "$bad\n", "x" * 129 + "\n"):
+    code, out, err = run("settings", "multibox", "API_KEY", "-", stdin=bad)
+    check(code == 2 and env_file.read_bytes() == saved and (not bad.strip() or bad.strip() not in out + err),
+          "invalid/EOF secret input is rejected without disclosure or writes")
+with mock.patch.object(sys, "stdin") as stream, mock.patch.object(np.getpass, "getpass", return_value="hidden") as prompt:
+    stream.isatty.return_value = True
+    check(np._read_value("Value: ") == "hidden" and prompt.call_args == mock.call("Value: "),
+          "TTY values use getpass")
+    prompt.side_effect = EOFError
+    check(np._read_value("Value: ") == "", "TTY EOF becomes empty input")
+overview = np.plugin_overview(PATHS)
+entry = next(e for e in overview if e["name"] == "multibox")
+check([s["name"] for s in entry["settings"]] == ["MODEL", "API_KEY"]
+      and entry["settings"][1]["text"] == "API_KEY = set (secret)"
+      and [e["name"] for e in overview] == sorted(e["name"] for e in overview)
+      and not any(s in json.dumps(overview) for s in ("new-key", "tok-789", SECRET)),
+      "overview is sorted and secret-safe")
+source_dir = Path(PATHS.package("multibox", registry()["packages"]["multibox"]["sha"]))
+with mock.patch.object(np, "inspect_package", wraps=np.inspect_package) as inspect:
+    original_inspect = inspect._mock_wraps
+    inspect.side_effect = lambda path, source: (_ for _ in ()).throw(np.PluginError("broken package")) \
+        if path == str(source_dir) else original_inspect(path, source)
+    broken = np.plugin_overview(PATHS)
+check(next(e for e in broken if e["name"] == "multibox")["error"] == "broken package"
+      and any(e["settings"] for e in broken if e["name"] != "multibox"), "broken package does not hide other packages")
+with mock.patch.object(np, "load_registry", return_value={"packages": {}}):
+    check(np.plugin_overview(PATHS) == [], "empty overview")
+with mock.patch.object(np, "load_registry", side_effect=np.PluginError("broken registry")):
+    try:
+        np.plugin_overview(PATHS)
+        check(False, "registry errors propagate")
+    except np.PluginError as exc:
+        check(str(exc) == "broken registry", "registry errors propagate")
+
+
+def noisy_runner(argv, **kwargs):
+    result = FAKE(argv, **kwargs)
+    if argv[:2] == ["sh", "configure.sh"]:
+        assert not kwargs.get("stream"), "env-bearing output must be captured"
+        assert kwargs.get("merge_output"), "both diagnostic streams must be captured"
+        return result[0], "configured new-key tok-789 %s\n" % SECRET
+    if "up" in argv and result[0]:
+        return result[0], "compose failed new-key tok-789 %s" % SECRET
+    return result
+
+
+code, diagnostics = np.run_command([sys.executable, "-c", "import sys; print('ready'); print('notice', file=sys.stderr)"],
+                                   merge_output=True)
+check(code == 0 and "ready" in diagnostics and "notice" in diagnostics,
+      "successful configure capture retains stdout and stderr diagnostics")
+with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+    code = np.main(["enable", "multibox"], root=str(ROOT), runner=noisy_runner, compose=["docker", "compose"])
+check(code == 0 and "configured [redacted]" in out.getvalue()
+      and not any(s in out.getvalue() + err.getvalue() for s in ("new-key", "tok-789", SECRET)),
+      "configure diagnostics remain useful but redact env values")
+FAKE.fail.add("up")
+with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+    code = np.main(["enable", "multibox"], root=str(ROOT), runner=noisy_runner, compose=["docker", "compose"])
+FAKE.fail.discard("up")
+error = registry()["packages"]["multibox"]["error"]
+check(code == 1 and "compose failed [redacted]" in error and not registry()["packages"]["multibox"]["enabled"]
+      and not any(s in out.getvalue() + err.getvalue() + error + json.dumps(np.plugin_overview(PATHS))
+                  for s in ("new-key", "tok-789", SECRET)), "activation failures are redacted before persistence and overview")
+
+
+boundary_secret = "sk-sensitive-credential-0123456789"
+np._set_env(str(env_file), "API_KEY", boundary_secret)
+for failing_command in ("up", "ps", "stop", "network"):
+    run("enable", "multibox")
+    failed_output = boundary_secret + "X" * 790
+
+    def boundary_runner(argv, **kwargs):
+        if failing_command == "network" and argv[:3] == ["docker", "network", "inspect"]:
+            return 1, ""
+        if ((failing_command == "up" and "up" in argv)
+                or (failing_command in ("ps", "stop") and argv[:2] == ["docker", failing_command])
+                or (failing_command == "network" and argv[:3] == ["docker", "network", "create"])):
+            return 1, failed_output
+        if "up" in argv:
+            return 1, "activation refused"
+        return FAKE(argv, **kwargs)
+
+    with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+        code = np.main(["enable", "multibox"], root=str(ROOT), runner=boundary_runner, compose=["docker", "compose"])
+    record = registry()["packages"]["multibox"]
+    displayed = out.getvalue() + err.getvalue() + record["error"] + json.dumps(np.plugin_overview(PATHS))
+    check(code == 1 and "failed (exit 1)" in err.getvalue() and "X" * 790 in displayed
+          and boundary_secret not in displayed and "0123456789" not in displayed
+          and not record["enabled"] and not Path(PATHS.secrets("multibox")).exists()
+          and not [s for s in runtime()["subscriptions"] if s["package"] == "multibox"],
+          "redaction precedes diagnostic truncation for activation/cleanup %s, including persisted errors" % failing_command)
+    check(FAKE.containers["nesti-plugin-multibox"][0][1] == ("running" if failing_command in ("ps", "stop") else "exited")
+          and (failing_command != "ps" or "service state unknown" in err.getvalue())
+          and (failing_command != "stop" or "service still running" in err.getvalue()),
+          "activation failure cleanup and state diagnostics remain intact for %s" % failing_command)
+
+print("\n[13] Host menu actions and optional installer")
+ast.parse((REPO / "scripts" / "nesti_menu.py").read_text(), feature_version=(3, 9))
+
+
+class MenuUI:
+    def __init__(self):
+        self.prompts = []
+
+    def Choice(self, title, value=None, disabled=False):
+        return {"title": title, "value": value, "disabled": disabled}
+
+    def Separator(self, title):
+        return {"title": title, "separator": True}
+
+    def select(self, message, **kwargs):
+        self.prompts.append(("select", message, kwargs))
+
+    def password(self, message, **kwargs):
+        self.prompts.append(("password", message, kwargs))
+
+    def text(self, message, **kwargs):
+        self.prompts.append(("text", message, kwargs))
+
+    def confirm(self, message, **kwargs):
+        self.prompts.append(("confirm", message, kwargs))
+
+
+ui = MenuUI()
+secret = entry["settings"][1]
+public = entry["settings"][0]
+for name in ("stats", "arch", "boost", "provider", "usage"):
+    with mock.patch.object(nm, "_ask", side_effect=[secret, "menu-secret"]), mock.patch.object(nm, "_run") as action:
+        nm._plugin_menu(ui, dict(entry, name=name))
+        check(action.call_args == mock.call(["/plugin", "settings", name, "API_KEY", "-"], stdin_text="menu-secret\n"),
+              "conflicting plugin %s stays host-routed and keeps secrets off argv" % name)
+for replies in ([None], ["back"], [secret, None], [secret, ""], [public, None]):
+    with mock.patch.object(nm, "_ask", side_effect=replies), mock.patch.object(nm, "_run") as action:
+        nm._plugin_menu(ui, entry)
+        check(not action.called, "plugin cancellation/back never runs an action")
+for replies, expected in (([public, "c/d"], ["/plugin", "settings", "multibox", "MODEL", "c/d"]),
+                           (["enable"], ["/plugin", "enable", "multibox"]),
+                           (["disable"], ["/plugin", "disable", "multibox"])):
+    with mock.patch.object(nm, "_ask", side_effect=replies), mock.patch.object(nm, "_run") as action:
+        nm._plugin_menu(ui, entry)
+        check(action.call_args == mock.call(expected), "plugin selection runs the direct command")
+free = dict(public, choices=None)
+with mock.patch.object(nm, "_ask", side_effect=[free, "free/value"]), mock.patch.object(nm, "_run") as action:
+    nm._plugin_menu(ui, dict(entry, settings=[free]))
+    validate = ui.prompts[-1][2]["validate"]
+    check(validate("free/value") is True and validate("bad value") is not True
+          and action.call_args == mock.call(["/plugin", "settings", "multibox", "MODEL", "free/value"]),
+          "free text validates and routes a declared key")
+with mock.patch.object(nm.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "")) as child:
+    check(nm._run(["/plugin", "settings", "multibox", "API_KEY", "-"], "hidden\n") == 0
+          and child.call_args == mock.call(["sh", nm.LAUNCHER, "/plugin", "settings", "multibox", "API_KEY", "-"],
+                                          input="hidden\n", text=True), "secret reaches child stdin, not argv")
+with mock.patch.object(nm.subprocess, "run", side_effect=KeyboardInterrupt):
+    check(nm._run(["/provider"]) == 130, "interrupted child preserves status 130")
+provider_output = json.dumps([
+    {"name": "future-provider", "kind": "consumer", "authenticated": True},
+    {"name": "other-provider", "kind": "consumer", "authenticated": False},
+    {"name": "openrouter", "kind": "platform", "authenticated": True},
+])
+with mock.patch.object(nm.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, provider_output, "")):
+    check(nm._consumers() == [("future-provider", True), ("other-provider", False)],
+          "consumer names are dynamic, authentication explicit, platform APIs excluded")
+with mock.patch.object(nm.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "failed\n", "reason\n")), \
+        contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+    check(nm._consumers() is None and out.getvalue() == "failed\n" and err.getvalue() == "reason\n",
+          "provider listing errors are printed and cancel selection")
+for invalid in ("not json", "{}", "[null]"):
+    with mock.patch.object(nm.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, invalid, "")), \
+            contextlib.redirect_stderr(io.StringIO()) as err:
+        check(nm._consumers() is None and "update the orchestrator CLI" in err.getvalue(),
+              "invalid provider transport cancels with upgrade guidance")
+
+model_rows = [
+    {"id": "nvidia/free", "name": "Nemotron", "context": 1000000,
+     "input_price": "0", "output_price": "0", "free": True},
+    {"id": "vendor/paid", "name": "Other", "context": None,
+     "input_price": "0.15", "output_price": "variable", "free": False},
+]
+ui = MenuUI()
+with mock.patch.object(nm, "_metadata", return_value=model_rows) as metadata, \
+        mock.patch.object(nm, "_ask", side_effect=[
+            "filter", "NVIDIA", model_rows[0], "Back", "filter", "absent", "filter", None, "back",
+        ]), mock.patch.object(nm, "_run") as action, contextlib.redirect_stdout(io.StringIO()) as out:
+    nm._models_menu(ui, "openrouter")
+    lists = [p[2]["choices"] for p in ui.prompts if p[0] == "select" and p[1] == "openrouter models"]
+    check(metadata.call_count == 1 and not action.called, "model browsing fetches once and never mutates configuration")
+    check(len(lists[1]) == 3 and lists[1][1]["value"] == model_rows[0],
+          "local filter matches model IDs case-insensitively")
+    check(any("No matching" in c["title"] for c in lists[-1]),
+          "empty model filter stays safe when filter edit is cancelled")
+    check("[FREE]" in out.getvalue() and "context 1,000,000" in out.getvalue()
+          and "in $0 / out $0 per 1M" in out.getvalue() and "unchanged" in out.getvalue(),
+          "model details show free/context/prices without changing configuration")
+for replies in ([None], ["back"], ["filter", None, None], [model_rows[0], None],
+                ["filter", "nemotron", None]):
+    with mock.patch.object(nm, "_metadata", return_value=model_rows), \
+            mock.patch.object(nm, "_ask", side_effect=replies), mock.patch.object(nm, "_run") as action:
+        nm._models_menu(MenuUI(), "openrouter")
+        check(not action.called, "model filter/detail cancellation does not perform actions")
+for confirmation in (True, False, None):
+    ui = MenuUI()
+    with mock.patch.object(nm, "_metadata", return_value=model_rows), \
+            mock.patch.object(nm, "_ask", side_effect=[
+                model_rows[0], "Use this model for Nesti", confirmation, "back",
+            ]), mock.patch.object(nm, "_run", return_value=0) as action:
+        nm._models_menu(ui, "openrouter")
+        check(action.call_args_list == (
+            [mock.call(["/provider", "model", "openrouter", "nvidia/free"])] if confirmation else []
+        ), "only approved model selection invokes the existing setter exactly once")
+        prompt = next(p for p in ui.prompts if p[0] == "confirm")
+        check(prompt[2]["default"] is False and "nvidia/free" in prompt[1]
+              and "planner and coder" in prompt[1],
+              "model confirmation defaults to no and identifies the affected roles and ID")
+for status in (1, 130):
+    with mock.patch.object(nm, "_metadata", return_value=model_rows) as metadata, \
+            mock.patch.object(nm, "_ask", side_effect=[
+                model_rows[0], "Use this model for Nesti", True,
+                "filter", "paid", model_rows[1], "Use this model for Nesti", True, "back",
+            ]), mock.patch.object(nm, "_run", side_effect=[status, 0]) as action, \
+            contextlib.redirect_stdout(io.StringIO()) as out:
+        nm._models_menu(MenuUI(), "openrouter")
+        check(action.call_args_list == [
+            mock.call(["/provider", "model", "openrouter", "nvidia/free"]),
+            mock.call(["/provider", "model", "openrouter", "vendor/paid"]),
+        ] and metadata.call_count == 1,
+              "failed/interrupted model setter leaves filtering and the next selection usable")
+        check("success" not in out.getvalue().lower(),
+              "menu leaves setter success reporting to the existing CLI")
+providers = json.loads(provider_output) + [
+    {"name": "copilot", "kind": "consumer", "authenticated": False, "coming_soon": True},
+]
+ui = MenuUI()
+with mock.patch.object(nm, "_metadata", return_value=providers), \
+        mock.patch.object(nm, "_ask", side_effect=[providers[0], providers[2], None]), \
+        mock.patch.object(nm, "_models_menu") as models, mock.patch.object(nm, "_run") as action:
+    nm._provider_menu(ui)
+    titles = [c["title"] for c in ui.prompts[0][2]["choices"]]
+    check("openrouter (Authenticated)" in titles and "copilot (coming soon)" in titles
+          and models.call_args == mock.call(ui, "openrouter") and not action.called,
+          "provider picker opens model browser but defers consumer changes")
+for outcome in (OSError("no docker"), subprocess.TimeoutExpired("docker", 10)):
+    with mock.patch.object(nm.subprocess, "run", side_effect=outcome):
+        check(not nm._orchestrator_running(), "unavailable Docker disables container actions")
+
+
+def menu_session(replies, entries=None, running=True, consumers=None):
+    ui = MenuUI()
+    with mock.patch.dict(sys.modules, {"questionary": ui}), mock.patch.object(nm, "_ask", side_effect=replies), \
+            mock.patch.object(nm, "_orchestrator_running", return_value=running), \
+            mock.patch.object(np, "plugin_overview", return_value=[entry] if entries is None else entries) as overview, \
+            mock.patch.object(nm, "_consumers", return_value=consumers), mock.patch.object(nm, "_run") as action:
+        code = nm.main()
+    return code, ui, action, overview
+
+
+code, ui, action, overview = menu_session(["/usage", "exit"])
+check(code == 0 and action.call_args == mock.call(["/usage"]) and overview.call_count == 2, "state refreshes after actions")
+code, ui, action, _ = menu_session(["exit"], running=False)
+choices = ui.prompts[0][2]["choices"]
+check(all(c["disabled"] == nm.NOT_RUNNING for c in choices if c.get("value") in
+          ("/provider", "login", "logout", "/usage", "/stats", "/arch", "/boost"))
+      and not next(c for c in choices if c.get("value") == entry)["disabled"], "stopped container disables only provider/project actions")
+for replies in (["logout", "future-provider", False, "exit"], ["/boost", False, "exit"],
+                ["login", None, "exit"], [None]):
+    code, ui, action, _ = menu_session(replies, consumers=[("future-provider", True)])
+    check(code == 0 and not action.called and all(p[2]["default"] is False for p in ui.prompts if p[0] == "confirm"),
+          "cancellation and default-false confirmations never act")
+for replies, expected in ((["login", "other-provider", "exit"], ["/provider", "login", "other-provider"]),
+                           (["logout", "future-provider", True, "exit"], ["/provider", "logout", "future-provider"]),
+                           (["/boost", True, "exit"], ["/boost"]), (["/stats", "exit"], ["/stats"]),
+                           (["/arch", "exit"], ["/arch"])):
+    code, ui, action, _ = menu_session(replies, consumers=[("future-provider", True), ("other-provider", False)])
+    check(code == 0 and action.call_args == mock.call(expected), "provider/project action preserves direct CLI arguments")
+    if replies[0] == "logout":
+        check(ui.prompts[1][2]["choices"] == ["future-provider"], "logout offers only authenticated consumers")
+with contextlib.redirect_stdout(io.StringIO()) as out:
+    code, _, action, _ = menu_session(["logout", "exit"], consumers=[])
+check("No consumer provider is logged in." in out.getvalue() and not action.called, "empty logout explains state")
+with mock.patch.object(nm, "_provider_menu") as provider_menu:
+    code, ui, action, _ = menu_session(["/provider", "exit"])
+    check(code == 0 and provider_menu.call_args == mock.call(ui) and not action.called,
+          "Provider status opens interactive provider selection instead of printing the CLI list")
+code, ui, _, _ = menu_session(["exit"], entries=[])
+check(any("No plugins installed" in c["title"] and c["disabled"] for c in ui.prompts[0][2]["choices"]),
+      "empty plugin list offers installation guidance")
+with mock.patch.dict(sys.modules, {"questionary": MenuUI()}), mock.patch.object(nm, "_orchestrator_running", return_value=False), \
+        mock.patch.object(np, "plugin_overview", side_effect=np.PluginError("broken registry")), \
+        mock.patch.object(nm, "_ask", return_value="exit"):
+    check(nm.main() == 0, "broken registry does not prevent menu exit")
+for exception in (type("NoConsoleScreenBufferError", (Exception,), {})(), ValueError("unrelated")):
+    with mock.patch.dict(sys.modules, {"questionary": MenuUI()}), \
+            mock.patch.object(nm, "_orchestrator_running", side_effect=exception), \
+            contextlib.redirect_stderr(io.StringIO()) as err:
+        try:
+            code = nm.main()
+            check(code == 1 and "winpty nesti" in err.getvalue(), "Windows console failure gives guidance")
+        except ValueError:
+            check(type(exception) is ValueError, "unrelated menu exceptions propagate")
+
+installer = (REPO / "install.sh").read_text()
+install_function = installer[installer.index("install_menu() {"):installer.index('LAUNCHER="$HOME/.local/bin/nesti"')]
+install_root = BASE / "installer"
+install_root.mkdir()
+host_python = install_root / "host-python"
+host_python.write_text('#!/bin/sh\n[ "$1" = -c ] && exit ${OLD_PYTHON:-0}\nmkdir .venv\nexit 1\n')
+host_python.chmod(0o755)
+script = 'set -Eeuo pipefail\nPYTHON=("%s")\n%s\necho plain-cli-survives\n' % (host_python, install_function)
+for old in ("1", "0"):
+    result = subprocess.run(["bash", "-c", script], cwd=install_root, env=dict(os.environ, OLD_PYTHON=old),
+                            capture_output=True, text=True)
+    check(result.returncode == 0 and "plain-cli-survives" in result.stdout and "Warning:" in result.stderr
+          and not (install_root / ".venv").exists(), "failed new venv setup is optional and cleans only its partial directory")
+(install_root / ".venv" / "Scripts").mkdir(parents=True)
+sentinel = install_root / ".venv" / "keep"
+sentinel.write_text("existing environment")
+windows_python = install_root / ".venv" / "Scripts" / "python.exe"
+windows_python.write_text('#!/bin/sh\n[ "$1" = -c ] && exit 0\necho pip-offline >&2\nexit 1\n')
+windows_python.chmod(0o755)
+result = subprocess.run(["bash", "-c", script], cwd=install_root, capture_output=True, text=True)
+check(result.returncode == 0 and "pip-offline" in result.stderr and sentinel.read_text() == "existing environment",
+      "existing Windows-path venv survives a pip failure and plain CLI setup continues")
 
 print("\n%s" % ("All checks passed." if not _failures else "%d check(s) FAILED." % _failures))
 _TMP.cleanup()
