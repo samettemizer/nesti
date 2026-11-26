@@ -23,7 +23,8 @@ find_python() {
     return 1
 }
 # Starts docker-compose.yml's long-running services when one is stopped or missing, with the images already built:
-# building stays with install.sh and `nesti update`. Output goes to stderr (mcp's stdout is the protocol); failure only warns.
+# building stays with install.sh and `nesti update`; running services are never recreated, even after a config change.
+# Output goes to stderr (mcp's stdout is the protocol); failure only warns.
 ensure_containers() {
     command -v docker >/dev/null 2>&1 || return 0
     states=$(docker inspect -f '{{.State.Running}}' nesti-orchestrator nesti-stats nesti-redis nesti-mcp nesti-qdrant 2>/dev/null) || states=
@@ -31,7 +32,7 @@ ensure_containers() {
     if command -v docker-compose >/dev/null 2>&1; then compose=docker-compose; else compose="docker compose"; fi
     echo "nesti: starting the Nesti containers ..." >&2
     docker network inspect nesti-plugins >/dev/null 2>&1 || docker network create --internal nesti-plugins >/dev/null 2>&1 || true
-    if ! (cd "$here" && $compose up -d --no-build) >&2; then
+    if ! (cd "$here" && $compose up -d --no-build --no-recreate) >&2; then
         echo "nesti: could not start the containers; if their images are missing, run 'nesti update' or ./install.sh." >&2
     fi
 }

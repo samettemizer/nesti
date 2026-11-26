@@ -506,13 +506,13 @@ for label, states, missing, starts in (("all running", "true true true true true
     docker_log.write_text("")
     result = launcher("/provider", DOCKER_LOG=str(docker_log), DOCKER_STATES=states, DOCKER_MISSING=missing)
     calls = docker_log.read_text()
-    started = "compose up -d --no-build in %s" % launch_root.resolve() in calls
+    started = "compose up -d --no-build --no-recreate in %s" % launch_root.resolve() in calls
     check(started == starts and "build" not in calls.replace("--no-build", "")
           and calls.rstrip().endswith("docker exec -i nesti-orchestrator nesti /provider"),
           "%s: containers %s, never built, then the command" % (label, "started" if starts else "left alone"))
 docker_log.write_text("")
 result = launcher("mcp", DOCKER_LOG=str(docker_log), DOCKER_STATES="", DOCKER_MISSING="1")
-check("compose up -d --no-build" in docker_log.read_text() and result.stdout == "",
+check("compose up -d --no-build --no-recreate" in docker_log.read_text() and result.stdout == "",
       "mcp: containers started with stdout left to the protocol")
 docker_log.write_text("")
 launcher("update", "--check", DOCKER_LOG=str(docker_log), DOCKER_STATES="", DOCKER_MISSING="1")
