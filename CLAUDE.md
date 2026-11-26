@@ -70,6 +70,8 @@ scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetc
                              settings (one `args` for a plain skill package); secrets only via `-`
                              nesti_menu.py: argument-less host `nesti` on a TTY → Questionary menu
                              (./.venv only, Python 3.9+, requirements-host.txt); every action re-runs scripts/nesti
+                             nesti_update.py: host `nesti update [--check]` (Python 3.6+ stdlib) → ff-only to the latest
+                             GitHub Release tag, then rebuild/restart/.venv; launcher notice cached in state/update-check.json
 skills/, templates/          vendored doc corpus (primevue/laravel/practices),
                              bootstrap templates (laravel/, spa/), boost/ SPA discovery skill
 test_graph_smoke.py          offline regression net (.venv/bin/python test_graph_smoke.py)
