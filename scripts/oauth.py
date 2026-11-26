@@ -1190,7 +1190,7 @@ def _openrouter_usage() -> str:
         return f"[openrouter]: Usage unavailable ({cause}); check container connectivity and OPENROUTER_API_KEY."
     cap = "no key cap" if "limit" in data and data["limit"] is None else _quota_number(data.get("limit"))
     lines = [
-        "[openrouter]: API-key usage (USD; not account balance)",
+        "[OpenRouter]: API-key usage (USD)",
         f"  All-time: {_quota_number(data.get('usage'))}",
         f"  Daily: {_quota_number(data.get('usage_daily'))}  Weekly: {_quota_number(data.get('usage_weekly'))}  "
         f"Monthly: {_quota_number(data.get('usage_monthly'))}",
