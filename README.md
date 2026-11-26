@@ -233,30 +233,6 @@ Set `NESTI_FORGE=github` (install.sh asks) and configure the
   closes when the Pull Request opens.
 - Rollback: set `NESTI_FORGE=gitlab` and recreate the containers.
 
-### Manual Installation
-
-Configure `.env`, then start:
-```bash
-cp .env.example .env
-# Set forge access (GitLab, or NESTI_FORGE=github) and an API key or consumer subscription.
-# The orchestrator joins the plugin event network and mounts the plugin dirs; install.sh creates them.
-docker network create --internal nesti-plugins
-mkdir -p .private/plugins/packages .private/plugins/secrets && chmod 700 .private/plugins/secrets
-docker-compose up -d --build
-```
-Sandbox images are built and skills indexed automatically before polling.
-
-Optional corpus refresh (container-local; indexed on the next restart):
-```bash
-docker exec nesti-orchestrator python scripts/fetch_skills.py
-```
-A rebuild uses the repository's corpus, not the container-local refresh.
-
-Optional preflight (creates and closes a probe issue on the forge):
-```bash
-docker exec nesti-orchestrator python scripts/preflight.py
-```
-
 ---
 
 ## Updating
