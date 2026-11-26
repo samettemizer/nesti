@@ -28,9 +28,9 @@ flowchart LR
     D -->|Retry| C
 ```
 
-Provider order: consumer subscriptions → optional local Ollama →
-OpenRouter → DeepSeek → Anthropic API. Unavailable providers are skipped;
-paid APIs require explicit configuration. See [provider setup](#platform-gateway-apis).
+Provider order: Consumer Subscriptions → OpenRouter (or other platform gateway APIs).
+
+Paid APIs require explicit configuration. See [provider setup](#platform-gateway-apis).
 
 Note: The local LLM tiers are disabled by default because they require dedicated strong GPU/hardware.
 
@@ -50,6 +50,16 @@ stale new files and restore previously edited committed files from `HEAD`.
 
 Name `README.md`, `CHANGELOG.md` or a `docs/` file in the issue if it should
 change; otherwise Nesti leaves it untouched.
+
+---
+
+<p>
+  <a href="https://www.youtube.com/watch?v=ua7AfRvcorw">
+    <img src="./assets/remotion-video-challenge.png" alt="Nesti Remotion video challenge — watch on YouTube" width="512" />
+  </a>
+</p>
+
+Use Nesti on its own, or pair it with the [nestiworks](https://github.com/samettemizer/nestiworks/tree/main/laravel) plugin to take on escalated tasks.
 
 ---
 
@@ -181,7 +191,7 @@ a logged 404.
 | Sandboxes | `docker_runner.py`, `frontend_runner.py` |
 | Context and memory | `skill_catalog.py`, `skill_loader.py`, `conversation_store.py`, `vector_store.py`, `semantic_cache.py` |
 | Interactive tools | `mcp_server/` (FastMCP), `scripts/oauth.py` (`nesti` CLI) |
-| Usage statistics | `stats/` (`nesti /stats` → live page `http://127.0.0.1:8790/`, served by `nesti-stats`) |
+| Usage statistics | `stats/` (`nesti /stats` → live page `http://127.0.0.1:8790`) |
 
 [`docker-compose.yml`](docker-compose.yml) runs the orchestrator, MCP server,
 the `nesti-stats` page server, Redis and Qdrant; sandbox containers are created per test run and removed
@@ -203,7 +213,6 @@ containers, waits for readiness, offers consumer provider logins, installs the
 ```bash
 ./install.sh            # interactive
 ```
-`--help` lists the options.
 
 ### GitHub
 
@@ -224,27 +233,20 @@ Set `NESTI_FORGE=github` (install.sh asks) and configure the
   closes when the Pull Request opens.
 - Rollback: set `NESTI_FORGE=gitlab` and recreate the containers.
 
-### Manual Installation
+---
 
-Configure `.env`, then start:
+## Updating
+
 ```bash
-cp .env.example .env
-# Set forge access (GitLab, or NESTI_FORGE=github) and an API key or consumer subscription.
-docker-compose up -d --build
+nesti update --check   # installed vs latest release; exit 0 up to date, 3 update available, 1 error
+nesti update           # fast-forward to the latest release, rebuild, restart, refresh .venv
 ```
-Sandbox images are built and skills indexed automatically before polling.
-
-Optional corpus refresh (container-local; indexed on the next restart):
-```bash
-docker exec nesti-orchestrator python scripts/fetch_skills.py
-```
-A rebuild uses the repository's corpus, not the container-local refresh.
-
-Optional preflight (creates and closes a probe issue on the forge):
-```bash
-docker exec nesti-orchestrator python scripts/preflight.py
-```
-
+`nesti update` refuses, changing nothing, when tracked files have
+uncommitted changes, HEAD is detached, or your branch has commits that are not
+in the release. `.env`, `.private/`, `state/` (apart from its update-check
+cache), `logs/` and untracked files are never touched. On a terminal, `nesti`
+shows a notice when a newer release is out (checked at most once a day, in the
+background); set `NESTI_NO_UPDATE_CHECK=1` to turn it off.
 ---
 
 ## MCP Server
@@ -263,30 +265,6 @@ Other MCP clients run `nesti mcp` from the project's git checkout, or `nesti mcp
 each connection acts on the GitLab project or GitHub repository of that checkout's `origin` remote.
 
 ---
-
-## Platform Gateway APIs
-Run the CLI inside the orchestrator:
-
-```bash
-docker exec -it nesti-orchestrator nesti /provider
-docker exec -it nesti-orchestrator nesti /provider login claude
-docker exec -it nesti-orchestrator nesti /usage
-```
-
-Available commands (prefix each with `nesti` inside the container):
-
-| Command | Purpose |
-|---------|---------|
-| `/provider` | List consumer and platform providers |
-| `/provider login <name>` / `/provider logout <name>` | Add or remove a consumer session |
-| `/provider models <name> [search]` | List text models and prices per million tokens |
-| `/provider model <name> [model-id\|--reset]` | View, persist or reset model selection (OpenRouter) |
-| `/usage` | Show authenticated consumer usage and quota |
-| `/stats` | Usage statistics page at `http://127.0.0.1:8790/` (`nesti-stats` service): requests, tokens, API-equivalent cost and errors per project, model and provider. A refresh shows current data; the selected range and project are kept |
-| `/arch [--json]` | Static architecture page `state/architecture.html`; `--json` prints the layout record instead |
-
-OpenRouter needs an explicit model via `OPENROUTER_MODEL` or
-`nesti /provider model openrouter <model-id>`.
 
 ## Statistics
 
@@ -320,21 +298,58 @@ subscription bills, and an unpriced model is not proof of zero cost.*
 
 ## Consumer Subscriptions & Quota
 
-Supported login names: `claude`, `antigravity`, `chatgpt-plus`, `copilot`.
-Consumer login/logout takes effect on the next inference call without restart.
-Copilot's current PAT login supports quota reporting, not inference.
+Supported providers: `openrouter`, `claude`, `antigravity`, `chatgpt-plus`
 
-`/usage` shows a used-capacity bar, remaining percentage and reset countdown.
-
-![Nesti usage CLI showing Claude and Antigravity quota bars, remaining percentages and reset countdowns](assets/usage.png)
-
-*Example output; quota values and reset times vary by account and usage.*
-
-Missing quota is unknown, not estimated; Copilot reports usage without a
-remaining figure. ChatGPT Plus uses the Codex backend; its quota endpoint is
-internal and may change. Credentials are renewed and persisted automatically.
 On test failures, Nesti checks quota and sends low-capacity Telegram warnings
 when configured.
+
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/usage.svg" width="100%" alt="Nesti interactive" />
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/menu.svg" width="100%" alt="Nesti usage CLI showing Claude and Antigravity quota bars, remaining percentages and reset countdowns" />
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2">
+      <img src="assets/filter-models.svg" width="75%" alt="OpenRouter models" />
+    </td>
+  </tr>
+</table>
+
+---
+
+## Plugins
+
+Run `nesti /plugin` on the host: install a plugin, then enable it.
+
+- Without `--ref`, installation snapshots the current default branch; `--ref`
+  pins a tag or commit. Updates are manual: `nesti /plugin update <name> --ref <tag-or-commit>`.
+- Service plugins run code with your Docker privileges. Trust only known sources.
+
+Example, [Ponytail](https://github.com/DietrichGebert/ponytail) (fresh
+installs do not include it, and it uses its own default level until you set one):
+
+Choose **one** of these alternative installs (the last pins an explicit commit;
+you can also pass a tag):
+
+```text
+nesti /plugin install https://github.com/DietrichGebert/ponytail.git
+nesti /plugin install DietrichGebert/ponytail
+nesti /plugin install https://github.com/DietrichGebert/ponytail.git --ref 96608e078b2d5ea607c5c3b8b5a54d1c1fba6846
+```
+
+Then enable the installed snapshot:
+
+```text
+nesti /plugin enable ponytail
+```
+
+To pick `lite`, `full`, `ultra` or `off`, run `nesti /ponytail ultra` (and
+`nesti /ponytail settings` to see the current level).
 
 ---
 
@@ -359,7 +374,9 @@ Use [`.env.example`](.env.example) as the configuration reference:
 
 **Offline smoke tests** (no Docker, no network):
 ```bash
-python test_graph_smoke.py
+python tests/test_graph_smoke.py
+python tests/test_plugins.py  # host plugin CLI with local Git repos and a stubbed Docker runner
+python tests/test_update.py   # nesti update and its notice with local Git repos, a mocked API and Docker
 ```
 
 **Live integration tests** (needs Docker + network):

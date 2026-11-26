@@ -46,6 +46,12 @@ Design notes
   so a misjudged scope cannot skip a test.  node_plan sets it (issue text,
   then the planner's ``SCOPE:`` line); node_on_layer_failure widens it when
   a layer outside it fails.
+
+• ``plugin_skills`` is node_plan's snapshot of the enabled plugin skill
+  bindings, text included (graph.tools.tool_plugin_skills).  Every code
+  attempt reuses it, so updating, disabling or removing a plugin mid-run never
+  changes the standard an issue is being worked to; the next issue reads the
+  runtime again.
 """
 
 from typing import TypedDict
@@ -59,6 +65,7 @@ class IssueState(TypedDict, total=False):
 
     # ── Derived in nodes ───────────────────────────────────────────────────
     skills: list                       # Skill objects from skill_loader
+    plugin_skills: list[dict]          # enabled plugin skills at plan time: package/skill/revision/ref/arguments/phases/text
     plan: str                          # planner output
     scope: str                         # "backend" | "frontend" | "fullstack" — prompts only
     code_response: str                 # latest coder output

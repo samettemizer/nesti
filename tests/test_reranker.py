@@ -15,6 +15,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 
 import reranker
@@ -580,7 +583,7 @@ class RuntimeTests(unittest.TestCase):
              "assert not any(name in sys.modules for name in "
              "('torch', 'sentence_transformers', 'transformers', 'graph.nodes', 'prompt_builder')); "
              "assert reranker._runtime.process is None"],
-            check=True, timeout=5,
+            check=True, timeout=5, cwd=REPO,
         )
 
 

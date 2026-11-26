@@ -1,0 +1,5 @@
+# Host-only: the interactive `nesti` menu (scripts/nesti_menu.py), installed into ./.venv by install.sh.
+# Never in requirements.txt: the containers do not run the menu. Python 3.9+ (questionary 2.1.1).
+questionary==2.1.1
+prompt_toolkit==3.0.52
+wcwidth==0.2.14

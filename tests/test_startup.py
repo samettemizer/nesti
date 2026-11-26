@@ -11,6 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
 # Importing the CLI must not load operator credentials or construct the engine.
 with (
     patch("dotenv.load_dotenv"),
@@ -58,7 +61,8 @@ def _run_startup(
             raise KeyboardInterrupt
         return True
 
-    def engine() -> SimpleNamespace:
+    def engine(poll_interval: int) -> SimpleNamespace:
+        assert poll_interval == (60 if loop else 0), "loop mode passes its poll interval; a single run passes 0"
         events.append("engine")
         return SimpleNamespace(run_once=poll)
 

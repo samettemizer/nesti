@@ -138,6 +138,7 @@ class TaskEngine:
             "issue_id":       issue_id,
             "subject":        subject,
             "skills":         [],
+            "plugin_skills":  [],
             "plan":           "",
             "scope":          "fullstack",
             "code_response":  "",

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1689" height="931" viewBox="0 0 1689 931" role="img" aria-labelledby="title desc">
+<title id="title">Usage and quota</title>
+<desc id="desc">Illustrative terminal output showing OpenRouter usage and Claude and ChatGPT quotas.</desc>
+<rect width="1689" height="931" fill="#191c20"/>
+<g font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="36" fill="#e5e5e5" xml:space="preserve">
+<text x="13" y="52" fill="#ffdc00" font-size="40" font-weight="bold">Usage and quota</text>
+<text x="13" y="121">[openrouter]: API-key usage</text>
+<text x="58" y="173">All-time: 318.720915</text>
+<text x="58" y="225">Daily: 0.84  Weekly: 12.563482  Monthly: 48.720915</text>
+<text x="58" y="277">Remaining: 181.279085  Key cap: 500</text>
+<text x="58" y="349">Free model daily requests: 0 used / 50 limit; 50 remaining</text>
+<text x="13" y="418">Claude 7 Day</text>
+<rect x="13" y="433" width="603" height="47" fill="#3b3b3b"/>
+<rect x="13" y="433" width="502.5" height="47" fill="#ffda00"/>
+<text x="666" y="467" fill="#ffda00">16%</text>
+<text x="790" y="467" fill="#969696">1d10h</text>
+<text x="13" y="527">Claude 5 Hour</text>
+<rect x="13" y="542" width="603" height="47" fill="#3b3b3b"/>
+<rect x="13" y="542" width="175.875" height="47" fill="#00ed91"/>
+<text x="666" y="576" fill="#00ed91">71%</text>
+<text x="790" y="576" fill="#969696">2h38m</text>
+<text x="13" y="649">ChatGPT 7 Day</text>
+<rect x="13" y="664" width="603" height="47" fill="#3b3b3b"/>
+<rect x="13" y="664" width="427.125" height="47" fill="#ffda00"/>
+<text x="666" y="698" fill="#ffda00">29%</text>
+<text x="790" y="698" fill="#969696">2d4h</text>
+<text x="13" y="767">ChatGPT 5 Hour</text>
+<rect x="13" y="782" width="603" height="47" fill="#3b3b3b"/>
+<rect x="13" y="782" width="276.375" height="47" fill="#00ed91"/>
+<text x="666" y="816" fill="#00ed91">54%</text>
+<text x="790" y="816" fill="#969696">1h57m</text>
+</g>
+</svg>

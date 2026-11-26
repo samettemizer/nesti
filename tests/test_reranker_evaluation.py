@@ -11,6 +11,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
 from scripts import reranker_evaluation as evaluation
 from scripts import evaluate_reranker as cli
 from prompt_builder import _format_retrieved_section

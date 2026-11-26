@@ -5,10 +5,18 @@ import fcntl
 import json
 import os
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+# save_layout records forge.identity(): pin the GitLab project instead of reading the operator's environment.
+os.environ["GITLAB_URL"] = "https://gitlab.test"
+os.environ["GITLAB_PROJECT_PATH"] = "acme/shop"
+os.environ.pop("NESTI_FORGE", None)
 
 import project_boost
 import project_layout
@@ -75,6 +83,7 @@ class LayoutTests(_StateCase):
         saved = json.loads(project_layout.LAYOUT_FILE.read_text())
         self.assertEqual(saved["mode"], "separated")
         self.assertEqual(saved["resolved_by"], StubLLM.last_planner_label)
+        self.assertEqual(saved["gitlab_project"], "gitlab.test/acme/shop")
 
     def test_root_artisan_is_deterministic(self):
         _touch(self.root / "artisan")
