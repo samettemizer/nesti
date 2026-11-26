@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 ROOT = nesti_plugins.default_root()
 LAUNCHER = os.path.join(ROOT, "scripts", "nesti")
 CONTAINER = "nesti-orchestrator"
-NOT_RUNNING = "nesti-orchestrator is not running (start it with: docker compose up -d)"
+NOT_RUNNING = "nesti-orchestrator is not running; run 'nesti update' or ./install.sh"
 
 
 def _run(args: list[str], stdin_text: str | None = None) -> int:
