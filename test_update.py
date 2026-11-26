@@ -493,6 +493,31 @@ check("STUB" not in out and "docker exec -it" in out, "terminal: nested launcher
 code, out = terminal([])
 check("STUB notice" in out and "docker exec -it nesti-orchestrator nesti" in out, "terminal without arguments: notice, then the menu path")
 
+# Container start: a stopped or removed service brings the stack up with existing images; running ones are left alone.
+(fakebin / "docker").write_text(
+    '#!/bin/sh\necho "docker $*" >> "$DOCKER_LOG"\n'
+    'case "$1" in inspect) printf "%s\\n" $DOCKER_STATES; [ -z "$DOCKER_MISSING" ] ;; esac\n')
+(fakebin / "docker-compose").write_text('#!/bin/sh\necho "compose $* in $(pwd)" >> "$DOCKER_LOG"\n')
+(fakebin / "docker-compose").chmod(0o755)
+docker_log = BASE / "docker.log"
+for label, states, missing, starts in (("all running", "true true true true true", "", False),
+                                       ("one stopped", "true false true true true", "", True),
+                                       ("removed (down)", "", "1", True)):
+    docker_log.write_text("")
+    result = launcher("/provider", DOCKER_LOG=str(docker_log), DOCKER_STATES=states, DOCKER_MISSING=missing)
+    calls = docker_log.read_text()
+    started = "compose up -d --no-build in %s" % launch_root.resolve() in calls
+    check(started == starts and "build" not in calls.replace("--no-build", "")
+          and calls.rstrip().endswith("docker exec -i nesti-orchestrator nesti /provider"),
+          "%s: containers %s, never built, then the command" % (label, "started" if starts else "left alone"))
+docker_log.write_text("")
+result = launcher("mcp", DOCKER_LOG=str(docker_log), DOCKER_STATES="", DOCKER_MISSING="1")
+check("compose up -d --no-build" in docker_log.read_text() and result.stdout == "",
+      "mcp: containers started with stdout left to the protocol")
+docker_log.write_text("")
+launcher("update", "--check", DOCKER_LOG=str(docker_log), DOCKER_STATES="", DOCKER_MISSING="1")
+check(docker_log.read_text() == "", "update never touches the containers itself")
+
 print("\n%s" % ("All checks passed." if not _failures else "%d check(s) FAILED." % _failures))
 _TMP.cleanup()
 sys.exit(1 if _failures else 0)

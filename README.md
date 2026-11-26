@@ -213,7 +213,11 @@ containers, waits for readiness, offers consumer provider logins, installs the
 ```bash
 ./install.sh            # interactive
 ```
-`--help` lists the options.
+`--help` lists the options. Afterwards every `nesti` command (except `nesti
+update`, which restarts them itself) first starts the containers when one is
+stopped or removed (`docker-compose stop` / `down`), with the images already
+built: it never builds, so missing images still need `nesti update` or
+`./install.sh`.
 
 ### GitHub
 
