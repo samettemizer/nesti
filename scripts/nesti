@@ -1,14 +1,62 @@
 #!/bin/sh
 # Host-side `nesti`: no arguments on a TTY open scripts/nesti_menu.py; /arch and /stats open a host browser after the container CLI.
 # /plugin and /<installed plugin> [settings|<value>|<KEY> <value>] run on the host (scripts/nesti_plugins.py), using host Git credentials and Docker.
+# `update [--check]` runs on the host (scripts/nesti_update.py); other commands on a terminal first show its cached release notice.
+# Every other command first starts the long-running containers when one is stopped or removed (never builds).
 set -e
+here=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)
+# Host Python 3.6+ in install.sh's order: active venv, ./.venv, python3, python, py -3; sets py (and pyflag for py -3).
+py= pyflag=
+find_python() {
+    [ -z "$py" ] || return 0
+    for candidate in "${VIRTUAL_ENV:+$VIRTUAL_ENV/Scripts/python.exe}" "${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}" \
+        "$here/.venv/Scripts/python.exe" "$here/.venv/bin/python" python3 python; do
+        if [ -n "$candidate" ] && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 6))' </dev/null >/dev/null 2>&1; then
+            py=$candidate
+            return 0
+        fi
+    done
+    if py -3 -c 'import sys; sys.exit(sys.version_info < (3, 6))' </dev/null >/dev/null 2>&1; then
+        py=py pyflag=-3
+        return 0
+    fi
+    return 1
+}
+# Starts docker-compose.yml's long-running services when one is stopped or missing, with the images already built:
+# building stays with install.sh and `nesti update`; running services are never recreated, even after a config change.
+# Output goes to stderr (mcp's stdout is the protocol); failure only warns.
+ensure_containers() {
+    command -v docker >/dev/null 2>&1 || return 0
+    states=$(docker inspect -f '{{.State.Running}}' nesti-orchestrator nesti-stats nesti-redis nesti-mcp nesti-qdrant 2>/dev/null) || states=
+    case "$states" in ''|*false*) ;; *) return 0 ;; esac
+    if command -v docker-compose >/dev/null 2>&1; then compose=docker-compose; else compose="docker compose"; fi
+    echo "nesti: starting the Nesti containers ..." >&2
+    docker network inspect nesti-plugins >/dev/null 2>&1 || docker network create --internal nesti-plugins >/dev/null 2>&1 || true
+    if ! (cd "$here" && $compose up -d --no-build --no-recreate) >&2; then
+        echo "nesti: could not start the containers; if their images are missing, run 'nesti update' or ./install.sh." >&2
+    fi
+}
+if [ "${1-}" = update ]; then
+    find_python || { echo "nesti: update needs Python 3.6 or newer on the host (tried \$VIRTUAL_ENV, .venv, python3, python, py -3)." >&2; exit 1; }
+    exec "$py" ${pyflag:+"$pyflag"} "$here/scripts/nesti_update.py" "$@"
+fi
 if [ "${1-}" = mcp ]; then
+    ensure_containers
     # MCP acts on the GitLab project or GitHub repository of the client's checkout: the cwd, or the directory given.
     NESTI_CLIENT_REMOTE=$(git -C "${2:-.}" remote get-url origin 2>/dev/null || true)
     export NESTI_CLIENT_REMOTE
     exec docker exec -i -e NESTI_CLIENT_REMOTE nesti-mcp python -m mcp_server.server
 fi
-here=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)
+# Release notice: stderr on a terminal only (never mcp or update, both handled above); NESTI_NO_UPDATE_CHECK=1 opts out.
+# NESTI_UPDATE_NOTICE_SHOWN keeps nested launcher runs (every menu action) from repeating it.
+case "${NESTI_NO_UPDATE_CHECK-}${NESTI_UPDATE_NOTICE_SHOWN-}" in
+  ''|0) if [ -t 2 ] && find_python; then
+          "$py" ${pyflag:+"$pyflag"} "$here/scripts/nesti_update.py" notice "${1-}" </dev/null || true
+        fi ;;
+esac
+NESTI_UPDATE_NOTICE_SHOWN=1
+export NESTI_UPDATE_NOTICE_SHOWN
+ensure_containers
 host=
 case "${1-}" in
   /plugin) shift; host=1 ;;
@@ -26,15 +74,8 @@ case "${1-}" in
     esac ;;
 esac
 if [ -n "$host" ]; then
-    # Same host Python order as install.sh: active venv, ./.venv, python3, python, py -3; 3.6 or newer.
-    for py in "${VIRTUAL_ENV:+$VIRTUAL_ENV/Scripts/python.exe}" "${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}" \
-        "$here/.venv/Scripts/python.exe" "$here/.venv/bin/python" python3 python; do
-        if [ -n "$py" ] && "$py" -c 'import sys; sys.exit(sys.version_info < (3, 6))' </dev/null >/dev/null 2>&1; then
-            exec "$py" "$here/scripts/nesti_plugins.py" "$@"
-        fi
-    done
-    if py -3 -c 'import sys; sys.exit(sys.version_info < (3, 6))' </dev/null >/dev/null 2>&1; then
-        exec py -3 "$here/scripts/nesti_plugins.py" "$@"
+    if find_python; then
+        exec "$py" ${pyflag:+"$pyflag"} "$here/scripts/nesti_plugins.py" "$@"
     fi
     echo "nesti: /plugin needs Python 3.6 or newer on the host (tried \$VIRTUAL_ENV, .venv, python3, python, py -3)." >&2
     exit 1

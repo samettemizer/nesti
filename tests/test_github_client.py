@@ -5,7 +5,7 @@ and a fake HTTP session (PR open, 422 "already exists", 65,536 body limit,
 signed pull_request plugin event).
 No network.
 
-Run:  .venv/bin/python test_github_client.py
+Run:  .venv/bin/python tests/test_github_client.py
 """
 
 import base64
@@ -18,6 +18,9 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 import git
 import requests

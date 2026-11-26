@@ -213,7 +213,6 @@ containers, waits for readiness, offers consumer provider logins, installs the
 ```bash
 ./install.sh            # interactive
 ```
-`--help` lists the options.
 
 ### GitHub
 
@@ -258,6 +257,20 @@ Optional preflight (creates and closes a probe issue on the forge):
 docker exec nesti-orchestrator python scripts/preflight.py
 ```
 
+---
+
+## Updating
+
+```bash
+nesti update --check   # installed vs latest release; exit 0 up to date, 3 update available, 1 error
+nesti update           # fast-forward to the latest release, rebuild, restart, refresh .venv
+```
+`nesti update` refuses, changing nothing, when tracked files have
+uncommitted changes, HEAD is detached, or your branch has commits that are not
+in the release. `.env`, `.private/`, `state/` (apart from its update-check
+cache), `logs/` and untracked files are never touched. On a terminal, `nesti`
+shows a notice when a newer release is out (checked at most once a day, in the
+background); set `NESTI_NO_UPDATE_CHECK=1` to turn it off.
 ---
 
 ## MCP Server
@@ -403,8 +416,9 @@ Use [`.env.example`](.env.example) as the configuration reference:
 
 **Offline smoke tests** (no Docker, no network):
 ```bash
-python test_graph_smoke.py
-python test_plugins.py        # host plugin CLI with local Git repos and a stubbed Docker runner
+python tests/test_graph_smoke.py
+python tests/test_plugins.py  # host plugin CLI with local Git repos and a stubbed Docker runner
+python tests/test_update.py   # nesti update and its notice with local Git repos, a mocked API and Docker
 ```
 
 **Live integration tests** (needs Docker + network):

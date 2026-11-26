@@ -4,7 +4,7 @@ clients (``GitLabIssuesClient`` and ``GitHubIssuesClient``) over an in-memory
 fake HTTP session, plus the GitHub-only rules (label API, trust, body limit,
 rate limits). No network.
 
-Run:  .venv/bin/python test_issue_clients.py
+Run:  .venv/bin/python tests/test_issue_clients.py
 """
 
 import contextlib
@@ -18,6 +18,9 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 import requests
 
@@ -643,7 +646,7 @@ def client_binding() -> None:
 def preflight_checks() -> None:
     print("\n── preflight: forge checks ──")
     spec = importlib.util.spec_from_file_location(
-        "preflight", Path(__file__).resolve().parent / "scripts" / "preflight.py")
+        "preflight", REPO / "scripts" / "preflight.py")
     preflight = importlib.util.module_from_spec(spec)
     with patch("dotenv.load_dotenv"):  # never read the developer's real .env
         spec.loader.exec_module(preflight)
