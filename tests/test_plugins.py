@@ -1116,6 +1116,45 @@ for status in (1, 130):
               "failed/interrupted model setter leaves filtering and the next selection usable")
         check("success" not in out.getvalue().lower(),
               "menu leaves setter success reporting to the existing CLI")
+
+
+class TtyOut(io.StringIO):
+    def isatty(self):
+        return True
+
+
+def browse(env_bytes, replies, stdout=None):
+    """Run _models_menu against a temp ROOT; returns (choice lists, printed text)."""
+    with tempfile.TemporaryDirectory() as root:
+        if env_bytes is not None:
+            Path(root, ".env").write_bytes(env_bytes)
+        menu = MenuUI()
+        with mock.patch.object(nm, "ROOT", root), mock.patch.object(nm, "_metadata", return_value=model_rows), \
+                mock.patch.object(nm, "_ask", side_effect=replies), mock.patch.object(nm, "_run"), \
+                mock.patch.dict(os.environ), contextlib.redirect_stdout(stdout or io.StringIO()) as out:
+            os.environ.pop("NO_COLOR", None)
+            nm._models_menu(menu, "openrouter")
+        return [p[2]["choices"] for p in menu.prompts if p[0] == "select" and p[1] == "openrouter models"], out.getvalue()
+
+
+lists, _ = browse(b"# c\nOPENROUTER_MODEL='vendor/paid'  # pick\n", ["filter", "/", "back"])
+check(lists[1][1]["title"].startswith("[FREE] nvidia/free") and "[SELECTED]" not in lists[1][1]["title"]
+      and lists[1][2]["title"].startswith("[SELECTED] vendor/paid"),
+      "only the model whose id equals OPENROUTER_MODEL in .env gets the [SELECTED] prefix")
+lists, printed = browse(b"OPENROUTER_MODEL=nvidia/free\n", ["filter", "/", model_rows[0], None])
+check(lists[1][1]["title"].startswith("[SELECTED] [FREE] nvidia/free")
+      and "[SELECTED]" not in lists[1][2]["title"] and printed.startswith("[SELECTED] [FREE] nvidia/free"),
+      "a free selected model shows [SELECTED] [FREE] in the list and the details print")
+lists, _ = browse(b"OPENROUTER_MODEL=nvidia/free\n", ["filter", "/", "back"], TtyOut())
+check(lists[1][1]["title"][:2] == [("fg:#ff8700", "[SELECTED] "), ("bold fg:ansigreen", "[FREE] ")]
+      and lists[1][1]["title"][2][0] == "" and lists[1][2]["title"].startswith("vendor/paid"),
+      "on a TTY [SELECTED] is an orange (not bold) fragment in front of [FREE]")
+from prompt_toolkit.styles import Style  # noqa: E402
+check(Style.from_dict({"x": "fg:#ff8700"}) is not None, "the orange style string is valid for prompt_toolkit")
+for env_bytes in (None, b"OTHER=1\n", b"OPENROUTER_MODEL=\n", b"\xff\xfe\x00bad"):
+    lists, _ = browse(env_bytes, ["filter", "/", "back"])
+    check(not any("[SELECTED]" in str(c["title"]) for c in lists[1]),
+          "a missing, empty or unreadable .env marks nothing and never crashes")
 providers = json.loads(provider_output) + [
     {"name": "copilot", "kind": "consumer", "authenticated": False, "coming_soon": True},
 ]

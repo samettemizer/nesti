@@ -28,9 +28,9 @@ flowchart LR
     D -->|Retry| C
 ```
 
-Provider order: consumer subscriptions → optional local Ollama →
-OpenRouter → DeepSeek → Anthropic API. Unavailable providers are skipped;
-paid APIs require explicit configuration. See [provider setup](#platform-gateway-apis).
+Provider order: Consumer Subscriptions → OpenRouter (or other platform gateway APIs).
+
+Paid APIs require explicit configuration. See [provider setup](#platform-gateway-apis).
 
 Note: The local LLM tiers are disabled by default because they require dedicated strong GPU/hardware.
 
@@ -233,30 +233,6 @@ Set `NESTI_FORGE=github` (install.sh asks) and configure the
   closes when the Pull Request opens.
 - Rollback: set `NESTI_FORGE=gitlab` and recreate the containers.
 
-### Manual Installation
-
-Configure `.env`, then start:
-```bash
-cp .env.example .env
-# Set forge access (GitLab, or NESTI_FORGE=github) and an API key or consumer subscription.
-# The orchestrator joins the plugin event network and mounts the plugin dirs; install.sh creates them.
-docker network create --internal nesti-plugins
-mkdir -p .private/plugins/packages .private/plugins/secrets && chmod 700 .private/plugins/secrets
-docker-compose up -d --build
-```
-Sandbox images are built and skills indexed automatically before polling.
-
-Optional corpus refresh (container-local; indexed on the next restart):
-```bash
-docker exec nesti-orchestrator python scripts/fetch_skills.py
-```
-A rebuild uses the repository's corpus, not the container-local refresh.
-
-Optional preflight (creates and closes a probe issue on the forge):
-```bash
-docker exec nesti-orchestrator python scripts/preflight.py
-```
-
 ---
 
 ## Updating
@@ -290,30 +266,6 @@ each connection acts on the GitLab project or GitHub repository of that checkout
 
 ---
 
-## Platform Gateway APIs
-Run the CLI inside the nesti-orchestrator container:
-
-```bash
-nesti /provider
-nesti /provider login claude
-nesti /usage
-```
-
-Available commands (prefix each with `nesti` inside the container):
-
-| Command | Purpose |
-|---------|---------|
-| `/provider` | List consumer and platform providers |
-| `/provider login <name>` / `/provider logout <name>` | Add or remove a consumer session |
-| `/provider models <name> [search]` | List text models and prices per million tokens |
-| `/provider model <name> [model-id\|--reset]` | View, persist or reset model selection (OpenRouter) |
-| `/usage` | Show authenticated consumer usage and quota |
-| `/stats` | Usage statistics page at `http://127.0.0.1:8790/` (`nesti-stats` service): requests, tokens, API-equivalent cost and errors per project, model and provider. A refresh shows current data; the selected range and project are kept |
-| `/arch [--json]` | Static architecture page `state/architecture.html`; `--json` prints the layout record instead |
-
-OpenRouter needs an explicit model via `OPENROUTER_MODEL` or
-`nesti /provider model openrouter <model-id>`.
-
 ## Statistics
 
 `nesti /stats` prints the local page URL; the `nesti-stats` service serves it.
@@ -346,21 +298,27 @@ subscription bills, and an unpriced model is not proof of zero cost.*
 
 ## Consumer Subscriptions & Quota
 
-Supported login names: `claude`, `antigravity`, `chatgpt-plus`, `copilot`.
-Consumer login/logout takes effect on the next inference call without restart.
-Copilot's current PAT login supports quota reporting, not inference.
+Supported providers: `openrouter`, `claude`, `antigravity`, `chatgpt-plus`
 
-`/usage` shows a used-capacity bar, remaining percentage and reset countdown.
-
-![Nesti usage CLI showing Claude and Antigravity quota bars, remaining percentages and reset countdowns](assets/usage.png)
-
-*Example output; quota values and reset times vary by account and usage.*
-
-Missing quota is unknown, not estimated; Copilot reports usage without a
-remaining figure. ChatGPT Plus uses the Codex backend; its quota endpoint is
-internal and may change. Credentials are renewed and persisted automatically.
 On test failures, Nesti checks quota and sends low-capacity Telegram warnings
 when configured.
+
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/usage.svg" width="100%" alt="Nesti interactive" />
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/menu.svg" width="100%" alt="Nesti usage CLI showing Claude and Antigravity quota bars, remaining percentages and reset countdowns" />
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2">
+      <img src="assets/filter-models.svg" width="75%" alt="OpenRouter models" />
+    </td>
+  </tr>
+</table>
 
 ---
 

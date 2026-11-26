@@ -69,19 +69,43 @@ def _model_title(model: dict) -> str:
             f"in ${model['input_price']} / out ${model['output_price']} per 1M")
 
 
+def _configured_model(name: str) -> str | None:
+    """The OPENROUTER_MODEL id from the checkout's .env; None when absent or unreadable."""
+    if name != "openrouter":
+        return None
+    try:
+        return nesti_plugins._read_env(os.path.join(ROOT, ".env")).get("OPENROUTER_MODEL") or None
+    except nesti_plugins.PluginError:
+        return None
+
+
+def _badges(model: dict, configured: str | None) -> list[tuple[str, str]]:
+    badges = []
+    if configured is not None and model["id"] == configured:
+        badges.append(("fg:#ff8700", "[SELECTED] "))
+    if model["free"]:
+        badges.append(("bold fg:ansigreen", "[FREE] "))
+    return badges
+
+
+def _badged(model: dict, configured: str | None, text: str) -> str | list[tuple[str, str]]:
+    badges = _badges(model, configured)
+    if badges and sys.stdout.isatty() and "NO_COLOR" not in os.environ:
+        return [*badges, ("", text)]
+    return "".join(label for _, label in badges) + text
+
+
 def _models_menu(q, name: str) -> None:
     models = _metadata(["/provider", "models", name])
     if models is None:
         return
+    configured = _configured_model(name)
     query = ""
     while True:
         matches = [m for m in models if query.casefold() in f"{m['id']} {m['name']}".casefold()]
         choices = [q.Choice("Filter models by ID/name" + (f" ({query})" if query else ""), value="filter")]
         for model in matches:
-            title = _model_title(model)
-            if model["free"]:
-                title = ([("bold fg:ansigreen", "[FREE] "), ("", title)]
-                         if sys.stdout.isatty() and "NO_COLOR" not in os.environ else "[FREE] " + title)
+            title = _badged(model, configured, _model_title(model))
             choices.append(q.Choice(title, value=model))
         if not matches:
             choices.append(q.Choice("No matching text models.", disabled="Change the filter"))
@@ -94,7 +118,7 @@ def _models_menu(q, name: str) -> None:
             if value is not None:
                 query = value.strip()
         else:
-            print(("[FREE] " if selected["free"] else "") + _model_title(selected))
+            print("".join(label for _, label in _badges(selected, configured)) + _model_title(selected))
             print("Catalog prices are indicative; routed provider pricing may differ.")
             print("Selecting a model affects subsequent OpenRouter calls; API enable flags and consumer priority stay unchanged.")
             action = _ask(q.select("Model details", choices=["Use this model for Nesti", "Back"]))
@@ -196,7 +220,7 @@ def main() -> int:
                 choices.extend(q.Choice(title, value=action, disabled=False if running else NOT_RUNNING)
                                for title, action in actions)
             choices.append(q.Choice("Exit", value="exit"))
-            selected = _ask(q.select("What do you want to do?", choices=choices))
+            selected = _ask(q.select("Nesti menu", choices=choices))
             if selected is None or selected == "exit":
                 return 0
             if isinstance(selected, dict):

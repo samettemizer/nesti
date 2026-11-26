@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1038" height="694" viewBox="0 0 1038 694" role="img" aria-label="Nesti OpenRouter model catalog">
+  <rect width="1038" height="694" fill="#1c1e20"/>
+  <g font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="13" fill="#b8daee" xml:space="preserve">
+    <text x="8" y="15" textLength="208" lengthAdjust="spacingAndGlyphs">» Filter models by ID/name</text>
+    <text x="24" y="31" textLength="928" lengthAdjust="spacingAndGlyphs">inclusionai/lingsante-3.1-air-vl — inclusionAI: LingSante 3.1 Air VL | context 131,072 | in $0.06 / out $0.18 per 1M</text>
+    <text x="24" y="47" textLength="848" lengthAdjust="spacingAndGlyphs">upstage/solar-mini-4-5 — Upstage: Solar Mini 4.5 (Preview) | context 524,288 | in $0.01 / out $0.04 per 1M</text>
+    <text x="24" y="63" textLength="912" lengthAdjust="spacingAndGlyphs">upstage/solar-pro-4-contributor — Upstage: Solar Pro 4 Contributor | context 524,288 | in $0.09 / out $0.36 per 1M</text>
+    <text x="24" y="79" textLength="832" lengthAdjust="spacingAndGlyphs">xiaomi/mimo-v2.6-flash-mopd — Xiaomi: MiMo-V2.6-Flash-MOPD | context 1,048,576 | in $0.5 / out $1 per 1M</text>
+    <text x="24" y="95" textLength="936" lengthAdjust="spacingAndGlyphs">thinkingmachines/inkling-2-mini — Thinking Machines: Inkling 2 Mini | context 1,048,576 | in $0.075 / out $0.3 per 1M</text>
+    <text x="24" y="111" textLength="776" lengthAdjust="spacingAndGlyphs">radixark/daisyrose-27b — RadixArk: DaisyRose 27B | context 262,144 | in $0.15 / out $1.875 per 1M</text>
+    <text x="24" y="127" textLength="800" lengthAdjust="spacingAndGlyphs">mistralai/pixtral-large-2502 — Mistral: Pixtral Large 2502 | context 128,000 | in $2 / out $6 per 1M</text>
+    <text x="24" y="143" textLength="712" lengthAdjust="spacingAndGlyphs">google/gemini-4-neon — Google: Gemini 4 Neon | context 1,048,576 | in $3 / out $15 per 1M</text>
+    <text x="24" y="159" textLength="848" lengthAdjust="spacingAndGlyphs">google/gemini-4-neon:batch — Google: Gemini 4 Neon (batch) | context 1,048,576 | in $1.5 / out $7.5 per 1M</text>
+    <text x="24" y="175" textLength="776" lengthAdjust="spacingAndGlyphs">openai/gpt-6.2-astra-pro — OpenAI: GPT-6.2 Astra Pro | context 1,050,000 | in $8 / out $40 per 1M</text>
+    <text x="24" y="191" textLength="888" lengthAdjust="spacingAndGlyphs">openai/gpt-6.2-astra-pro:batch — OpenAI: GPT-6.2 Astra Pro (batch) | context 1,050,000 | in $4 / out $20 per 1M</text>
+    <text x="24" y="207" textLength="712" lengthAdjust="spacingAndGlyphs">openai/gpt-6.2-astra — OpenAI: GPT-6.2 Astra | context 1,050,000 | in $8 / out $40 per 1M</text>
+    <text x="24" y="223" textLength="824" lengthAdjust="spacingAndGlyphs">openai/gpt-6.2-astra:batch — OpenAI: GPT-6.2 Astra (batch) | context 1,050,000 | in $4 / out $20 per 1M</text>
+    <text x="24" y="239" textLength="744" lengthAdjust="spacingAndGlyphs">openai/gpt-6.2-sol-pro — OpenAI: GPT-6.2 Sol Pro | context 1,050,000 | in $2 / out $10 per 1M</text>
+    <text x="24" y="255" textLength="848" lengthAdjust="spacingAndGlyphs">openai/gpt-6.2-sol-pro:batch — OpenAI: GPT-6.2 Sol Pro (batch) | context 1,050,000 | in $1 / out $5 per 1M</text>
+    <text x="24" y="271" textLength="680" lengthAdjust="spacingAndGlyphs">openai/gpt-6.2-sol — OpenAI: GPT-6.2 Sol | context 1,050,000 | in $2 / out $10 per 1M</text>
+    <text x="24" y="287" textLength="784" lengthAdjust="spacingAndGlyphs">openai/gpt-6.2-sol:batch — OpenAI: GPT-6.2 Sol (batch) | context 1,050,000 | in $1 / out $5 per 1M</text>
+    <text x="24" y="303" textLength="728" lengthAdjust="spacingAndGlyphs">tencent/hy4-flash — Tencent: Hy4 flash | context 1,048,576 | in $0.035 / out $0.1405 per 1M</text>
+    <text x="24" y="319" textLength="672" lengthAdjust="spacingAndGlyphs">qwen/qwen4-max — Qwen: Qwen4 Max | context 1,000,000 | in $1.425 / out $4.275 per 1M</text>
+    <text x="24" y="335" textLength="48" lengthAdjust="spacingAndGlyphs" fill="#a7d32c" font-weight="bold">[FREE]</text>
+    <text x="80" y="335" textLength="896" lengthAdjust="spacingAndGlyphs">inclusionai/ling-3.2-flash:free — inclusionAI: Ling 3.2 Flash (free) | context 1,048,576 | in $0 / out $0 per 1M</text>
+    <text x="24" y="351" textLength="800" lengthAdjust="spacingAndGlyphs">google/gemini-4-hydrogen — Google: Gemini 4 Hydrogen | context 1,048,576 | in $1.5 / out $7.5 per 1M</text>
+    <text x="24" y="367" textLength="928" lengthAdjust="spacingAndGlyphs">google/gemini-4-hydrogen:batch — Google: Gemini 4 Hydrogen (batch) | context 1,048,576 | in $0.75 / out $3.75 per 1M</text>
+    <text x="24" y="383" textLength="48" lengthAdjust="spacingAndGlyphs" fill="#a7d32c" font-weight="bold">[FREE]</text>
+    <text x="80" y="383" textLength="944" lengthAdjust="spacingAndGlyphs">baidu/ernie-5.5-flash-preview:free — Baidu: ERNIE-5.5-Flash-Preview (free) | context 1,024,000 | in $0 / out $0 per 1M</text>
+    <text x="24" y="399" textLength="856" lengthAdjust="spacingAndGlyphs">baidu/ernie-light-dt-1.0-intl — Baidu: ERNIE-Light-DT-1.0 | context 1,024,000 | in $1.13 / out $3.94 per 1M</text>
+    <text x="24" y="415" textLength="744" lengthAdjust="spacingAndGlyphs">google/gemini-4-carbon — Google: Gemini 4 Carbon | context 1,048,576 | in $2 / out $10 per 1M</text>
+    <text x="24" y="431" textLength="848" lengthAdjust="spacingAndGlyphs">google/gemini-4-carbon:batch — Google: Gemini 4 Carbon (batch) | context 1,048,576 | in $1 / out $5 per 1M</text>
+    <text x="24" y="447" textLength="664" lengthAdjust="spacingAndGlyphs">nex-agi/nex-n2.6 — Nex AGI: Nex-N2.6 | context 262,144 | in $0.12 / out $0.4 per 1M</text>
+    <text x="24" y="463" textLength="920" lengthAdjust="spacingAndGlyphs">thinkingmachines/inkling-2-small — Thinking Machines: Inkling 2 Small | context 1,048,576 | in $0.3 / out $1 per 1M</text>
+    <text x="24" y="479" textLength="808" lengthAdjust="spacingAndGlyphs">anthropic/claude-fable-5.2 — Anthropic: Claude Fable 5.2 | context 1,000,000 | in $8 / out $40 per 1M</text>
+    <text x="24" y="495" textLength="920" lengthAdjust="spacingAndGlyphs">anthropic/claude-fable-5.2:batch — Anthropic: Claude Fable 5.2 (batch) | context 1,000,000 | in $4 / out $20 per 1M</text>
+    <text x="24" y="511" textLength="656" lengthAdjust="spacingAndGlyphs">meta/muse-ember — Meta: Muse Ember | context 1,048,576 | in $0.1 / out $0.5 per 1M</text>
+    <text x="24" y="527" textLength="688" lengthAdjust="spacingAndGlyphs">liquid/lfm-3-1.7b — LiquidAI: LFM3-1.7B | context 262,144 | in $0.08 / out $0.2 per 1M</text>
+    <text x="24" y="543" textLength="48" lengthAdjust="spacingAndGlyphs" fill="#a7d32c" font-weight="bold">[FREE]</text>
+    <text x="80" y="543" textLength="744" lengthAdjust="spacingAndGlyphs">liquid/lfm-3-1.7b:free — LiquidAI: LFM3-1.7B (free) | context 262,144 | in $0 / out $0 per 1M</text>
+    <text x="24" y="559" textLength="832" lengthAdjust="spacingAndGlyphs">google/gemini-omni-1.2-flash — Google: Gemini Omni 1.2 Flash | context 131,072 | in $1.5 / out $9 per 1M</text>
+    <text x="24" y="575" textLength="680" lengthAdjust="spacingAndGlyphs">kt/midm-k-3.0-pro — KT: Mi:dm K 3.0 Pro | context 261,795 | in $0.2 / out $0.8 per 1M</text>
+    <text x="24" y="591" textLength="832" lengthAdjust="spacingAndGlyphs">google/gemini-omni-1.1-flash — Google: Gemini Omni 1.1 Flash | context 131,072 | in $1.5 / out $9 per 1M</text>
+    <text x="24" y="607" textLength="880" lengthAdjust="spacingAndGlyphs">ricursiveai/ripple-65b-preview — Ricursive: Ripple 65B Preview | context 1,048,576 | in $0.1 / out $0.3 per 1M</text>
+    <text x="24" y="623" textLength="632" lengthAdjust="spacingAndGlyphs">tencent/hy4 — Tencent: Hy4 | context 1,048,576 | in $0.417 / out $1.2505 per 1M</text>
+    <text x="24" y="639" textLength="816" lengthAdjust="spacingAndGlyphs">motif-technologies/motif-3 — Motif Technologies: Motif 3 | context 262,144 | in $0.3 / out $1.2 per 1M</text>
+    <text x="24" y="655" textLength="832" lengthAdjust="spacingAndGlyphs">z-ai/glm-5.3-flashx-legal — Z.ai: GLM 5.3 FlashX Legal | context 1,048,576 | in $0.37 / out $1.25 per 1M</text>
+    <text x="24" y="671" textLength="776" lengthAdjust="spacingAndGlyphs">particle-ai/particle-1 — Particle AI: Particle-1 | context 1,048,576 | in $0.07 / out $0.5 per 1M</text>
+    <text x="24" y="687" textLength="48" lengthAdjust="spacingAndGlyphs" fill="#a7d32c" font-weight="bold">[FREE]</text>
+    <text x="80" y="687" textLength="832" lengthAdjust="spacingAndGlyphs">particle-ai/particle-1:free — Particle AI: Particle-1 (free) | context 1,048,576 | in $0 / out $0 per 1M</text>
+  </g>
+</svg>

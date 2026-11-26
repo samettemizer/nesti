@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="722" height="361" viewBox="0 0 722 361" role="img" aria-label="Nesti menu terminal screenshot">
+  <rect width="722" height="361" fill="#1c1e20"/>
+  <g font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="13" fill="#b8daee" xml:space="preserve">
+    <text x="-2" y="17" fill="#729ec0">?</text>
+    <text x="14" y="17" font-weight="bold">Nesti menu</text>
+    <text x="102" y="17">(Use arrow keys)</text>
+    <text x="6" y="33" textLength="88" lengthAdjust="spacingAndGlyphs">— Plugins —</text>
+    <text x="6" y="49" textLength="704" lengthAdjust="spacingAndGlyphs">ponytail (enabled)  args = full (plugin default: full) (choices: lite, full, ultra, off)</text>
+    <text x="6" y="65" textLength="168" lengthAdjust="spacingAndGlyphs">pr-reviewer (enabled)</text>
+    <text x="6" y="81" textLength="104" lengthAdjust="spacingAndGlyphs">— Providers —</text>
+    <text x="6" y="97" textLength="120" lengthAdjust="spacingAndGlyphs">Provider status</text>
+    <text x="6" y="113" textLength="160" lengthAdjust="spacingAndGlyphs">Log in to a provider</text>
+    <text x="6" y="129" textLength="168" lengthAdjust="spacingAndGlyphs">Log out of a provider</text>
+    <text x="6" y="145" textLength="120" lengthAdjust="spacingAndGlyphs">Usage and quota</text>
+    <text x="6" y="161" textLength="88" lengthAdjust="spacingAndGlyphs">— Project —</text>
+    <text x="6" y="177" textLength="120" lengthAdjust="spacingAndGlyphs">Statistics page</text>
+    <text x="6" y="193" textLength="136" lengthAdjust="spacingAndGlyphs">Architecture page</text>
+    <text x="6" y="209" textLength="392" lengthAdjust="spacingAndGlyphs">Rebuild conventions (Laravel Boost; calls an LLM)</text>
+    <text x="6" y="225" textLength="32" lengthAdjust="spacingAndGlyphs">Exit</text>
+  </g>
+</svg>
