@@ -61,7 +61,8 @@ def _run_startup(
             raise KeyboardInterrupt
         return True
 
-    def engine() -> SimpleNamespace:
+    def engine(poll_interval: int) -> SimpleNamespace:
+        assert poll_interval == (60 if loop else 0), "loop mode passes its poll interval; a single run passes 0"
         events.append("engine")
         return SimpleNamespace(run_once=poll)
 
