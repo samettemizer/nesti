@@ -4,8 +4,13 @@ import copy
 import io
 import json
 import os
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 import httpx
 import requests

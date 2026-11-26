@@ -6,7 +6,7 @@ Compose/prepare/probe calls go to a recording fake runner. Also the real
 launcher routing (fake `docker` on PATH) and the container CLI's /plugin
 notice. No network, SSH keys or tokens.
 
-Run:  .venv/bin/python test_plugins.py
+Run:  .venv/bin/python tests/test_plugins.py
 """
 
 import ast
@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from unittest import mock
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 
 import nesti_plugins as np  # noqa: E402

@@ -5,7 +5,7 @@ the release API is mocked, Docker and pip calls go to a recording fake runner.
 Also the notice cache and the real launcher routing (fake `docker`, stub
 nesti_update.py, a PTY for the terminal checks). No network, Docker or tokens.
 
-Run:  .venv/bin/python test_update.py
+Run:  .venv/bin/python tests/test_update.py
 """
 
 import ast
@@ -24,7 +24,7 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 
 import nesti_update as nu  # noqa: E402

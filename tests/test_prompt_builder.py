@@ -2,8 +2,13 @@
 from copy import deepcopy
 from functools import partial
 import os
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 import prompt_builder as prompts
 from skill_loader import Skill

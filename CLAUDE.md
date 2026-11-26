@@ -74,7 +74,7 @@ scripts/                     oauth.py (`nesti` CLI), nesti (host launcher), fetc
                              GitHub Release tag, then rebuild/restart/.venv; launcher notice cached in state/update-check.json
 skills/, templates/          vendored doc corpus (primevue/laravel/practices),
                              bootstrap templates (laravel/, spa/), boost/ SPA discovery skill
-test_graph_smoke.py          offline regression net (.venv/bin/python test_graph_smoke.py)
+tests/test_graph_smoke.py    offline regression net (.venv/bin/python tests/test_graph_smoke.py)
 test_live_laravel.py         opt-in real-container proof (Docker + network)
 ```
 

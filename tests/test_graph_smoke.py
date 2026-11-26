@@ -14,7 +14,7 @@ against each scenario's file tree.
 in ``skills/``; only the *node-level* selection tool is faked, so prompt
 building stays offline.
 
-Run:  python test_graph_smoke.py
+Run:  python tests/test_graph_smoke.py
 """
 
 import json
@@ -22,8 +22,13 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
+from pathlib import Path
 from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 # ── Environment before any project import ────────────────────────────────────
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
@@ -612,8 +617,7 @@ finally:
 
 # ═════ Scenario 11c: skill_catalog against the real vendored corpus ═════
 print("\n── Scenario 11c: skill_catalog (real registry, offline) ──")
-_registry_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "skills", "registry.json")
+_registry_path = os.path.join(str(REPO), "skills", "registry.json")
 if not os.path.isfile(_registry_path):
     print("  ⚠ SKIPPED (corpus not generated – run scripts/fetch_skills.py)")
 else:
@@ -2522,7 +2526,7 @@ with tempfile.TemporaryDirectory(prefix="nesti-sqlite-") as root:
         check(ok and not events[:-1] and len(runs) == 1 and runs[0]["command"] == dr._TEST_COMMAND
               and runs[0]["environment"] is None and runs[0]["network"] is None,
               "SQLite project starts no sidecar and keeps command/env")
-_cmd = next(line for line in Path(__file__).resolve().with_name("Dockerfile.sandbox").read_text().splitlines()
+_cmd = next(line for line in (REPO / "Dockerfile.sandbox").read_text().splitlines()
             if line.startswith("CMD "))
 check(json.loads(_cmd[4:]) == dr._TEST_COMMAND, "Dockerfile.sandbox CMD is byte-identical to _TEST_COMMAND")
 
@@ -4028,7 +4032,7 @@ token_config = subprocess.run(
     [sys.executable, "-c",
      "import json, llm_client; print(json.dumps(llm_client._DEFAULT_MAX_TOKENS))"],
     env={**os.environ, "DEFAULT_MAX_TOKENS": "16000"},
-    capture_output=True, text=True, check=True,
+    capture_output=True, text=True, check=True, cwd=REPO,
 )
 check(json.loads(token_config.stdout) == 16000,
       "configured output tokens are a JSON number, not a rejected API string")

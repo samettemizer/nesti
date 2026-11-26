@@ -11,6 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
 # Importing the CLI must not load operator credentials or construct the engine.
 with (
     patch("dotenv.load_dotenv"),

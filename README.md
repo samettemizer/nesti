@@ -213,11 +213,6 @@ containers, waits for readiness, offers consumer provider logins, installs the
 ```bash
 ./install.sh            # interactive
 ```
-`--help` lists the options. Afterwards every `nesti` command (except `nesti
-update`, which restarts them itself) first starts the containers when one is
-stopped or removed (`docker-compose stop` / `down`), with the images already
-built: it never builds, so missing images still need `nesti update` or
-`./install.sh`.
 
 ### GitHub
 
@@ -421,9 +416,9 @@ Use [`.env.example`](.env.example) as the configuration reference:
 
 **Offline smoke tests** (no Docker, no network):
 ```bash
-python test_graph_smoke.py
-python test_plugins.py        # host plugin CLI with local Git repos and a stubbed Docker runner
-python test_update.py         # nesti update and its notice with local Git repos, a mocked API and Docker
+python tests/test_graph_smoke.py
+python tests/test_plugins.py  # host plugin CLI with local Git repos and a stubbed Docker runner
+python tests/test_update.py   # nesti update and its notice with local Git repos, a mocked API and Docker
 ```
 
 **Live integration tests** (needs Docker + network):

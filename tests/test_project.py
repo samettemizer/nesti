@@ -5,10 +5,14 @@ import fcntl
 import json
 import os
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 import project_boost
 import project_layout

@@ -1,14 +1,19 @@
 """Offline provider metadata/menu transport and API-key quota regressions.
 
-Run: .venv/bin/python -m unittest -v test_provider_cli
+Run: .venv/bin/python -m unittest -v tests.test_provider_cli
 No graph imports, real credentials, network requests or inference calls.
 """
 import contextlib
 import io
 import json
 import os
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 from scripts import oauth
 
